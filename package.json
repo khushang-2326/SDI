@@ -1,0 +1,45 @@
+{
+  "name": "lead-auto-submitter",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio",
+    "demo:benjaminmarc": "tsx services/run-benjaminmarc-demo.ts",
+    "demo:benjaminmarc:dry": "tsx services/run-benjaminmarc-demo.ts --dry-run",
+    "demo:benjaminmarc:calendly:dry": "tsx services/run-benjaminmarc-calendly-demo.ts",
+    "demo:benjaminmarc:calendly": "tsx services/run-benjaminmarc-calendly-demo.ts --live",
+    "demo:discover": "tsx services/run-discovery-demo.ts",
+    "demo:hubspot:dry": "tsx services/run-hubspot-demo.ts",
+    "demo:hubspot": "tsx services/run-hubspot-demo.ts --live",
+    "demo:marketable:dry": "tsx services/run-marketable-demo.ts",
+    "demo:marketable": "tsx services/run-marketable-demo.ts --live"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "next": "^16.2.10",
+    "playwright": "^1.61.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "ts-interface-checker": "^1.0.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.10",
+    "postcss": "^8.4.49",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.20.6",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                     String                  @id @default(cuid())
+  name                   String
+  email                  String                  @unique
+  passwordHash           String
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  leads                  Lead[]
+  targetWebsites         TargetWebsite[]
+  submissionJobs         SubmissionJob[]
+  automationTransactions AutomationTransaction[]
+}
+
+model AutomationTransaction {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  websiteUrl     String
+  resolvedUrl    String
+  targetType     String?
+  status         String
+  errorMessage   String?
+  screenshotPath String?
+  liveSubmit     Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@index([targetType])
+}
+
+model Lead {
+  id             String           @id @default(cuid())
+  fullName       String
+  mobileNumber   String
+  email          String
+  address        String
+  message        String
+  companyName    String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  submissionJobs SubmissionJob[]
+  results        SubmissionResult[]
+
+  @@index([userId])
+}
+
+model TargetWebsite {
+  id              String             @id @default(cuid())
+  websiteName     String
+  websiteUrl      String
+  contactPageUrl  String
+  status          String             @default("active")
+  notes           String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  userId          String
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  results         SubmissionResult[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model SubmissionJob {
+  id          String             @id @default(cuid())
+  status      String             @default("Pending")
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  userId      String
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  leadId      String
+  lead        Lead               @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  results     SubmissionResult[]
+
+  @@index([userId])
+  @@index([leadId])
+  @@index([status])
+}
+
+model SubmissionResult {
+  id              String           @id @default(cuid())
+  status          String           @default("Pending")
+  message         String?
+  screenshotPath  String?
+  submittedAt     DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  jobId           String
+  job             SubmissionJob    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  leadId          String
+  lead            Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  targetWebsiteId String
+  targetWebsite   TargetWebsite    @relation(fields: [targetWebsiteId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([leadId])
+  @@index([targetWebsiteId])
+  @@index([status])
+}
+
+model AutomationTransaction {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  websiteUrl     String
+  resolvedUrl    String
+  targetType     String?
+  status         String
+  errorMessage   String?
+  screenshotPath String?
+  liveSubmit     Boolean
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}

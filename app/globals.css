@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+* { scrollbar-width: thin; scrollbar-color: #818cf8 #eef2ff; }
+*:focus-visible { outline: 3px solid rgba(79, 70, 229, 0.28); outline-offset: 2px; }
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 85% 5%, rgba(99, 102, 241, 0.12), transparent 28rem),
+    radial-gradient(circle at 45% 90%, rgba(20, 184, 166, 0.08), transparent 30rem),
+    #f4f7fc;
+  color: #172033;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+input,
+textarea,
+select {
+  color: #172033;
+}
+
+::selection {
+  background: rgba(79, 70, 229, 0.18);
+}
+
+@keyframes workflow-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.55; }
+}
+
+@keyframes workflow-shimmer {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.workflow-pulse { animation: workflow-pulse 1.25s ease-in-out infinite; }
+.workflow-shimmer { animation: workflow-shimmer 1.8s linear infinite; }
+.card-enter { animation: card-enter 350ms ease-out both; content-visibility: auto; contain-intrinsic-size: 120px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-pulse,
+  .workflow-shimmer,
+  .card-enter { animation: none; }
+}

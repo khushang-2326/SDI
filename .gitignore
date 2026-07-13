@@ -1,0 +1,15 @@
+node_modules
+.next
+dist
+coverage
+.env
+*.db
+*.db-journal
+public/screenshots/*
+!public/screenshots/.gitkeep
+
+# Temp/Log files
+*.log
+tmp-*.png
+artifact_work/
+outputs/

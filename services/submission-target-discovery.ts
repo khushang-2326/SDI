@@ -1,10 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type Frame, type Page } from "playwright";
+import { chromium, type Browser, type Frame, type Page, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 import {
   DiscoverSubmissionTargetInput,
   DiscoverSubmissionTargetResult,
+  DiscoverSubmissionTargetsResult,
+  DiscoveredSubmissionTarget,
   SubmissionTargetType
 } from "@/types/automation";
 
@@ -277,6 +279,73 @@ function mergeCandidates(candidates: Candidate[], limit: number) {
     .slice(0, limit);
 }
 
+const TARGET_EXECUTION_ORDER: Record<DiscoveredSubmissionTarget["targetType"], number> = {
+  calendly: 1,
+  contact_form: 2,
+  hubspot_booking: 3,
+  booking_widget: 4
+};
+
+async function detectContactTarget(
+  page: Page,
+  websiteUrl: string,
+  candidateReason: string
+): Promise<DiscoverSubmissionTargetResult | null> {
+  const formScore = await getVisibleFormScore(page);
+  if (formScore >= 60) {
+    return {
+      websiteUrl,
+      discoveredUrl: page.url(),
+      targetType: "contact_form",
+      confidence: Math.min(90, formScore),
+      reason: `contact form fields detected; ${candidateReason}`,
+      checkedUrls: [],
+      screenshotPath: await takeScreenshot(page, websiteUrl, "contact-form-discovered").catch(() => null)
+    };
+  }
+
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame() || !/^https?:/i.test(frame.url())) continue;
+    const frameFormScore = await getVisibleFormScore(frame);
+    if (frameFormScore < 60) continue;
+    return {
+      websiteUrl,
+      discoveredUrl: frame.url(),
+      targetType: "contact_form",
+      confidence: Math.min(88, frameFormScore),
+      reason: `contact form fields detected inside an embedded frame; ${candidateReason}`,
+      checkedUrls: [],
+      screenshotPath: await takeScreenshot(page, websiteUrl, "embedded-form-discovered").catch(() => null)
+    };
+  }
+  return null;
+}
+
+async function collectSupportedExternalCandidates(page: Page, baseUrl: string): Promise<Candidate[]> {
+  return page.locator("a[href]").evaluateAll((anchors) =>
+    anchors.map((anchor) => ({
+      href: anchor.getAttribute("href") ?? "",
+      text: (anchor.textContent ?? "").replace(/\s+/g, " ").trim()
+    }))
+  ).then((links) => links.flatMap((link) => {
+    try {
+      const resolved = new URL(link.href, baseUrl);
+      const hostname = resolved.hostname.toLowerCase();
+      if (hostname !== "calendly.com" && !hostname.endsWith(".calendly.com") && hostname !== "meetings.hubspot.com") {
+        return [];
+      }
+      return [{
+        url: withoutHash(resolved.toString()),
+        score: 100,
+        reason: `supported external booking link "${link.text || resolved.hostname}"`,
+        matchedTargetHint: true
+      }];
+    } catch {
+      return [];
+    }
+  })).catch(() => []);
+}
+
 async function detectTargetOnPage(
   page: Page,
   url: string,
@@ -445,33 +514,24 @@ export async function discoverSubmissionTarget({
   headless = true,
   timeoutMs = 8000,
   maxNavigationLinks = DEFAULT_MAX_NAVIGATION_LINKS,
-  maxFallbackPaths = DEFAULT_MAX_FALLBACK_PATHS
-}: DiscoverSubmissionTargetInput): Promise<DiscoverSubmissionTargetResult> {
+  maxFallbackPaths = DEFAULT_MAX_FALLBACK_PATHS,
+  browserContext
+}: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }): Promise<DiscoverSubmissionTargetResult> {
   let browser: Browser | null = null;
+  let page: Page | null = null;
   const checkedUrls: string[] = [];
   const normalizedWebsiteUrl = ensureUrl(websiteUrl);
-  const normalizedUrl = new URL(normalizedWebsiteUrl);
-  const normalizedHostname = normalizedUrl.hostname.toLowerCase();
+  let normalizedUrl: URL;
 
-  if (normalizedHostname.includes("meetings.hubspot.com")) {
+  try {
+    normalizedUrl = new URL(normalizedWebsiteUrl);
+  } catch (error) {
     return {
       websiteUrl: normalizedWebsiteUrl,
-      discoveredUrl: normalizedWebsiteUrl,
-      targetType: "hubspot_booking",
-      confidence: 96,
-      reason: "HubSpot meetings URL found.",
-      checkedUrls: [normalizedWebsiteUrl],
-      screenshotPath: null
-    };
-  }
-
-  if (normalizedHostname === "calendly.com" || normalizedHostname.endsWith(".calendly.com")) {
-    return {
-      websiteUrl: normalizedWebsiteUrl,
-      discoveredUrl: normalizedWebsiteUrl,
-      targetType: "calendly",
-      confidence: 98,
-      reason: "Direct Calendly URL found.",
+      discoveredUrl: null,
+      targetType: "not_found",
+      confidence: 0,
+      reason: "Invalid URL provided.",
       checkedUrls: [normalizedWebsiteUrl],
       screenshotPath: null
     };
@@ -490,16 +550,20 @@ export async function discoverSubmissionTarget({
   }
 
   try {
-    browser = await chromium.launch({
-      headless,
-      executablePath: await getChromiumExecutablePath()
-    });
+    if (browserContext) {
+      page = await browserContext.newPage();
+    } else {
+      browser = await chromium.launch({
+        headless,
+        executablePath: await getChromiumExecutablePath()
+      });
 
-    const page = await browser.newPage({
-      viewport: { width: 1280, height: 820 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    });
+      page = await browser.newPage({
+        viewport: { width: 1280, height: 820 },
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+      });
+    }
     page.setDefaultTimeout(timeoutMs);
     await blockHeavyAssets(page);
 
@@ -589,6 +653,138 @@ export async function discoverSubmissionTarget({
       screenshotPath: null
     };
   } finally {
-    await browser?.close().catch(() => undefined);
+    if (page && browserContext) {
+      await page.close().catch(() => undefined);
+    } else {
+      await browser?.close().catch(() => undefined);
+    }
+  }
+}
+
+export async function discoverSubmissionTargets({
+  websiteUrl,
+  headless = true,
+  timeoutMs = 8000,
+  maxNavigationLinks = DEFAULT_MAX_NAVIGATION_LINKS,
+  maxFallbackPaths = DEFAULT_MAX_FALLBACK_PATHS,
+  browserContext
+}: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }): Promise<DiscoverSubmissionTargetsResult> {
+  const normalizedWebsiteUrl = ensureUrl(websiteUrl);
+  try {
+    new URL(normalizedWebsiteUrl);
+  } catch {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      targets: [],
+      checkedUrls: [normalizedWebsiteUrl],
+      reason: "Invalid URL provided.",
+      screenshotPath: null
+    };
+  }
+
+  let browser: Browser | null = null;
+  let page: Page | null = null;
+  const checkedUrls: string[] = [];
+  const discovered = new Map<string, DiscoveredSubmissionTarget>();
+
+  const addResult = (result: DiscoverSubmissionTargetResult | null) => {
+    if (!result?.discoveredUrl || result.targetType === "not_found") return;
+    const targetType = result.targetType;
+    const url = withoutHash(result.discoveredUrl);
+    const key = `${targetType}:${url}`;
+    const target: DiscoveredSubmissionTarget = {
+      targetType,
+      url,
+      executionOrder: TARGET_EXECUTION_ORDER[targetType],
+      confidence: result.confidence,
+      reason: result.reason,
+      screenshotPath: result.screenshotPath,
+      metadata: { discoveredFrom: normalizedWebsiteUrl }
+    };
+    const existing = discovered.get(key);
+    if (!existing || target.confidence > existing.confidence) discovered.set(key, target);
+  };
+
+  try {
+    if (browserContext) {
+      page = await browserContext.newPage();
+    } else {
+      browser = await chromium.launch({
+        headless,
+        executablePath: await getChromiumExecutablePath()
+      });
+      page = await browser.newPage({
+        viewport: { width: 1280, height: 820 },
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+      });
+    }
+    page.setDefaultTimeout(timeoutMs);
+    await blockHeavyAssets(page);
+
+    const homepageLoaded = await page.goto(normalizedWebsiteUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs
+    }).then(() => true).catch(() => false);
+
+    if (!homepageLoaded) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets: [],
+        checkedUrls: [normalizedWebsiteUrl],
+        reason: "The website could not be loaded for multi-target discovery.",
+        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
+      };
+    }
+
+    await page.waitForTimeout(700);
+    checkedUrls.push(withoutHash(page.url()));
+    addResult(await detectTargetOnPage(page, page.url(), "entered URL already works"));
+    addResult(await detectContactTarget(page, normalizedWebsiteUrl, "entered URL already works"));
+
+    const navigationCandidates = mergeCandidates([
+      ...(await collectSupportedExternalCandidates(page, page.url())),
+      ...(await collectNavigationCandidates(page, page.url()))
+    ], maxNavigationLinks);
+    const fallbackCandidates = mergeCandidates(commonPathCandidates(page.url()), maxFallbackPaths);
+    const candidates = mergeCandidates([...navigationCandidates, ...fallbackCandidates], maxNavigationLinks + maxFallbackPaths);
+
+    for (const candidate of candidates) {
+      const candidateUrl = withoutHash(candidate.url);
+      if (checkedUrls.includes(candidateUrl)) continue;
+      checkedUrls.push(candidateUrl);
+      const loaded = await page.goto(candidate.url, {
+        waitUntil: "domcontentloaded",
+        timeout: Math.min(timeoutMs, 7000)
+      }).then(() => true).catch(() => false);
+      if (!loaded) continue;
+      await page.waitForTimeout(500);
+      addResult(await detectTargetOnPage(page, page.url(), candidate.reason));
+      addResult(await detectContactTarget(page, normalizedWebsiteUrl, candidate.reason));
+    }
+
+    const targets = Array.from(discovered.values()).sort(
+      (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
+    );
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      targets,
+      checkedUrls,
+      reason: targets.length > 0
+        ? `Discovered ${targets.length} supported submission target${targets.length === 1 ? "" : "s"}.`
+        : `No supported submission target was found after checking ${checkedUrls.length} page${checkedUrls.length === 1 ? "" : "s"}.`,
+      screenshotPath: targets[0]?.screenshotPath ?? await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
+    };
+  } catch (error) {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      targets: Array.from(discovered.values()).sort((a, b) => a.executionOrder - b.executionOrder),
+      checkedUrls,
+      reason: error instanceof Error ? error.message : "Unknown multi-target discovery error.",
+      screenshotPath: null
+    };
+  } finally {
+    if (page && browserContext) await page.close().catch(() => undefined);
+    else await browser?.close().catch(() => undefined);
   }
 }

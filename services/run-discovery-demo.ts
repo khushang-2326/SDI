@@ -1,9 +1,12 @@
-import { discoverSubmissionTarget } from "@/services/submission-target-discovery";
+import { discoverSubmissionTarget, discoverSubmissionTargets } from "@/services/submission-target-discovery";
 
 const websiteUrl = process.argv[2] ?? "https://www.benjaminmarc.com/";
 
 async function main() {
-  const result = await discoverSubmissionTarget({
+  const result = process.argv.includes("--all") ? await discoverSubmissionTargets({
+    websiteUrl,
+    timeoutMs: 9000
+  }) : await discoverSubmissionTarget({
     websiteUrl,
     timeoutMs: 9000
   });

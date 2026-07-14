@@ -7,6 +7,8 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
   const user = await requireUser();
   const filters = await searchParams;
   const days = filters.range === "all" ? null : Number(filters.range || 30);
+  // Server-side analytics intentionally use the current request time as the range boundary.
+  // eslint-disable-next-line react-hooks/purity
   const createdAt = days ? { gte: new Date(Date.now() - days * 86400000) } : undefined;
   const rows = await prisma.automationTransaction.findMany({ where: { userId: user.id, createdAt, status: filters.status || undefined, targetType: filters.targetType || undefined, websiteUrl: filters.website ? { contains: filters.website } : undefined }, orderBy: { createdAt: "desc" } });
   const total = rows.length;

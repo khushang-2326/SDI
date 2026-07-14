@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type Locator, type Page } from "playwright";
+import { chromium, type Browser, type Locator, type Page, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 import { prisma } from "@/lib/prisma";
 import {
@@ -464,8 +464,10 @@ export async function submitContactForm({
   leadData,
   headless = true,
   submit = true,
-  timeoutMs = 30000
-}: SubmitContactFormInput): Promise<SubmitContactFormResult> {
+  timeoutMs = 30000,
+  browserContext,
+  skipPersist
+}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean }): Promise<SubmitContactFormResult> {
   let browser: Browser | null = null;
   let page: Page | null = null;
   const submittedAt = new Date();
@@ -474,15 +476,19 @@ export async function submitContactForm({
   let skippedFields: string[] = [];
 
   try {
-    browser = await chromium.launch({
-      headless,
-      executablePath: await getChromiumExecutablePath()
-    });
-    page = await browser.newPage({
-      viewport: { width: 1366, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    });
+    if (browserContext) {
+      page = await browserContext.newPage();
+    } else {
+      browser = await chromium.launch({
+        headless,
+        executablePath: await getChromiumExecutablePath()
+      });
+      page = await browser.newPage({
+        viewport: { width: 1366, height: 900 },
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+      });
+    }
     page.setDefaultTimeout(timeoutMs);
 
     await page.goto(websiteUrl, {
@@ -511,7 +517,9 @@ export async function submitContactForm({
           reason: bookingWidget.reason ?? "booking widget detected"
         });
 
-        await persistResult(result, leadData);
+        if (!skipPersist) {
+          await persistResult(result, leadData);
+        }
         return result;
       }
 
@@ -544,7 +552,9 @@ export async function submitContactForm({
       bookingWidgetReason: null
     };
 
-    await persistResult(result, leadData);
+    if (!skipPersist) {
+      await persistResult(result, leadData);
+    }
     return result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown automation error.";
@@ -566,9 +576,15 @@ export async function submitContactForm({
       bookingWidgetReason: null
     };
 
-    await persistResult(result, leadData).catch(() => undefined);
+    if (!skipPersist) {
+      await persistResult(result, leadData).catch(() => undefined);
+    }
     return result;
   } finally {
-    await browser?.close().catch(() => undefined);
+    if (page && browserContext) {
+      await page.close().catch(() => undefined);
+    } else {
+      await browser?.close().catch(() => undefined);
+    }
   }
 }

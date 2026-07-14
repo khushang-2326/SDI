@@ -32,6 +32,7 @@ model AutomationTransaction {
   screenshotPath String?
   liveSubmit     Boolean  @default(false)
   createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@index([userId, createdAt])
   @@index([status])
@@ -68,6 +69,7 @@ model TargetWebsite {
   userId          String
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   results         SubmissionResult[]
+  discoveredTargets DiscoveredSubmissionTarget[]
 
   @@index([userId])
   @@index([status])
@@ -105,6 +107,7 @@ model SubmissionResult {
   lead            Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
   targetWebsiteId String
   targetWebsite   TargetWebsite    @relation(fields: [targetWebsiteId], references: [id], onDelete: Cascade)
+  attempts        SubmissionAttempt[]
 
   @@index([jobId])
   @@index([leadId])
@@ -112,20 +115,72 @@ model SubmissionResult {
   @@index([status])
 }
 
-model AutomationTransaction {
-  id             String   @id @default(cuid())
-  userId         String
-  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  websiteUrl     String
-  resolvedUrl    String
-  targetType     String?
-  status         String
-  errorMessage   String?
-  screenshotPath String?
-  liveSubmit     Boolean
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+model DiscoveredSubmissionTarget {
+  id              String              @id @default(cuid())
+  targetType      String
+  url             String
+  executionOrder  Int
+  confidence      Int                 @default(0)
+  metadata        String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  targetWebsiteId String
+  targetWebsite   TargetWebsite       @relation(fields: [targetWebsiteId], references: [id], onDelete: Cascade)
+  attempts        SubmissionAttempt[]
 
-  @@index([userId])
+  @@unique([targetWebsiteId, targetType, url])
+  @@index([targetWebsiteId, executionOrder])
+  @@index([targetType])
+}
+
+model SubmissionAttempt {
+  id                 String                       @id @default(cuid())
+  status             String                       @default("Pending")
+  targetType         String
+  targetUrl          String
+  executionOrder     Int
+  message            String?
+  errorMessage       String?
+  screenshotPath     String?
+  screenshotPaths    String?
+  metadata           String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  submittedAt        DateTime?
+  createdAt          DateTime                     @default(now())
+  updatedAt          DateTime                     @updatedAt
+  submissionResultId String
+  submissionResult   SubmissionResult             @relation(fields: [submissionResultId], references: [id], onDelete: Cascade)
+  discoveredTargetId String?
+  discoveredTarget   DiscoveredSubmissionTarget?  @relation(fields: [discoveredTargetId], references: [id], onDelete: SetNull)
+  logs               SubmissionAttemptLog[]
+
+  @@index([submissionResultId, executionOrder])
+  @@index([discoveredTargetId])
   @@index([status])
+  @@index([targetType])
+}
+
+model SubmissionAttemptLog {
+  id        String             @id @default(cuid())
+  level     String             @default("info")
+  message   String
+  details   String?
+  createdAt DateTime           @default(now())
+  attemptId String
+  attempt   SubmissionAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@index([attemptId, createdAt])
+}
+
+model JobLog {
+  id        String   @id @default(cuid())
+  jobId     String
+  level     String   @default("info")
+  message   String
+  details   String?
+  createdAt DateTime @default(now())
+
+  @@index([jobId])
+  @@index([createdAt])
 }

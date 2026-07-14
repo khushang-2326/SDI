@@ -1,11 +1,12 @@
 "use client";
 
 import type { ChangeEvent, FormEvent } from "react";
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useCallback, useEffect, useRef, useState } from "react";
 import {
   runAutomationAction,
   startBackgroundAutomationAction,
   getBackgroundAutomationAction,
+  processLocalBackgroundAutomationAction,
   cancelBackgroundAutomationAction,
   resetBackgroundAutomationAction,
   type AutomationResult,
@@ -42,6 +43,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+  const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
+  const cancelledJobId = useRef<string | null>(null);
   const usingUploadedWebsite = sourceMode === "excel";
   const processingAllUploaded = selectedWebsiteId.startsWith("__file__:");
   const selectedFileGroup = fileGroups.find((group) => `__file__:${group.fileName}` === selectedWebsiteId);
@@ -54,19 +57,76 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     ? Math.round((finishedCount / liveBatchItems.length) * 100)
     : 0;
 
-  function applyBackgroundJob(job: Awaited<ReturnType<typeof getBackgroundAutomationAction>>) {
+  const applyBackgroundJob = useCallback((job: Awaited<ReturnType<typeof getBackgroundAutomationAction>>) => {
     if (!job) return;
+    if (cancelledJobId.current === job.id && job.status !== "cancelled") return;
     setLiveBatchItems(job.items);
     setCurrentJobId(job.id);
     setIsBatchRunning(job.status === "running");
-    if (job.status === "running") window.setTimeout(() => void pollBackgroundJob(job.id), 1200);
+    setBatchStatus(job.status);
+  }, []);
+
+  async function cancelAutomation() {
+    if (!currentJobId) return;
+    cancelledJobId.current = currentJobId;
+    setIsBatchRunning(false);
+    setBatchStatus("cancelled");
+    setLiveBatchItems((items) =>
+      items.map((item) =>
+        item.status === "completed" || item.status === "failed"
+          ? item
+          : { ...item, status: "cancelled", detail: "Cancelled by user" }
+      )
+    );
+    await cancelBackgroundAutomationAction(currentJobId).catch(() => undefined);
   }
+  async function resetAutomation() { if (!currentJobId || isBatchRunning) return; if (await resetBackgroundAutomationAction(currentJobId)) { cancelledJobId.current = null; setLiveBatchItems([]); setCurrentJobId(null); setIsBatchRunning(false); setBatchStatus("idle"); } }
 
-  async function pollBackgroundJob(jobId: string) { applyBackgroundJob(await getBackgroundAutomationAction(jobId)); }
-  async function cancelAutomation() { if (currentJobId) applyBackgroundJob(await cancelBackgroundAutomationAction(currentJobId)); }
-  async function resetAutomation() { if (!currentJobId || isBatchRunning) return; if (await resetBackgroundAutomationAction(currentJobId)) { setLiveBatchItems([]); setCurrentJobId(null); setIsBatchRunning(false); } }
+  useEffect(() => {
+    void getBackgroundAutomationAction().then(applyBackgroundJob);
+  }, [applyBackgroundJob]);
 
-  useEffect(() => { void getBackgroundAutomationAction().then(applyBackgroundJob); }, []);
+  useEffect(() => {
+    if (!currentJobId || !isBatchRunning) return;
+    const jobId = currentJobId;
+    let stopped = false;
+
+    async function refreshProgress() {
+      while (!stopped) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        if (stopped) return;
+
+        const job = await getBackgroundAutomationAction(jobId).catch(() => null);
+        if (stopped) return;
+        if (job) applyBackgroundJob(job);
+        if (!job || job.status !== "running") return;
+      }
+    }
+
+    void refreshProgress();
+    return () => { stopped = true; };
+  }, [applyBackgroundJob, currentJobId, isBatchRunning]);
+
+  useEffect(() => {
+    if (!currentJobId || !isBatchRunning) return;
+    const jobId = currentJobId;
+    let stopped = false;
+
+    async function processSequentially() {
+      while (!stopped) {
+        const job = await processLocalBackgroundAutomationAction(jobId).catch(() => null);
+        if (stopped) return;
+        if (job) applyBackgroundJob(job);
+        if (!job || job.status !== "running") return;
+
+        // Avoid request contention if another open dashboard tab currently owns the job lock.
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+      }
+    }
+
+    void processSequentially();
+    return () => { stopped = true; };
+  }, [applyBackgroundJob, currentJobId, isBatchRunning]);
 
   async function submitWorkflow(event: FormEvent<HTMLFormElement>) {
     if (!processingAllUploaded) {
@@ -87,10 +147,12 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     }));
     setLiveBatchItems(initialItems);
     setIsBatchRunning(true);
+    setBatchStatus("running");
+    cancelledJobId.current = null;
 
     baseFormData.set("websiteIds", JSON.stringify(batchWebsites.map((website) => website.id)));
     try { applyBackgroundJob(await startBackgroundAutomationAction(baseFormData)); }
-    catch (error) { setIsBatchRunning(false); setLiveBatchItems((items) => items.map((item) => ({ ...item, status: "failed", detail: error instanceof Error ? error.message : "Unable to start background automation" }))); }
+    catch (error) { setIsBatchRunning(false); setBatchStatus("completed"); setLiveBatchItems((items) => items.map((item) => ({ ...item, status: "failed", detail: error instanceof Error ? error.message : "Unable to start background automation" }))); }
   }
 
   function openMonitorTab(form: HTMLFormElement) {
@@ -276,7 +338,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand">Activity stream</p>
             <h2 className="mt-1 text-xl font-bold text-ink">Workflow result</h2>
           </div>
-          <div className="flex items-center gap-2"><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${isBatchRunning ? "bg-indigo-100 text-indigo-700" : "bg-emerald-100 text-emerald-700"}`}>{isBatchRunning ? "● Automation running" : "● Ready"}</span>{isBatchRunning ? <button className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-700" onClick={cancelAutomation} type="button">Cancel</button> : null}<button className="rounded-xl border border-line bg-white px-4 py-2 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400" disabled={isBatchRunning || !currentJobId || liveBatchItems.length === 0} onClick={resetAutomation} type="button">Reset</button></div>
+          <div className="flex items-center gap-2"><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${isBatchRunning ? "bg-indigo-100 text-indigo-700" : batchStatus === "cancelled" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>{isBatchRunning ? "● Automation running" : batchStatus === "cancelled" ? "● Cancelled" : "● Ready"}</span>{isBatchRunning ? <button className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-700" onClick={cancelAutomation} type="button">Cancel</button> : null}<button className="rounded-xl border border-line bg-white px-4 py-2 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400" disabled={isBatchRunning || !currentJobId || liveBatchItems.length === 0} onClick={resetAutomation} type="button">Reset</button></div>
         </div>
         <div className="flex-1 overflow-y-auto p-6 [scrollbar-width:thin]">
         {liveBatchItems.length > 0 ? (
@@ -315,6 +377,32 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                   <a className="mt-2 block text-xs font-semibold text-brand" href={item.result.screenshotPath} target="_blank">
                     Open latest screenshot
                   </a>
+                ) : null}
+                {item.result?.attempts?.length ? (
+                  <div className="mt-3 space-y-2 border-t border-line/70 pt-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted">Target attempts</p>
+                    {item.result.attempts.map((attempt) => (
+                      <div className="rounded-xl border border-line bg-white/80 p-3" key={attempt.id}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <p className="text-xs font-semibold text-ink">
+                              {attempt.executionOrder}. {attempt.targetType}
+                            </p>
+                            <p className="break-all text-[11px] text-muted">{attempt.targetUrl}</p>
+                          </div>
+                          <span className="rounded-full bg-canvas px-2 py-1 text-[11px] font-semibold">
+                            {attempt.status}
+                          </span>
+                        </div>
+                        {attempt.errorMessage ? <p className="mt-2 text-xs text-red-700">{attempt.errorMessage}</p> : null}
+                        {attempt.screenshotPath ? (
+                          <a className="mt-2 block text-xs font-semibold text-brand" href={attempt.screenshotPath} target="_blank">
+                            Open target screenshot
+                          </a>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
                 ) : null}
               </div>
             ))}

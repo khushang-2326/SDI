@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type Locator, type Page } from "playwright";
+import { chromium, type Browser, type Locator, type Page, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 import { prisma } from "@/lib/prisma";
 import {
@@ -369,8 +369,10 @@ export async function submitHubSpotBooking({
   bookingPreferences = {},
   liveSubmit = false,
   headless = true,
-  timeoutMs = 35000
-}: SubmitCalendlyBookingInput): Promise<SubmitContactFormResult> {
+  timeoutMs = 35000,
+  browserContext,
+  skipPersist
+}: SubmitCalendlyBookingInput & { browserContext?: BrowserContext; skipPersist?: boolean }): Promise<SubmitContactFormResult> {
   let browser: Browser | null = null;
   let page: Page | null = null;
   const submittedAt = new Date();
@@ -402,20 +404,26 @@ export async function submitHubSpotBooking({
       selectedTime
     };
 
-    await persistResult(result, leadData).catch(() => undefined);
+    if (!skipPersist) {
+      await persistResult(result, leadData).catch(() => undefined);
+    }
     return result;
   }
 
   try {
-    browser = await chromium.launch({
-      headless,
-      executablePath: await getChromiumExecutablePath()
-    });
-    page = await browser.newPage({
-      viewport: { width: 1366, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    });
+    if (browserContext) {
+      page = await browserContext.newPage();
+    } else {
+      browser = await chromium.launch({
+        headless,
+        executablePath: await getChromiumExecutablePath()
+      });
+      page = await browser.newPage({
+        viewport: { width: 1366, height: 900 },
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+      });
+    }
     page.setDefaultTimeout(timeoutMs);
 
     await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
@@ -464,6 +472,10 @@ export async function submitHubSpotBooking({
     const errorMessage = error instanceof Error ? error.message : "Unknown HubSpot error.";
     return finish("failed", errorMessage);
   } finally {
-    await browser?.close().catch(() => undefined);
+    if (page && browserContext) {
+      await page.close().catch(() => undefined);
+    } else {
+      await browser?.close().catch(() => undefined);
+    }
   }
 }

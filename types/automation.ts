@@ -77,3 +77,21 @@ export type DiscoverSubmissionTargetResult = {
   checkedUrls: string[];
   screenshotPath: string | null;
 };
+
+export type DiscoveredSubmissionTarget = {
+  targetType: Exclude<SubmissionTargetType, "not_found">;
+  url: string;
+  executionOrder: number;
+  confidence: number;
+  reason: string;
+  screenshotPath: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type DiscoverSubmissionTargetsResult = {
+  websiteUrl: string;
+  targets: DiscoveredSubmissionTarget[];
+  checkedUrls: string[];
+  reason: string;
+  screenshotPath: string | null;
+};

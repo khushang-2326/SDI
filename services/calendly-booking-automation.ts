@@ -5,7 +5,8 @@ import {
   type Browser,
   type FrameLocator,
   type Locator,
-  type Page
+  type Page,
+  type BrowserContext
 } from "playwright";
 
 type CalendlyScope = Page | FrameLocator;
@@ -52,10 +53,6 @@ function parseDayFromPreference(value?: string) {
 
 function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
@@ -154,11 +151,8 @@ async function findCalendlyFrame(page: Page) {
     .locator('iframe[src*="calendly" i], iframe[title*="Calendly" i]')
     .first();
 
-  if ((await iframe.count()) === 0) {
-    return null;
-  }
-
-  await iframe.waitFor({ state: "attached", timeout: 15000 });
+  await iframe.waitFor({ state: "attached", timeout: 10000 }).catch(() => undefined);
+  if ((await iframe.count()) === 0) return null;
   const frameElement = await iframe.elementHandle();
   const frame = await frameElement?.contentFrame();
 
@@ -170,15 +164,18 @@ async function findCalendlyFrame(page: Page) {
 }
 
 async function waitForCalendlyLoaded(frame: CalendlyScope) {
-  await frame
-    .locator("body")
-    .waitFor({ state: "visible", timeout: 30000 });
-  await frame
+  await frame.locator("body").waitFor({ state: "visible", timeout: 20000 });
+  const availableDate = frame
+    .locator('button[aria-label*="times available" i]:not([aria-label*="no times available" i])')
+    .first();
+  const schedulerText = frame
     .locator("body")
     .getByText(/select a date|choose a time|schedule|book/i)
-    .first()
-    .waitFor({ state: "visible", timeout: 30000 })
-    .catch(() => undefined);
+    .first();
+  await Promise.race([
+    availableDate.waitFor({ state: "visible", timeout: 15000 }),
+    schedulerText.waitFor({ state: "visible", timeout: 15000 })
+  ]);
 }
 
 function getCandidateButtons(frame: CalendlyScope) {
@@ -193,6 +190,13 @@ async function chooseDate(
   const preferred = normalizePreference(preferredDate);
   const preferredDay = parseDayFromPreference(preferredDate);
   const buttons = getCandidateButtons(frame);
+  await frame
+    .locator(
+      'button[aria-label*="times available" i]:not([aria-label*="no times available" i])'
+    )
+    .first()
+    .waitFor({ state: "visible", timeout: 12000 })
+    .catch(() => undefined);
   const candidates = await buttons.evaluateAll((elements) =>
     elements
       .map((element, index) => {
@@ -213,9 +217,12 @@ async function chooseDate(
           /^\d{1,2}$/.test(text) ||
           /\b(available|select|choose)\b.*\b\d{1,2}\b/i.test(ariaLabel) ||
           /\b\d{1,2}\b.*\b(available|select|choose)\b/i.test(ariaLabel);
+        const availabilityText = `${ariaLabel} ${className}`;
+        const explicitlyUnavailable =
+          /\bno\s+times?\s+available\b|\bunavailable\b/i.test(availabilityText);
         const likelyAvailable =
-          /\bavailable\b/i.test(`${ariaLabel} ${className}`) ||
-          (!/\bunavailable\b/i.test(`${ariaLabel} ${className}`) &&
+          !explicitlyUnavailable &&
+          (/\btimes?\s+available\b/i.test(availabilityText) ||
             !/\bdisabled\b/i.test(className));
 
         return {
@@ -333,30 +340,13 @@ async function chooseTime(
   const clickTarget = (await selectedLocator.count()) > 0 ? selectedLocator : buttons.nth(selected.index);
 
   await clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-  await clickTarget.click({ timeout: 10000 }).catch(() => undefined);
-  await sleep(700);
-
-  if (!(await hasProgressButton(frame))) {
+  try {
+    await clickTarget.click({ timeout: 10000 });
+  } catch {
     await clickTarget.press("Enter", { timeout: 3000 }).catch(() => undefined);
-    await sleep(700);
-  }
-
-  if (!(await hasProgressButton(frame))) {
-    await clickTarget
-      .evaluate((element) => (element as HTMLElement).click())
-      .catch(() => undefined);
-    await sleep(700);
   }
 
   return selected.text.trim() || selected.ariaLabel;
-}
-
-async function hasProgressButton(frame: CalendlyScope) {
-  const button = frame.locator("button, [role='button']").filter({
-    hasText: /next|continue|confirm/i
-  }).first();
-
-  return (await button.count()) > 0 && (await button.isVisible().catch(() => false));
 }
 
 async function clickProgressButton(frame: CalendlyScope, labels: RegExp) {
@@ -364,13 +354,13 @@ async function clickProgressButton(frame: CalendlyScope, labels: RegExp) {
 
   if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
     await button.scrollIntoViewIfNeeded().catch(() => undefined);
-    await button.click({ timeout: 10000 }).catch(() => undefined);
-    await sleep(700);
-    await button.click({ timeout: 5000, force: true }).catch(() => undefined);
-    await sleep(700);
-    await button.press("Enter", { timeout: 3000 }).catch(() => undefined);
-    await sleep(700);
-    await button.evaluate((element) => (element as HTMLElement).click()).catch(() => undefined);
+    try {
+      await button.click({ timeout: 10000 });
+    } catch {
+      await button.click({ timeout: 3000, force: true }).catch(async () => {
+        await button.press("Enter", { timeout: 3000 }).catch(() => undefined);
+      });
+    }
     return true;
   }
 
@@ -382,8 +372,15 @@ async function inviteeFormVisible(frame: CalendlyScope) {
     'input[type="email"], input[name*="name" i], input[aria-label*="Name" i], textarea'
   );
 
-  await formFields.first().waitFor({ state: "visible", timeout: 8000 }).catch(() => undefined);
   return (await formFields.count()) > 0 && (await formFields.first().isVisible().catch(() => false));
+}
+
+async function waitForInviteeForm(frame: CalendlyScope, timeout = 10000) {
+  const formFields = frame.locator(
+    'input[type="email"], input[name*="name" i], input[aria-label*="Name" i], textarea'
+  );
+  await formFields.first().waitFor({ state: "visible", timeout }).catch(() => undefined);
+  return inviteeFormVisible(frame);
 }
 
 async function fillFirstAvailable(locators: Locator[], value: string, lookupTimeoutMs = 700) {
@@ -396,8 +393,7 @@ async function fillFirstAvailable(locators: Locator[], value: string, lookupTime
     if (!(await first.isEnabled().catch(() => false))) continue;
 
     await first.scrollIntoViewIfNeeded().catch(() => undefined);
-    await first.fill("", { timeout: 3000 }).catch(() => undefined);
-    await first.pressSequentially(value, { delay: 45, timeout: 10000 });
+    await first.fill(value, { timeout: 5000 });
     return true;
   }
 
@@ -483,14 +479,18 @@ async function fillCalendlyForm(frame: CalendlyScope, leadData: LeadData) {
 }
 
 async function confirmationFound(page: Page, frame: CalendlyScope) {
-  await page.waitForTimeout(3000);
+  const confirmationPattern =
+    /you are scheduled|confirmed|a calendar invitation has been sent/i;
+  await Promise.race([
+    page.waitForURL(/scheduled_events/i, { timeout: 10000 }),
+    page.getByText(confirmationPattern).first().waitFor({ state: "visible", timeout: 10000 }),
+    frame.getByText(confirmationPattern).first().waitFor({ state: "visible", timeout: 10000 })
+  ]).catch(() => undefined);
 
   if (page.url().includes("scheduled_events")) {
     return true;
   }
 
-  const confirmationPattern =
-    /you are scheduled|confirmed|a calendar invitation has been sent/i;
   const pageText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
   const frameText = await frame.locator("body").innerText({ timeout: 5000 }).catch(() => "");
 
@@ -503,8 +503,10 @@ export async function submitCalendlyBooking({
   bookingPreferences = {},
   liveSubmit = false,
   headless = true,
-  timeoutMs = 45000
-}: SubmitCalendlyBookingInput): Promise<SubmitContactFormResult> {
+  timeoutMs = 45000,
+  browserContext,
+  skipPersist
+}: SubmitCalendlyBookingInput & { browserContext?: BrowserContext; skipPersist?: boolean }): Promise<SubmitContactFormResult> {
   let browser: Browser | null = null;
   let page: Page | null = null;
   const submittedAt = new Date();
@@ -536,24 +538,29 @@ export async function submitCalendlyBooking({
       selectedTime
     };
 
-    await persistResult(result, leadData).catch(() => undefined);
+    if (!skipPersist) {
+      await persistResult(result, leadData).catch(() => undefined);
+    }
     return result;
   }
 
   try {
-    browser = await chromium.launch({
-      headless,
-      executablePath: await getChromiumExecutablePath()
-    });
-    page = await browser.newPage({
-      viewport: { width: 1366, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    });
+    if (browserContext) {
+      page = await browserContext.newPage();
+    } else {
+      browser = await chromium.launch({
+        headless,
+        executablePath: await getChromiumExecutablePath()
+      });
+      page = await browser.newPage({
+        viewport: { width: 1366, height: 900 },
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+      });
+    }
     page.setDefaultTimeout(timeoutMs);
 
     await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => undefined);
 
     const frame = await findCalendlyFrame(page);
 
@@ -574,7 +581,6 @@ export async function submitCalendlyBooking({
       return finish("no_available_slots", "No available Calendly date buttons were found.");
     }
 
-    await page.waitForTimeout(1500);
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "date-selected"));
 
     selectedTime = await chooseTime(
@@ -587,20 +593,18 @@ export async function submitCalendlyBooking({
       return finish("no_available_slots", "No available Calendly time slots were found.");
     }
 
-    await page.waitForTimeout(1000);
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "time-selected"));
 
     // Calendly currently has two booking layouts. Older layouts reveal a
     // Next/Continue button after the time is chosen; newer layouts navigate
     // directly to the invitee form. A progress button is therefore optional.
-    let formVisible = await inviteeFormVisible(frame);
+    let formVisible = await waitForInviteeForm(frame, 2500);
 
     if (!formVisible) {
       const didContinue = await clickProgressButton(frame, /next|continue|confirm/i);
 
       if (didContinue) {
-        await page.waitForTimeout(2000);
-        formVisible = await inviteeFormVisible(frame);
+        formVisible = await waitForInviteeForm(frame);
       }
     }
 
@@ -638,6 +642,10 @@ export async function submitCalendlyBooking({
     const errorMessage = error instanceof Error ? error.message : "Unknown Calendly error.";
     return finish("failed", errorMessage);
   } finally {
-    await browser?.close().catch(() => undefined);
+    if (page && browserContext) {
+      await page.close().catch(() => undefined);
+    } else {
+      await browser?.close().catch(() => undefined);
+    }
   }
 }

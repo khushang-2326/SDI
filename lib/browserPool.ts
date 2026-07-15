@@ -1,15 +1,24 @@
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 
-let browserInstance: Browser | null = null;
-let launchPromise: Promise<Browser> | null = null;
-let contextCount = 0;
+type BrowserMode = "headless" | "headed";
+
+type PooledBrowser = {
+  browser: Browser | null;
+  launchPromise: Promise<Browser> | null;
+  contextCount: number;
+};
+
+const browserPools: Record<BrowserMode, PooledBrowser> = {
+  headless: { browser: null, launchPromise: null, contextCount: 0 },
+  headed: { browser: null, launchPromise: null, contextCount: 0 }
+};
 const MAX_CONTEXTS_PER_BROWSER = 50;
 
-async function launchBrowser(): Promise<Browser> {
+async function launchBrowser(headless: boolean): Promise<Browser> {
   const executablePath = await getChromiumExecutablePath();
   const launchOptions: Parameters<typeof chromium.launch>[0] = {
-    headless: true,
+    headless,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -27,45 +36,48 @@ async function launchBrowser(): Promise<Browser> {
   return browser;
 }
 
-export async function getBrowser(): Promise<Browser> {
+export async function getBrowser(headless = true): Promise<Browser> {
+  const mode: BrowserMode = headless ? "headless" : "headed";
+  const pool = browserPools[mode];
   // If the browser is disconnected or has handled too many contexts, recycle it
-  if (browserInstance && (!browserInstance.isConnected() || contextCount >= MAX_CONTEXTS_PER_BROWSER)) {
-    console.log(`[BrowserPool] Recycling browser instance. Contexts handled: ${contextCount}`);
-    await browserInstance.close().catch(() => undefined);
-    browserInstance = null;
-    contextCount = 0;
+  if (pool.browser && (!pool.browser.isConnected() || pool.contextCount >= MAX_CONTEXTS_PER_BROWSER)) {
+    console.log(`[BrowserPool] Recycling ${mode} browser instance. Contexts handled: ${pool.contextCount}`);
+    await pool.browser.close().catch(() => undefined);
+    pool.browser = null;
+    pool.contextCount = 0;
   }
 
-  if (browserInstance) {
-    return browserInstance;
+  if (pool.browser) {
+    return pool.browser;
   }
 
-  if (launchPromise) {
-    return launchPromise;
+  if (pool.launchPromise) {
+    return pool.launchPromise;
   }
 
-  launchPromise = launchBrowser().then((browser) => {
-    browserInstance = browser;
-    launchPromise = null;
+  pool.launchPromise = launchBrowser(headless).then((browser) => {
+    pool.browser = browser;
+    pool.launchPromise = null;
     return browser;
   }).catch((err) => {
-    launchPromise = null;
+    pool.launchPromise = null;
     throw err;
   });
 
-  return launchPromise;
+  return pool.launchPromise;
 }
 
 /**
  * Creates and returns a new BrowserContext from the browser pool.
  */
-export async function acquireContext(): Promise<BrowserContext> {
-  const browser = await getBrowser();
+export async function acquireContext(options: { headless?: boolean } = {}): Promise<BrowserContext> {
+  const headless = options.headless ?? true;
+  const browser = await getBrowser(headless);
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   });
-  contextCount++;
+  browserPools[headless ? "headless" : "headed"].contextCount++;
   return context;
 }
 
@@ -82,9 +94,11 @@ export async function releaseContext(context: BrowserContext): Promise<void> {
  * Closes the browser pool entirely on worker shutdown.
  */
 export async function closePool(): Promise<void> {
-  if (browserInstance) {
-    await browserInstance.close().catch(() => undefined);
-    browserInstance = null;
-    contextCount = 0;
+  for (const pool of Object.values(browserPools)) {
+    if (pool.browser) {
+      await pool.browser.close().catch(() => undefined);
+      pool.browser = null;
+      pool.contextCount = 0;
+    }
   }
 }

@@ -346,6 +346,30 @@ async function collectSupportedExternalCandidates(page: Page, baseUrl: string): 
   })).catch(() => []);
 }
 
+function resultFromSupportedExternalCandidate(
+  websiteUrl: string,
+  candidate: Candidate
+): DiscoverSubmissionTargetResult | null {
+  const resolved = new URL(candidate.url);
+  const hostname = resolved.hostname.toLowerCase();
+  const targetType = hostname === "meetings.hubspot.com"
+    ? "hubspot_booking"
+    : hostname === "calendly.com" || hostname.endsWith(".calendly.com")
+      ? "calendly"
+      : null;
+
+  if (!targetType) return null;
+  return {
+    websiteUrl,
+    discoveredUrl: withoutHash(resolved.toString()),
+    targetType,
+    confidence: targetType === "calendly" ? 98 : 96,
+    reason: `${candidate.reason}; detected directly from the website booking link`,
+    checkedUrls: [],
+    screenshotPath: null
+  };
+}
+
 async function detectTargetOnPage(
   page: Page,
   url: string,
@@ -742,8 +766,13 @@ export async function discoverSubmissionTargets({
     addResult(await detectTargetOnPage(page, page.url(), "entered URL already works"));
     addResult(await detectContactTarget(page, normalizedWebsiteUrl, "entered URL already works"));
 
+    const supportedExternalCandidates = await collectSupportedExternalCandidates(page, page.url());
+    for (const candidate of supportedExternalCandidates) {
+      addResult(resultFromSupportedExternalCandidate(normalizedWebsiteUrl, candidate));
+    }
+
     const navigationCandidates = mergeCandidates([
-      ...(await collectSupportedExternalCandidates(page, page.url())),
+      ...supportedExternalCandidates,
       ...(await collectNavigationCandidates(page, page.url()))
     ], maxNavigationLinks);
     const fallbackCandidates = mergeCandidates(commonPathCandidates(page.url()), maxFallbackPaths);

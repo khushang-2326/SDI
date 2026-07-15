@@ -431,7 +431,8 @@ async function processLocalQueueResult(userId: string, resultId: string) {
         where: { id: record.targetWebsiteId, userId }
       });
       if (!website) throw new Error("Target website record not found.");
-      const context = await acquireContext();
+      const showBrowser = payloadFields.get("showBrowser") === "on";
+      const context = await acquireContext({ headless: !showBrowser });
       try {
         const targetIds = new Map<string, string>();
         const attemptIds = new Map<string, string>();

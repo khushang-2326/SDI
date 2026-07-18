@@ -31,6 +31,8 @@ export type MultiTargetCallbacks = {
   onAttemptFinished?: (attempt: MultiTargetAttemptResult) => Promise<void>;
 };
 
+const MAX_SUCCESSFUL_TARGETS_PER_WEBSITE = 3;
+
 function failedResult(target: DiscoveredSubmissionTarget, error: unknown): SubmitContactFormResult {
   return {
     websiteUrl: target.url,
@@ -103,6 +105,7 @@ export async function runMultiTargetAutomation({
   liveSubmit,
   browserContext,
   timeoutMs,
+  maxSuccessfulAttempts = 3,
   callbacks = {}
 }: {
   websiteUrl: string;
@@ -111,8 +114,13 @@ export async function runMultiTargetAutomation({
   liveSubmit: boolean;
   browserContext: BrowserContext;
   timeoutMs: number;
+  maxSuccessfulAttempts?: number;
   callbacks?: MultiTargetCallbacks;
 }): Promise<MultiTargetRunResult> {
+  const successLimit = Math.min(
+    MAX_SUCCESSFUL_TARGETS_PER_WEBSITE,
+    Math.max(1, Math.floor(maxSuccessfulAttempts))
+  );
   const discovery = await discoverSubmissionTargets({
     websiteUrl,
     timeoutMs,
@@ -124,6 +132,10 @@ export async function runMultiTargetAutomation({
 
   const attempts: MultiTargetAttemptResult[] = [];
   for (const target of discovery.targets) {
+    const successfulAttemptCount = attempts.filter((attempt) =>
+      ["success", "dry_run_ready_to_book"].includes(attempt.result.status)
+    ).length;
+    if (successfulAttemptCount >= successLimit) break;
     const startedAt = new Date();
     await callbacks.onAttemptStarted?.(target);
     let result: SubmitContactFormResult;

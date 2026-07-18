@@ -44,6 +44,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
+  const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
+  const [clock, setClock] = useState(() => Date.now());
   const cancelledJobId = useRef<string | null>(null);
   const usingUploadedWebsite = sourceMode === "excel";
   const processingAllUploaded = selectedWebsiteId.startsWith("__file__:");
@@ -56,15 +58,27 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const progressPercent = liveBatchItems.length
     ? Math.round((finishedCount / liveBatchItems.length) * 100)
     : 0;
+  const elapsedMs = jobStartedAt ? Math.max(0, clock - jobStartedAt) : 0;
+  const estimatedRemainingMs = finishedCount > 0
+    ? Math.max(0, (elapsedMs / finishedCount) * (liveBatchItems.length - finishedCount))
+    : null;
 
   const applyBackgroundJob = useCallback((job: Awaited<ReturnType<typeof getBackgroundAutomationAction>>) => {
     if (!job) return;
     if (cancelledJobId.current === job.id && job.status !== "cancelled") return;
     setLiveBatchItems(job.items);
     setCurrentJobId(job.id);
+    setJobStartedAt(new Date(job.createdAt).getTime());
     setIsBatchRunning(job.status === "running");
     setBatchStatus(job.status);
   }, []);
+
+  useEffect(() => {
+    if (!isBatchRunning) return;
+    setClock(Date.now());
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isBatchRunning]);
 
   async function cancelAutomation() {
     if (!currentJobId) return;
@@ -146,6 +160,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
       detail: "Waiting to start"
     }));
     setLiveBatchItems(initialItems);
+    setJobStartedAt(Date.now());
+    setClock(Date.now());
     setIsBatchRunning(true);
     setBatchStatus("running");
     cancelledJobId.current = null;
@@ -192,13 +208,13 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   }
 
   return (
-    <section className="grid items-start gap-7 xl:grid-cols-[470px_1fr]">
+    <section className="grid min-w-0 items-start gap-4 sm:gap-6 xl:grid-cols-[minmax(380px,470px)_minmax(0,1fr)] xl:gap-7">
       <form
         action={formAction}
-        className="flex flex-col overflow-hidden rounded-3xl border border-white/80 bg-white/90 shadow-soft backdrop-blur xl:h-[calc(100vh-190px)] xl:min-h-[620px]"
+        className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-white/80 bg-white/90 shadow-soft backdrop-blur sm:rounded-3xl xl:h-[calc(100vh-190px)] xl:min-h-[620px]"
         onSubmit={submitWorkflow}
       >
-        <div className="bg-gradient-to-r from-indigo-600 via-brand to-cyan-600 px-6 py-5 text-white">
+        <div className="bg-gradient-to-r from-indigo-600 via-brand to-cyan-600 px-4 py-4 text-white sm:px-6 sm:py-5">
           <div className="flex items-center gap-3">
             <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15 text-lg shadow-inner ring-1 ring-white/20">▶</span>
             <div>
@@ -207,7 +223,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             </div>
           </div>
         </div>
-        <div className="space-y-5 overflow-y-auto p-6 [scrollbar-width:thin]">
+        <div className="space-y-5 overflow-y-auto p-4 [scrollbar-width:thin] sm:p-6">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted">
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-100 text-indigo-700">1</span>
             Choose the target
@@ -332,15 +348,15 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         </div>
       </form>
 
-      <div className="flex min-h-[520px] flex-col overflow-hidden rounded-3xl border border-white/80 bg-white/90 shadow-soft backdrop-blur xl:h-[calc(100vh-190px)] xl:min-h-[620px]">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 bg-gradient-to-r from-slate-50 to-indigo-50/70 px-6 py-5">
+      <div className="flex min-h-[420px] min-w-0 flex-col overflow-hidden rounded-2xl border border-white/80 bg-white/90 shadow-soft backdrop-blur sm:min-h-[520px] sm:rounded-3xl xl:h-[calc(100vh-190px)] xl:min-h-[620px]">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 bg-gradient-to-r from-slate-50 to-indigo-50/70 px-4 py-4 sm:px-6 sm:py-5">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand">Activity stream</p>
             <h2 className="mt-1 text-xl font-bold text-ink">Workflow result</h2>
           </div>
           <div className="flex items-center gap-2"><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${isBatchRunning ? "bg-indigo-100 text-indigo-700" : batchStatus === "cancelled" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>{isBatchRunning ? "● Automation running" : batchStatus === "cancelled" ? "● Cancelled" : "● Ready"}</span>{isBatchRunning ? <button className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-700" onClick={cancelAutomation} type="button">Cancel</button> : null}<button className="rounded-xl border border-line bg-white px-4 py-2 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400" disabled={isBatchRunning || !currentJobId || liveBatchItems.length === 0} onClick={resetAutomation} type="button">Reset</button></div>
         </div>
-        <div className="flex-1 overflow-y-auto p-6 [scrollbar-width:thin]">
+        <div className="flex-1 overflow-y-auto p-4 [scrollbar-width:thin] sm:p-6">
         {liveBatchItems.length > 0 ? (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -356,6 +372,11 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                 style={{ width: `${progressPercent}%` }}
               />
               {isBatchRunning ? <span className="workflow-shimmer absolute inset-y-0 w-24 bg-gradient-to-r from-transparent via-white/70 to-transparent" /> : null}
+            </div>
+            <div className="grid gap-2 text-xs sm:grid-cols-3">
+              <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Progress</span><strong className="ml-2 text-ink">{progressPercent}%</strong></div>
+              <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Elapsed</span><strong className="ml-2 text-ink">{formatDuration(elapsedMs)}</strong></div>
+              <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Estimated time left</span><strong className="ml-2 text-ink">{estimatedRemainingMs === null ? "Calculating…" : formatDuration(estimatedRemainingMs)}</strong></div>
             </div>
             {liveBatchItems.map((item, index) => (
               <div className={`card-enter relative overflow-hidden rounded-2xl border p-4 transition duration-300 ${statusCardClass(item.status)}`} key={item.id}>
@@ -485,7 +506,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             </div>
           </div>
         ) : (
-          <div className="flex min-h-[440px] flex-col items-center justify-center text-center">
+          <div className="flex min-h-[320px] flex-col items-center justify-center px-2 text-center sm:min-h-[440px]">
             <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-br from-indigo-100 to-cyan-100 text-3xl text-brand shadow-inner">
               ◎
               <span className="absolute -right-1 -top-1 h-4 w-4 rounded-full bg-emerald-400 ring-4 ring-white" />
@@ -586,6 +607,16 @@ function statusCardClass(status: LiveBatchItem["status"]) {
   if (status === "failed") return "border-red-200 bg-red-50/60";
   if (status === "cancelled") return "border-amber-200 bg-amber-50/60";
   return "border-slate-200 bg-slate-50/70";
+}
+
+function formatDuration(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }
 
 function statusBadgeClass(status: LiveBatchItem["status"]) {

@@ -23,6 +23,8 @@ type BookingWidgetDetection = {
   reason: string | null;
 };
 
+type FormScope = Page | Locator;
+
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
 const COMMON_INPUT_SELECTOR = [
@@ -91,8 +93,8 @@ function scoreCandidate(candidate: FieldCandidate, fieldKey: FieldKey) {
   return score;
 }
 
-async function collectFieldCandidates(page: Page): Promise<FieldCandidate[]> {
-  return page.locator(COMMON_INPUT_SELECTOR).evaluateAll((elements) =>
+async function collectFieldCandidates(scope: FormScope): Promise<FieldCandidate[]> {
+  return scope.locator(COMMON_INPUT_SELECTOR).evaluateAll((elements) =>
     elements.map((element, index) => {
       const input = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
       const id = input.id;
@@ -145,12 +147,87 @@ async function safelyFillField(locator: Locator, value: string) {
   return true;
 }
 
-async function fillDetectedFields(page: Page, leadData: LeadData) {
-  const candidates = await collectFieldCandidates(page);
+async function selectFirstRealOption(locator: Locator) {
+  if (!(await locator.isVisible().catch(() => false))) return false;
+  if (!(await locator.isEnabled().catch(() => false))) return false;
+
+  const optionIndex = await locator
+    .evaluate((element) => {
+      const select = element as HTMLSelectElement;
+      const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i;
+      const isRealOption = (option: HTMLOptionElement) => {
+        const label = option.textContent?.replace(/\s+/g, " ").trim() ?? "";
+        return !option.disabled && Boolean(option.value.trim()) && !placeholderPattern.test(label);
+      };
+
+      const selected = select.options[select.selectedIndex];
+      if (selected && isRealOption(selected)) return -1;
+
+      return Array.from(select.options).findIndex(isRealOption);
+    })
+    .catch(() => -1);
+
+  if (optionIndex < 0) return false;
+  await locator.selectOption({ index: optionIndex });
+  return true;
+}
+
+async function selectCustomDropdownDefaults(scope: FormScope) {
+  const dropdowns = scope.locator([
+    "[role='combobox']:not(select)",
+    "[aria-haspopup='listbox']:not(select)",
+    "[aria-haspopup='menu'][role='button']"
+  ].join(", "));
+  const filled: string[] = [];
+  const count = await dropdowns.count();
+
+  for (let index = 0; index < count; index++) {
+    const dropdown = dropdowns.nth(index);
+    if (!(await dropdown.isVisible().catch(() => false))) continue;
+    if (!(await dropdown.isEnabled().catch(() => false))) continue;
+
+    await dropdown.scrollIntoViewIfNeeded().catch(() => undefined);
+    const opened = await dropdown.click({ timeout: 2000 }).then(() => true).catch(() => false);
+    if (!opened) continue;
+
+    const options = dropdown.page().locator([
+      "[role='listbox']:visible [role='option']:visible",
+      "[role='menu']:visible [role='menuitem']:visible",
+      "[role='option']:visible"
+    ].join(", "));
+    const optionCount = await options.count();
+    let selected = false;
+
+    for (let optionIndex = 0; optionIndex < optionCount; optionIndex++) {
+      const option = options.nth(optionIndex);
+      const optionState = await option.evaluate((element) => ({
+        text: (element.textContent ?? "").replace(/\s+/g, " ").trim(),
+        disabled:
+          element.getAttribute("aria-disabled") === "true" ||
+          (element as HTMLButtonElement).disabled === true
+      })).catch(() => ({ text: "", disabled: true }));
+      const isPlaceholder = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i.test(optionState.text);
+      if (optionState.disabled || !optionState.text || isPlaceholder) continue;
+
+      selected = await option.click({ timeout: 2000 }).then(() => true).catch(() => false);
+      if (selected) {
+        filled.push(`custom-dropdown:${index}`);
+        break;
+      }
+    }
+
+    if (!selected) await dropdown.press("Escape").catch(() => undefined);
+  }
+
+  return filled;
+}
+
+async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
+  const candidates = await collectFieldCandidates(scope);
   const usedIndexes = new Set<number>();
   const filledFields: string[] = [];
   const skippedFields: string[] = [];
-  const fields = page.locator(COMMON_INPUT_SELECTOR);
+  const fields = scope.locator(COMMON_INPUT_SELECTOR);
 
   const nameParts = leadData.fullName.trim().split(/\s+/).filter(Boolean);
   const firstName = nameParts[0] ?? "";
@@ -201,7 +278,48 @@ async function fillDetectedFields(page: Page, leadData: LeadData) {
     }
   }
 
+  // Dropdowns such as "Service you need" do not map to lead data. Select the
+  // first genuine option so required selects are not left on their placeholder.
+  for (const candidate of candidates) {
+    if (candidate.tagName !== "select" || usedIndexes.has(candidate.index)) continue;
+    const didSelect = await selectFirstRealOption(fields.nth(candidate.index)).catch(() => false);
+    if (didSelect) {
+      usedIndexes.add(candidate.index);
+      filledFields.push(`dropdown:${candidate.index}`);
+    }
+  }
+
+  filledFields.push(...await selectCustomDropdownDefaults(scope));
+
   return { filledFields, skippedFields };
+}
+
+async function fillAllVisibleForms(page: Page, leadData: LeadData) {
+  const forms = page.locator("form");
+  const formCount = await forms.count();
+  const filledFields = new Set<string>();
+  const skippedFields = new Set<string>();
+  let visibleFormCount = 0;
+
+  for (let index = 0; index < formCount; index++) {
+    const form = forms.nth(index);
+    if (!(await form.isVisible().catch(() => false))) continue;
+    if ((await form.locator(COMMON_INPUT_SELECTOR).count()) === 0) continue;
+    visibleFormCount++;
+    const result = await fillDetectedFields(form, leadData);
+    for (const field of result.filledFields) filledFields.add(field);
+    for (const field of result.skippedFields) skippedFields.add(field);
+  }
+
+  // A small number of sites use form controls without a wrapping <form>.
+  if (visibleFormCount === 0) {
+    const result = await fillDetectedFields(page, leadData);
+    for (const field of result.filledFields) filledFields.add(field);
+    for (const field of result.skippedFields) skippedFields.add(field);
+  }
+
+  for (const field of filledFields) skippedFields.delete(field);
+  return { filledFields: [...filledFields], skippedFields: [...skippedFields] };
 }
 
 async function findSubmitButton(page: Page) {
@@ -220,6 +338,20 @@ async function findSubmitButton(page: Page) {
     ,"button:has-text('Get in touch')"
     ,"button:has-text('Request')"
   ];
+
+  const modalRoots = page.locator([
+    "[role='dialog']:visible",
+    "[aria-modal='true']:visible",
+    ".modal:visible",
+    "[class*='popup' i]:visible"
+  ].join(", "));
+  for (let rootIndex = 0; rootIndex < await modalRoots.count(); rootIndex++) {
+    const root = modalRoots.nth(rootIndex);
+    for (const selector of selectors) {
+      const locator = root.locator(selector).first();
+      if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) return locator;
+    }
+  }
 
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -497,7 +629,16 @@ export async function submitContactForm({
     });
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => undefined);
 
-    const fillResult = await fillDetectedFields(page, leadData);
+    let fillResult = await fillAllVisibleForms(page, leadData);
+    // Exit-intent and delayed marketing forms can mount after the primary form
+    // has already been filled. Scan again so both forms receive lead data.
+    await page.waitForTimeout(750);
+    const lateFillResult = await fillAllVisibleForms(page, leadData);
+    fillResult = {
+      filledFields: [...new Set([...fillResult.filledFields, ...lateFillResult.filledFields])],
+      skippedFields: [...new Set([...fillResult.skippedFields, ...lateFillResult.skippedFields])]
+        .filter((field) => !lateFillResult.filledFields.includes(field))
+    };
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
     screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit");
@@ -543,7 +684,7 @@ export async function submitContactForm({
 
     const result: SubmitContactFormResult = {
       websiteUrl,
-      status: "success",
+      status: submit ? "success" : "dry_run_ready_to_book",
       errorMessage: null,
       screenshotPath,
       submittedAt,

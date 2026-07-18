@@ -281,8 +281,8 @@ function mergeCandidates(candidates: Candidate[], limit: number) {
 
 const TARGET_EXECUTION_ORDER: Record<DiscoveredSubmissionTarget["targetType"], number> = {
   calendly: 1,
-  contact_form: 2,
-  hubspot_booking: 3,
+  hubspot_booking: 2,
+  contact_form: 3,
   booking_widget: 4
 };
 
@@ -466,6 +466,12 @@ async function detectTargetOnPage(
     };
   }
 
+  // Prefer an actual visible form over generic booking-related page copy.
+  // Contact pages commonly contain phrases such as "contact details" that do
+  // not indicate a calendar or booking widget.
+  const contactTarget = await detectContactTarget(page, url, candidateReason);
+  if (contactTarget) return contactTarget;
+
   const bodyText = await page.locator("body").innerText({ timeout: 2500 }).catch(() => "");
   const normalizedBodyText = normalizeText(bodyText);
   const bookingText = [
@@ -478,7 +484,6 @@ async function detectTargetOnPage(
     "what time works best",
     "meeting duration",
     "date/time",
-    "contact details",
     "next step"
   ].find((phrase) => normalizedBodyText.includes(phrase));
 
@@ -499,38 +504,22 @@ async function detectTargetOnPage(
     };
   }
 
-  const formScore = await getVisibleFormScore(page);
-
-  if (formScore >= 60) {
-    return {
-      websiteUrl: url,
-      discoveredUrl: url,
-      targetType: "contact_form",
-      confidence: Math.min(90, formScore),
-      reason: `contact form fields detected; ${candidateReason}`,
-      checkedUrls: [],
-      screenshotPath: await takeScreenshot(page, url, "target-discovered").catch(() => null)
-    };
-  }
-
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame() || !/^https?:/i.test(frame.url())) continue;
-    const frameFormScore = await getVisibleFormScore(frame);
-
-    if (frameFormScore >= 60) {
-      return {
-        websiteUrl: url,
-        discoveredUrl: frame.url(),
-        targetType: "contact_form",
-        confidence: Math.min(88, frameFormScore),
-        reason: `contact form fields detected inside an embedded frame; ${candidateReason}`,
-        checkedUrls: [],
-        screenshotPath: await takeScreenshot(page, url, "embedded-form-discovered").catch(() => null)
-      };
-    }
-  }
-
   return null;
+}
+
+async function detectTargetWithLazyScroll(
+  page: Page,
+  url: string,
+  candidateReason: string
+): Promise<DiscoverSubmissionTargetResult | null> {
+  const initialResult = await detectTargetOnPage(page, url, candidateReason);
+  if (initialResult) return initialResult;
+
+  // Some builders do not mount or reveal the form until it approaches the
+  // viewport. Scroll once only after the fast, above-the-fold scan fails.
+  await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" }));
+  await page.waitForTimeout(400);
+  return detectTargetOnPage(page, url, `${candidateReason}; detected after scrolling`);
 }
 
 export async function discoverSubmissionTarget({
@@ -601,7 +590,7 @@ export async function discoverSubmissionTarget({
     if (homepageLoaded) await page.waitForTimeout(700);
 
     const directResult = homepageLoaded
-      ? await detectTargetOnPage(page, page.url(), "entered URL already works")
+      ? await detectTargetWithLazyScroll(page, page.url(), "entered URL already works")
       : null;
 
     if (directResult?.targetType === "contact_form") {
@@ -635,7 +624,7 @@ export async function discoverSubmissionTarget({
 
       await page.waitForTimeout(500);
 
-      const result = await detectTargetOnPage(page, page.url(), candidate.reason);
+      const result = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
 
       if (result) {
         return {
@@ -763,8 +752,7 @@ export async function discoverSubmissionTargets({
 
     await page.waitForTimeout(700);
     checkedUrls.push(withoutHash(page.url()));
-    addResult(await detectTargetOnPage(page, page.url(), "entered URL already works"));
-    addResult(await detectContactTarget(page, normalizedWebsiteUrl, "entered URL already works"));
+    addResult(await detectTargetWithLazyScroll(page, page.url(), "entered URL already works"));
 
     const supportedExternalCandidates = await collectSupportedExternalCandidates(page, page.url());
     for (const candidate of supportedExternalCandidates) {
@@ -788,8 +776,7 @@ export async function discoverSubmissionTargets({
       }).then(() => true).catch(() => false);
       if (!loaded) continue;
       await page.waitForTimeout(500);
-      addResult(await detectTargetOnPage(page, page.url(), candidate.reason));
-      addResult(await detectContactTarget(page, normalizedWebsiteUrl, candidate.reason));
+      addResult(await detectTargetWithLazyScroll(page, page.url(), candidate.reason));
     }
 
     const targets = Array.from(discovered.values()).sort(

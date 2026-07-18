@@ -6,14 +6,15 @@ type BrowserMode = "headless" | "headed";
 type PooledBrowser = {
   browser: Browser | null;
   launchPromise: Promise<Browser> | null;
-  contextCount: number;
+  activeContexts: number;
+  contextsCreated: number;
 };
 
 const browserPools: Record<BrowserMode, PooledBrowser> = {
-  headless: { browser: null, launchPromise: null, contextCount: 0 },
-  headed: { browser: null, launchPromise: null, contextCount: 0 }
+  headless: { browser: null, launchPromise: null, activeContexts: 0, contextsCreated: 0 },
+  headed: { browser: null, launchPromise: null, activeContexts: 0, contextsCreated: 0 }
 };
-const MAX_CONTEXTS_PER_BROWSER = 50;
+const contextModes = new WeakMap<BrowserContext, BrowserMode>();
 
 async function launchBrowser(headless: boolean): Promise<Browser> {
   const executablePath = await getChromiumExecutablePath();
@@ -39,12 +40,10 @@ async function launchBrowser(headless: boolean): Promise<Browser> {
 export async function getBrowser(headless = true): Promise<Browser> {
   const mode: BrowserMode = headless ? "headless" : "headed";
   const pool = browserPools[mode];
-  // If the browser is disconnected or has handled too many contexts, recycle it
-  if (pool.browser && (!pool.browser.isConnected() || pool.contextCount >= MAX_CONTEXTS_PER_BROWSER)) {
-    console.log(`[BrowserPool] Recycling ${mode} browser instance. Contexts handled: ${pool.contextCount}`);
-    await pool.browser.close().catch(() => undefined);
+  // A healthy process is deliberately kept alive and shared by all jobs.
+  if (pool.browser && !pool.browser.isConnected()) {
     pool.browser = null;
-    pool.contextCount = 0;
+    pool.activeContexts = 0;
   }
 
   if (pool.browser) {
@@ -58,6 +57,7 @@ export async function getBrowser(headless = true): Promise<Browser> {
   pool.launchPromise = launchBrowser(headless).then((browser) => {
     pool.browser = browser;
     pool.launchPromise = null;
+    console.log(`[BrowserPool] Started shared ${mode} Chromium process.`);
     return browser;
   }).catch((err) => {
     pool.launchPromise = null;
@@ -77,7 +77,10 @@ export async function acquireContext(options: { headless?: boolean } = {}): Prom
     viewport: { width: 1280, height: 720 },
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
   });
-  browserPools[headless ? "headless" : "headed"].contextCount++;
+  const mode: BrowserMode = headless ? "headless" : "headed";
+  browserPools[mode].activeContexts++;
+  browserPools[mode].contextsCreated++;
+  contextModes.set(context, mode);
   return context;
 }
 
@@ -85,8 +88,12 @@ export async function acquireContext(options: { headless?: boolean } = {}): Prom
  * Safely closes a context and handles browser error tracking.
  */
 export async function releaseContext(context: BrowserContext): Promise<void> {
-  if (context) {
-    await context.close().catch(() => undefined);
+  const mode = contextModes.get(context);
+  await context.close().catch(() => undefined);
+  if (mode) {
+    const pool = browserPools[mode];
+    pool.activeContexts = Math.max(0, pool.activeContexts - 1);
+    contextModes.delete(context);
   }
 }
 
@@ -98,7 +105,8 @@ export async function closePool(): Promise<void> {
     if (pool.browser) {
       await pool.browser.close().catch(() => undefined);
       pool.browser = null;
-      pool.contextCount = 0;
+      pool.activeContexts = 0;
+      pool.contextsCreated = 0;
     }
   }
 }

@@ -838,6 +838,8 @@ export async function runSingleAutomationAction(
     };
   }
 
+  const browserContext = await acquireContext({ headless: !showBrowser });
+  try {
   if (automationType === "auto") {
     const savedNotes = selectedWebsite?.notes?.toLowerCase() ?? "";
     const cachedTargetIsHomepage = Boolean(
@@ -867,7 +869,8 @@ export async function runSingleAutomationAction(
         headless: !showBrowser,
         timeoutMs: 8000,
         maxNavigationLinks: 10,
-        maxFallbackPaths: 6
+        maxFallbackPaths: 6,
+        browserContext
       });
 
       discoveryReason = discovery.reason;
@@ -930,7 +933,8 @@ export async function runSingleAutomationAction(
           websiteUrl,
           leadData,
           submit: liveSubmit,
-          headless: !showBrowser
+          headless: !showBrowser,
+          browserContext
         })
       : automationType === "hubspot"
         ? await submitHubSpotBooking({
@@ -938,7 +942,8 @@ export async function runSingleAutomationAction(
             leadData,
             liveSubmit,
             headless: !showBrowser,
-            bookingPreferences
+            bookingPreferences,
+            browserContext
           })
         : automationType === "booking"
           ? await submitGenericBookingWidget({
@@ -946,14 +951,16 @@ export async function runSingleAutomationAction(
               leadData,
               liveSubmit,
               headless: !showBrowser,
-              bookingPreferences
+              bookingPreferences,
+              browserContext
             })
         : await submitCalendlyBooking({
             websiteUrl,
             leadData,
             liveSubmit,
             headless: !showBrowser,
-            bookingPreferences
+            bookingPreferences,
+            browserContext
           });
 
   if (
@@ -970,7 +977,8 @@ export async function runSingleAutomationAction(
       leadData,
       liveSubmit,
       headless: !showBrowser,
-      bookingPreferences
+      bookingPreferences,
+      browserContext
     });
 
     if (selectedWebsite) {
@@ -989,6 +997,9 @@ export async function runSingleAutomationAction(
       resolvedUrl: websiteUrl,
       discoveryReason,
       targetType
-    });
+  });
   return { result: serialized };
+  } finally {
+    await releaseContext(browserContext);
+  }
 }

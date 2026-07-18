@@ -53,3 +53,17 @@ select {
   .workflow-shimmer,
   .card-enter { animation: none; }
 }
+
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select { font-size: 16px; }
+
+  button,
+  a,
+  input,
+  textarea,
+  select { touch-action: manipulation; }
+
+  table { min-width: 680px; }
+}

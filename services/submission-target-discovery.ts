@@ -43,6 +43,13 @@ type Candidate = {
   matchedTargetHint: boolean;
 };
 
+type HttpDocument = { url: string; body: string };
+
+const HTTP_DISCOVERY_BUDGET_MS = 8_000;
+const HTTP_REQUEST_TIMEOUT_MS = 2_500;
+const HTTP_PROBE_CONCURRENCY = 4;
+const HTTP_MAX_PAGES = 10;
+
 const NAVIGATION_LINK_SELECTOR = [
   "header a[href]",
   "nav a[href]",
@@ -217,6 +224,157 @@ async function collectNavigationCandidates(page: Page, baseUrl: string): Promise
     .catch(() => []);
 }
 
+async function fetchHttpDocument(url: string, deadline: number): Promise<HttpDocument | null> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    Math.min(HTTP_REQUEST_TIMEOUT_MS, remaining)
+  );
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Mozilla/5.0 (compatible; LeadAutomationDiscovery/1.0)",
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.1"
+      }
+    });
+    if (!response.ok) return null;
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (!contentType.includes("html") && !contentType.includes("xml")) return null;
+    return { url: response.url, body: (await response.text()).slice(0, 1_500_000) };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function extractHttpLinks(document: HttpDocument, includeCrawlLinks = false): Candidate[] {
+  let base: URL;
+  try {
+    base = new URL(document.url);
+  } catch {
+    return [];
+  }
+  const candidates: Candidate[] = [];
+  const anchorPattern = /<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of document.body.matchAll(anchorPattern)) {
+    try {
+      const href = match[1].replace(/&amp;/gi, "&");
+      const text = match[2].replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim();
+      const resolved = new URL(href, base);
+      if (
+        (resolved.origin !== base.origin && !isSupportedExternalTarget(resolved)) ||
+        !["http:", "https:"].includes(resolved.protocol) ||
+        SKIPPED_PATH_PATTERN.test(resolved.pathname) ||
+        SKIPPED_EXTENSION_PATTERN.test(`${resolved.pathname}${resolved.search}`)
+      ) continue;
+      const score = scoreTargetHint(text, resolved.toString());
+      const crawlWorthy = /\/(about|company|services?|solutions?)(\/|$)/i.test(resolved.pathname);
+      if (score <= 0 && (!includeCrawlLinks || !crawlWorthy)) continue;
+      candidates.push({
+        url: withoutHash(resolved.toString()),
+        score,
+        matchedTargetHint: score > 0,
+        reason: `HTTP homepage link "${normalizeText(text || resolved.pathname)}"${score > 0 ? " matched a contact/booking hint" : " selected for shallow crawl"}`
+      });
+    } catch {
+      continue;
+    }
+  }
+  return candidates;
+}
+
+function documentSignalScore(body: string) {
+  const normalized = body.toLowerCase();
+  const hasForm = /<form\b/i.test(body);
+  const hasEmail = /<input\b[^>]*(type\s*=\s*["']?email|name\s*=\s*["'][^"']*email)/i.test(body);
+  const hasMessage = /<textarea\b/i.test(body);
+  const hasCalendly = /calendly\.com|data-url\s*=\s*["'][^"']*calendly/i.test(normalized);
+  const hasHubSpot = /meetings\.hubspot\.com|hubspot.*meetings/i.test(normalized);
+  return Number(hasForm) * 25 + Number(hasEmail) * 25 + Number(hasMessage) * 20 + Number(hasCalendly || hasHubSpot) * 50;
+}
+
+function extractSitemapCandidates(document: HttpDocument): Candidate[] {
+  const candidates: Candidate[] = [];
+  for (const match of document.body.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)) {
+    try {
+      const url = new URL(match[1].replace(/&amp;/gi, "&"));
+      const score = scoreTargetHint(url.pathname, url.toString());
+      if (score <= 0 || SKIPPED_PATH_PATTERN.test(url.pathname)) continue;
+      candidates.push({
+        url: withoutHash(url.toString()),
+        score: score + 8,
+        matchedTargetHint: true,
+        reason: `sitemap URL "${url.pathname}" matched a contact/booking hint`
+      });
+    } catch {
+      continue;
+    }
+  }
+  return candidates;
+}
+
+async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candidate[]> {
+  const deadline = Date.now() + HTTP_DISCOVERY_BUDGET_MS;
+  const homepage = await fetchHttpDocument(websiteUrl, deadline);
+  if (!homepage) return [];
+
+  const homepageLinks = extractHttpLinks(homepage, true);
+  let candidates = mergeCandidates(homepageLinks.filter((candidate) => candidate.matchedTargetHint), 8);
+  let pagesUsed = 1;
+
+  const probeCandidates = candidates.slice(0, Math.min(HTTP_PROBE_CONCURRENCY * 2, HTTP_MAX_PAGES - pagesUsed));
+  const probed = await Promise.all(probeCandidates.map(async (candidate) => {
+    const document = await fetchHttpDocument(candidate.url, deadline);
+    if (!document) return null;
+    pagesUsed++;
+    const signalScore = documentSignalScore(document.body);
+    if (signalScore <= 0) return null;
+    return {
+      ...candidate,
+      url: withoutHash(document.url),
+      score: candidate.score + signalScore,
+      reason: `${candidate.reason}; HTTP probe confirmed form or booking signals`
+    };
+  }));
+  candidates = mergeCandidates([
+    ...probed.filter((candidate): candidate is Candidate => Boolean(candidate)),
+    ...candidates
+  ], 8);
+
+  if (candidates.length < 3 && Date.now() < deadline) {
+    const origin = new URL(homepage.url).origin;
+    const sitemapDocuments = await Promise.all([
+      `${origin}/sitemap.xml`,
+      `${origin}/sitemap_index.xml`,
+      `${origin}/page-sitemap.xml`
+    ].map((url) => fetchHttpDocument(url, deadline)));
+    pagesUsed += sitemapDocuments.filter(Boolean).length;
+    candidates = mergeCandidates([
+      ...candidates,
+      ...sitemapDocuments.flatMap((document) => document ? extractSitemapCandidates(document) : [])
+    ], 8);
+  }
+
+  if (candidates.length < 3 && pagesUsed < HTTP_MAX_PAGES && Date.now() < deadline) {
+    const crawlLinks = mergeCandidates(
+      homepageLinks.filter((candidate) => !candidate.matchedTargetHint),
+      Math.min(3, HTTP_MAX_PAGES - pagesUsed)
+    );
+    const crawlDocuments = await Promise.all(crawlLinks.map((candidate) => fetchHttpDocument(candidate.url, deadline)));
+    candidates = mergeCandidates([
+      ...candidates,
+      ...crawlDocuments.flatMap((document) => document ? extractHttpLinks(document) : [])
+    ], 8);
+  }
+
+  return candidates;
+}
+
 async function getVisibleFormScore(container: Page | Frame) {
   return container
     .locator("form, input, textarea, button")
@@ -280,9 +438,9 @@ function mergeCandidates(candidates: Candidate[], limit: number) {
 }
 
 const TARGET_EXECUTION_ORDER: Record<DiscoveredSubmissionTarget["targetType"], number> = {
-  calendly: 1,
-  hubspot_booking: 2,
-  contact_form: 3,
+  contact_form: 1,
+  calendly: 2,
+  hubspot_booking: 3,
   booking_widget: 4
 };
 
@@ -563,6 +721,7 @@ export async function discoverSubmissionTarget({
   }
 
   try {
+    const httpCandidates = await collectHttpDiscoveryCandidates(normalizedWebsiteUrl);
     if (browserContext) {
       page = await browserContext.newPage();
     } else {
@@ -598,9 +757,10 @@ export async function discoverSubmissionTarget({
     }
     const homepageBookingResult = directResult;
 
-    const navigationCandidates = homepageLoaded
-      ? mergeCandidates(await collectNavigationCandidates(page, page.url()), maxNavigationLinks)
-      : [];
+    const navigationCandidates = mergeCandidates([
+      ...httpCandidates,
+      ...(homepageLoaded ? await collectNavigationCandidates(page, page.url()) : [])
+    ], maxNavigationLinks);
     const fallbackCandidates = mergeCandidates(
       commonPathCandidates(homepageLoaded ? page.url() : normalizedWebsiteUrl),
       maxFallbackPaths
@@ -719,6 +879,11 @@ export async function discoverSubmissionTargets({
   };
 
   try {
+    const httpCandidates = await collectHttpDiscoveryCandidates(normalizedWebsiteUrl);
+    for (const candidate of httpCandidates) {
+      addResult(resultFromSupportedExternalCandidate(normalizedWebsiteUrl, candidate));
+    }
+
     if (browserContext) {
       page = await browserContext.newPage();
     } else {
@@ -760,6 +925,7 @@ export async function discoverSubmissionTargets({
     }
 
     const navigationCandidates = mergeCandidates([
+      ...httpCandidates,
       ...supportedExternalCandidates,
       ...(await collectNavigationCandidates(page, page.url()))
     ], maxNavigationLinks);
@@ -767,6 +933,7 @@ export async function discoverSubmissionTargets({
     const candidates = mergeCandidates([...navigationCandidates, ...fallbackCandidates], maxNavigationLinks + maxFallbackPaths);
 
     for (const candidate of candidates) {
+      if (Array.from(discovered.values()).some((target) => target.targetType === "contact_form")) break;
       const candidateUrl = withoutHash(candidate.url);
       if (checkedUrls.includes(candidateUrl)) continue;
       checkedUrls.push(candidateUrl);

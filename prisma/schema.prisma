@@ -18,6 +18,10 @@ model User {
   targetWebsites         TargetWebsite[]
   submissionJobs         SubmissionJob[]
   automationTransactions AutomationTransaction[]
+  captchaEnabled         Boolean                 @default(false)
+  captchaProvider        String                  @default("mock")
+  captchaApiKey          String?
+  captchaSolveHistory    CaptchaSolveHistory[]
 }
 
 model AutomationTransaction {
@@ -183,4 +187,18 @@ model JobLog {
 
   @@index([jobId])
   @@index([createdAt])
+}
+
+model CaptchaSolveHistory {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     String
+  captchaType  String
+  status       String
+  durationMs   Int
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
 }

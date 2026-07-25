@@ -428,7 +428,8 @@ async function processLocalQueueResult(userId: string, resultId: string) {
 
     if ((payloadFields.get("automationType") || "auto") === "auto") {
       const website = await prisma.targetWebsite.findFirst({
-        where: { id: record.targetWebsiteId, userId }
+        where: { id: record.targetWebsiteId, userId },
+        include: { discoveredTargets: { orderBy: [{ executionOrder: "asc" }, { confidence: "desc" }] } }
       });
       if (!website) throw new Error("Target website record not found.");
       const showBrowser = payloadFields.get("showBrowser") === "on";
@@ -437,7 +438,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
         const targetIds = new Map<string, string>();
         const attemptIds = new Map<string, string>();
         const key = (target: { targetType: string; url: string }) => `${target.targetType}:${target.url}`;
-        const run = await runMultiTargetAutomation({
+        const run = await withAutomationTimeout(runMultiTargetAutomation({
           websiteUrl: website.websiteUrl,
           leadData: {
             fullName: payloadFields.get("fullName") || "",
@@ -456,6 +457,21 @@ async function processLocalQueueResult(userId: string, resultId: string) {
           liveSubmit: payload.liveSubmit,
           browserContext: context,
           timeoutMs: config.worker.timeoutMs,
+          userId,
+          cachedTargets: website.discoveredTargets.map((target) => ({
+            targetType: target.targetType as "calendly" | "hubspot_booking" | "contact_form" | "booking_widget",
+            url: target.url,
+            executionOrder: target.targetType === "contact_form"
+              ? 1
+              : target.targetType === "calendly"
+                ? 2
+                : target.targetType === "hubspot_booking"
+                  ? 3
+                  : 4,
+            confidence: target.confidence,
+            reason: "Previously discovered target",
+            screenshotPath: null
+          })),
           callbacks: {
             onTargetsDiscovered: async (targets, reason) => {
               await prisma.submissionResult.update({
@@ -542,7 +558,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
               });
             }
           }
-        });
+        }), config.worker.websiteTimeoutMs);
         if (run.targets.length === 0) throw new Error(run.discoveryReason);
         const successes = run.attempts.filter((attempt) =>
           ["success", "dry_run_ready_to_book"].includes(attempt.result.status)
@@ -580,7 +596,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
       data: { status: "Running", message: "Running local Playwright automation" }
     });
 
-    const perWebsiteTimeoutMs = Math.max(90_000, config.worker.timeoutMs * 3);
+    const perWebsiteTimeoutMs = config.worker.websiteTimeoutMs;
     const state = await withAutomationTimeout(
       runSingleAutomationAction(userId, formData),
       perWebsiteTimeoutMs
@@ -651,12 +667,13 @@ export async function processLocalBackgroundAutomationAction(jobId: string) {
         });
       }
 
-      const nextResult = await prisma.submissionResult.findFirst({
+      const nextResults = await prisma.submissionResult.findMany({
         where: { jobId, status: "Pending", job: { userId: user.id, status: "Running" } },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        take: config.worker.concurrency,
         select: { id: true }
       });
-      if (nextResult) await processLocalQueueResult(user.id, nextResult.id);
+      await Promise.all(nextResults.map((result) => processLocalQueueResult(user.id, result.id)));
     })();
 
     localAutomationLocks.set(jobId, processing);
@@ -934,7 +951,8 @@ export async function runSingleAutomationAction(
           leadData,
           submit: liveSubmit,
           headless: !showBrowser,
-          browserContext
+          browserContext,
+          userId
         })
       : automationType === "hubspot"
         ? await submitHubSpotBooking({

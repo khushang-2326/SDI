@@ -3,6 +3,8 @@ import path from "node:path";
 import { chromium, type Browser, type Locator, type Page, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 import { prisma } from "@/lib/prisma";
+import { SolverFactory } from "./captcha/solver-factory";
+import { decrypt } from "@/lib/crypto";
 import {
   LeadData,
   SubmitContactFormInput,
@@ -591,6 +593,226 @@ async function persistResult(result: SubmitContactFormResult, leadData: LeadData
   });
 }
 
+async function trySolveCaptchas(page: Page, userId?: string) {
+  if (!userId) return;
+
+  const userSettings = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { captchaEnabled: true, captchaProvider: true, captchaApiKey: true }
+  });
+
+  if (!userSettings || !userSettings.captchaEnabled || !userSettings.captchaApiKey) {
+    return;
+  }
+
+  const decryptedKey = decrypt(userSettings.captchaApiKey);
+  if (!decryptedKey) {
+    console.error("CAPTCHA API key decryption failed or empty.");
+    return;
+  }
+
+  const solver = SolverFactory.getSolver(userSettings.captchaProvider, decryptedKey);
+  const pageUrl = page.url();
+
+  // 1. Detect ReCAPTCHA v2 / v3
+  const recaptchaIframe = page.locator('iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise"]').first();
+  const hasRecaptcha = (await recaptchaIframe.count()) > 0;
+  
+  if (hasRecaptcha) {
+    const src = await recaptchaIframe.getAttribute("src") || "";
+    const siteKeyMatch = src.match(/k=([^&]+)/);
+    const siteKey = siteKeyMatch ? siteKeyMatch[1] : null;
+    
+    if (siteKey) {
+      const startTime = Date.now();
+      try {
+        console.log(`[CAPTCHA] Solving reCAPTCHA with sitekey: ${siteKey}`);
+        const { token } = await solver.solveReCaptcha(siteKey, pageUrl);
+        const duration = Date.now() - startTime;
+        
+        await page.evaluate((t) => {
+          const els = document.querySelectorAll('textarea[name="g-recaptcha-response"], [id="g-recaptcha-response"]');
+          els.forEach((el) => {
+            (el as HTMLTextAreaElement).value = t;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          });
+        }, token);
+        
+        await page.evaluate(({ t }) => {
+          const elsWithCallback = document.querySelectorAll("[data-callback]");
+          elsWithCallback.forEach((el) => {
+            const cb = el.getAttribute("data-callback");
+            if (cb && typeof (window as any)[cb] === "function") {
+              (window as any)[cb](t);
+            }
+          });
+        }, { t: token });
+
+        await prisma.captchaSolveHistory.create({
+          data: {
+            userId,
+            provider: userSettings.captchaProvider,
+            captchaType: "reCAPTCHA",
+            status: "Success",
+            durationMs: duration
+          }
+        });
+        console.log(`[CAPTCHA] reCAPTCHA solved successfully in ${duration}ms`);
+      } catch (err: any) {
+        const duration = Date.now() - startTime;
+        await prisma.captchaSolveHistory.create({
+          data: {
+            userId,
+            provider: userSettings.captchaProvider,
+            captchaType: "reCAPTCHA",
+            status: "Failed",
+            durationMs: duration,
+            errorMessage: err.message
+          }
+        });
+        console.error("[CAPTCHA] reCAPTCHA solving failed:", err);
+      }
+    }
+  }
+
+  // 2. Detect hCaptcha
+  const hcaptchaIframe = page.locator('iframe[src*="hcaptcha.com/embed"]').first();
+  const hcaptchaElement = page.locator(".h-captcha").first();
+  const hasHcaptcha = (await hcaptchaIframe.count()) > 0 || (await hcaptchaElement.count()) > 0;
+
+  if (hasHcaptcha) {
+    let siteKey = "";
+    if (await hcaptchaElement.count()) {
+      siteKey = await hcaptchaElement.getAttribute("data-sitekey") || "";
+    }
+    if (!siteKey && (await hcaptchaIframe.count())) {
+      const src = await hcaptchaIframe.getAttribute("src") || "";
+      const siteKeyMatch = src.match(/sitekey=([^&]+)/);
+      siteKey = siteKeyMatch ? siteKeyMatch[1] : "";
+    }
+
+    if (siteKey) {
+      const startTime = Date.now();
+      try {
+        console.log(`[CAPTCHA] Solving hCaptcha with sitekey: ${siteKey}`);
+        const { token } = await solver.solveHCaptcha(siteKey, pageUrl);
+        const duration = Date.now() - startTime;
+
+        await page.evaluate((t) => {
+          const els = document.querySelectorAll('textarea[name="h-captcha-response"], [name="g-recaptcha-response"]');
+          els.forEach((el) => {
+            (el as HTMLTextAreaElement).value = t;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          });
+        }, token);
+
+        await page.evaluate(({ t }) => {
+          const els = document.querySelectorAll(".h-captcha, [data-callback]");
+          els.forEach((el) => {
+            const cb = el.getAttribute("data-callback");
+            if (cb && typeof (window as any)[cb] === "function") {
+              (window as any)[cb](t);
+            }
+          });
+        }, { t: token });
+
+        await prisma.captchaSolveHistory.create({
+          data: {
+            userId,
+            provider: userSettings.captchaProvider,
+            captchaType: "hCaptcha",
+            status: "Success",
+            durationMs: duration
+          }
+        });
+        console.log(`[CAPTCHA] hCaptcha solved successfully in ${duration}ms`);
+      } catch (err: any) {
+        const duration = Date.now() - startTime;
+        await prisma.captchaSolveHistory.create({
+          data: {
+            userId,
+            provider: userSettings.captchaProvider,
+            captchaType: "hCaptcha",
+            status: "Failed",
+            durationMs: duration,
+            errorMessage: err.message
+          }
+        });
+        console.error("[CAPTCHA] hCaptcha solving failed:", err);
+      }
+    }
+  }
+
+  // 3. Detect Turnstile
+  const turnstileIframe = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
+  const turnstileElement = page.locator(".cf-turnstile").first();
+  const hasTurnstile = (await turnstileIframe.count()) > 0 || (await turnstileElement.count()) > 0;
+
+  if (hasTurnstile) {
+    let siteKey = "";
+    if (await turnstileElement.count()) {
+      siteKey = await turnstileElement.getAttribute("data-sitekey") || "";
+    }
+    if (!siteKey && (await turnstileIframe.count())) {
+      const src = await turnstileIframe.getAttribute("src") || "";
+      const siteKeyMatch = src.match(/(?:sitekey|k)=([^&]+)/);
+      siteKey = siteKeyMatch ? siteKeyMatch[1] : "";
+    }
+
+    if (siteKey) {
+      const startTime = Date.now();
+      try {
+        console.log(`[CAPTCHA] Solving Turnstile with sitekey: ${siteKey}`);
+        const { token } = await solver.solveTurnstile(siteKey, pageUrl);
+        const duration = Date.now() - startTime;
+
+        await page.evaluate((t) => {
+          const els = document.querySelectorAll('input[name="cf-turnstile-response"], [name="g-recaptcha-response"]');
+          els.forEach((el) => {
+            (el as HTMLInputElement).value = t;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+          });
+        }, token);
+
+        await page.evaluate(({ t }) => {
+          const els = document.querySelectorAll(".cf-turnstile, [data-callback]");
+          els.forEach((el) => {
+            const cb = el.getAttribute("data-callback");
+            if (cb && typeof (window as any)[cb] === "function") {
+              (window as any)[cb](t);
+            }
+          });
+        }, { t: token });
+
+        await prisma.captchaSolveHistory.create({
+          data: {
+            userId,
+            provider: userSettings.captchaProvider,
+            captchaType: "Turnstile",
+            status: "Success",
+            durationMs: duration
+          }
+        });
+        console.log(`[CAPTCHA] Turnstile solved successfully in ${duration}ms`);
+      } catch (err: any) {
+        const duration = Date.now() - startTime;
+        await prisma.captchaSolveHistory.create({
+          data: {
+            userId,
+            provider: userSettings.captchaProvider,
+            captchaType: "Turnstile",
+            status: "Failed",
+            durationMs: duration,
+            errorMessage: err.message
+          }
+        });
+        console.error("[CAPTCHA] Turnstile solving failed:", err);
+      }
+    }
+  }
+}
+
 export async function submitContactForm({
   websiteUrl,
   leadData,
@@ -598,8 +820,9 @@ export async function submitContactForm({
   submit = true,
   timeoutMs = 30000,
   browserContext,
-  skipPersist
-}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean }): Promise<SubmitContactFormResult> {
+  skipPersist,
+  userId
+}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean; userId?: string }): Promise<SubmitContactFormResult> {
   let browser: Browser | null = null;
   let page: Page | null = null;
   const submittedAt = new Date();
@@ -642,6 +865,11 @@ export async function submitContactForm({
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
     screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit");
+
+    // Attempt to solve any CAPTCHAs before checking/submitting the form
+    await trySolveCaptchas(page, userId).catch((err) => {
+      console.error("Error encountered while solving CAPTCHA:", err);
+    });
 
     const submitButton = await findSubmitButton(page);
 

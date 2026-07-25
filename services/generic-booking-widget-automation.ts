@@ -233,8 +233,49 @@ async function chooseDate(page: Page, preferredDate?: string) {
   return null;
 }
 
+function roundPreferredTime(timeStr: string | undefined): string | undefined {
+  if (!timeStr) return undefined;
+  
+  const match = timeStr.match(/^\s*(\d{1,2}):(\d{2})(?:\s*(am|pm))?\s*$/i);
+  if (!match) return timeStr;
+
+  let hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2], 10);
+  let ampm = match[3] ? match[3].toLowerCase() : "";
+
+  if (minute < 30) {
+    const minuteStr = "00";
+    if (!ampm) {
+      return `${hour}:${minuteStr}`;
+    }
+    return `${hour}:${minuteStr} ${ampm}`;
+  } else {
+    let nextHour = hour + 1;
+    if (ampm) {
+      if (hour === 11) {
+        ampm = ampm === "am" ? "pm" : "am";
+      } else if (nextHour > 12) {
+        nextHour = 1;
+      }
+      return `${nextHour}:00 ${ampm}`;
+    } else {
+      if (nextHour >= 24) {
+        nextHour = 0;
+      }
+      return `${nextHour}:00`;
+    }
+  }
+}
+
+function cleanTimeForComparison(val: string): string {
+  return val.toLowerCase().replace(/[\s:.,-]/g, "");
+}
+
 async function chooseTime(page: Page, preferredTime?: string) {
-  const preferred = normalizePreference(preferredTime);
+  const rounded = roundPreferredTime(preferredTime);
+  const cleanPreferred = rounded ? cleanTimeForComparison(rounded) : "";
+  const cleanPreferredNoAmPm = cleanPreferred.replace(/am|pm/g, "");
+
   const timeButtons = page.locator("button, [role='button'], a").filter({
     hasText: /\b\d{1,2}:\d{2}\s?(am|pm)\b/i
   });
@@ -263,9 +304,11 @@ async function chooseTime(page: Page, preferredTime?: string) {
       })
       .filter((candidate) => candidate.visible && !candidate.disabled)
   );
-  const selected =
-    candidates.find((candidate) => preferred && normalizePreference(candidate.text).includes(preferred)) ??
-    candidates[0];
+  const selected = cleanPreferred
+    ? candidates.find((c) => cleanTimeForComparison(c.text).includes(cleanPreferred)) ??
+      candidates.find((c) => cleanTimeForComparison(c.text).includes(cleanPreferredNoAmPm)) ??
+      candidates[0]
+    : candidates[0];
 
   if (!selected) return null;
 

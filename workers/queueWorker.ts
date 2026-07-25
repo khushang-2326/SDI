@@ -83,7 +83,8 @@ const worker = new Worker(
     try {
       // 1. Get website info
       const website = await prisma.targetWebsite.findFirst({
-        where: { id: targetWebsiteId, userId }
+        where: { id: targetWebsiteId, userId },
+        include: { discoveredTargets: { orderBy: [{ executionOrder: "asc" }, { confidence: "desc" }] } }
       });
 
       if (!website) {
@@ -111,6 +112,20 @@ const worker = new Worker(
           liveSubmit,
           browserContext: context,
           timeoutMs: config.worker.timeoutMs,
+          cachedTargets: website.discoveredTargets.map((target) => ({
+            targetType: target.targetType as "calendly" | "hubspot_booking" | "contact_form" | "booking_widget",
+            url: target.url,
+            executionOrder: target.targetType === "contact_form"
+              ? 1
+              : target.targetType === "calendly"
+                ? 2
+                : target.targetType === "hubspot_booking"
+                  ? 3
+                  : 4,
+            confidence: target.confidence,
+            reason: "Previously discovered target",
+            screenshotPath: null
+          })),
           callbacks: {
             onTargetsDiscovered: async (targets, reason) => {
               await logger.info(reason, { targetCount: targets.length });

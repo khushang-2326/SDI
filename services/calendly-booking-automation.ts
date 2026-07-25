@@ -272,12 +272,53 @@ async function chooseDate(
   return selected.ariaLabel || selected.text.trim();
 }
 
+function roundPreferredTime(timeStr: string | undefined): string | undefined {
+  if (!timeStr) return undefined;
+  
+  const match = timeStr.match(/^\s*(\d{1,2}):(\d{2})(?:\s*(am|pm))?\s*$/i);
+  if (!match) return timeStr;
+
+  let hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2], 10);
+  let ampm = match[3] ? match[3].toLowerCase() : "";
+
+  if (minute < 30) {
+    const minuteStr = "00";
+    if (!ampm) {
+      return `${hour}:${minuteStr}`;
+    }
+    return `${hour}:${minuteStr} ${ampm}`;
+  } else {
+    let nextHour = hour + 1;
+    if (ampm) {
+      if (hour === 11) {
+        ampm = ampm === "am" ? "pm" : "am";
+      } else if (nextHour > 12) {
+        nextHour = 1;
+      }
+      return `${nextHour}:00 ${ampm}`;
+    } else {
+      if (nextHour >= 24) {
+        nextHour = 0;
+      }
+      return `${nextHour}:00`;
+    }
+  }
+}
+
+function cleanTimeForComparison(val: string): string {
+  return val.toLowerCase().replace(/[\s:.,-]/g, "");
+}
+
 async function chooseTime(
   frame: CalendlyScope,
   preferredTime: string | undefined,
   fallbackToFirstAvailableSlot: boolean
 ) {
-  const preferred = normalizePreference(preferredTime);
+  const rounded = roundPreferredTime(preferredTime);
+  const cleanPreferred = rounded ? cleanTimeForComparison(rounded) : "";
+  const cleanPreferredNoAmPm = cleanPreferred.replace(/am|pm/g, "");
+
   const buttons = getCandidateButtons(frame);
   await frame
     .locator("button, [role='button']")
@@ -322,9 +363,12 @@ async function chooseTime(
     return null;
   }
 
-  const preferredCandidate = preferred
-    ? candidates.find((candidate) =>
-        normalizePreference(`${candidate.ariaLabel} ${candidate.text}`).includes(preferred)
+  const preferredCandidate = cleanPreferred
+    ? candidates.find((c) =>
+        cleanTimeForComparison(`${c.ariaLabel} ${c.text}`).includes(cleanPreferred)
+      ) ??
+      candidates.find((c) =>
+        cleanTimeForComparison(`${c.ariaLabel} ${c.text}`).includes(cleanPreferredNoAmPm)
       )
     : undefined;
   const selected = preferredCandidate ?? (fallbackToFirstAvailableSlot ? candidates[0] : null);

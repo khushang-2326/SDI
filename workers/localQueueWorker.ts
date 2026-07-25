@@ -88,7 +88,7 @@ async function processResult(resultId: string) {
       data: { status: "Running", message: "Running local Playwright automation" }
     });
 
-    const perWebsiteTimeoutMs = Math.max(90_000, config.worker.timeoutMs * 3);
+    const perWebsiteTimeoutMs = config.worker.websiteTimeoutMs;
     const state = await withAutomationTimeout(
       runSingleAutomationAction(record.job.userId, formData),
       perWebsiteTimeoutMs
@@ -136,6 +136,23 @@ async function processResult(resultId: string) {
   }
 }
 
+async function runWorkerLoop() {
+  while (!shuttingDown) {
+    const pending = await prisma.submissionResult.findFirst({
+      where: { status: "Pending", job: { status: "Running" } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true }
+    });
+
+    if (!pending) {
+      await delay(1000);
+      continue;
+    }
+
+    await processResult(pending.id);
+  }
+}
+
 async function runWorker() {
   validateConfig();
   const recovered = await prisma.submissionResult.updateMany({
@@ -150,30 +167,7 @@ async function runWorker() {
       (recovered.count > 0 ? `; recovered ${recovered.count} interrupted item(s)` : "")
   );
 
-  while (!shuttingDown) {
-    const active = await prisma.submissionResult.findFirst({
-      where: { status: { in: ["Discovering", "Running"] }, job: { status: "Running" } },
-      select: { id: true }
-    });
-    if (active) {
-      await delay(1000);
-      continue;
-    }
-
-    const pending = await prisma.submissionResult.findMany({
-      where: { status: "Pending", job: { status: "Running" } },
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      take: 1,
-      select: { id: true }
-    });
-
-    if (pending.length === 0) {
-      await delay(1000);
-      continue;
-    }
-
-    await processResult(pending[0].id);
-  }
+  await Promise.all(Array.from({ length: config.worker.concurrency }, () => runWorkerLoop()));
 
   await prisma.$disconnect();
 }

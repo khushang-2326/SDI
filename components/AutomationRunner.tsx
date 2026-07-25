@@ -379,7 +379,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
               <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Estimated time left</span><strong className="ml-2 text-ink">{estimatedRemainingMs === null ? "Calculating…" : formatDuration(estimatedRemainingMs)}</strong></div>
             </div>
             {liveBatchItems.map((item, index) => (
-              <div className={`card-enter relative overflow-hidden rounded-2xl border p-4 transition duration-300 ${statusCardClass(item.status)}`} key={item.id}>
+              <div className={`card-enter relative overflow-hidden rounded-2xl border p-4 transition duration-300 ${statusCardClass(item)}`} key={item.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-wide text-muted">
@@ -388,12 +388,12 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                     <p className="mt-1 text-sm font-semibold text-ink">{item.name}</p>
                     <p className="break-all text-xs text-muted">{item.url}</p>
                   </div>
-                  <span className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-semibold ${statusBadgeClass(item.status)}`}>
-                    <span className={`h-2 w-2 rounded-full ${item.status === "discovering" ? "workflow-pulse bg-indigo-500" : item.status === "completed" ? "bg-emerald-500" : item.status === "failed" ? "bg-red-500" : item.status === "cancelled" ? "bg-amber-500" : "bg-slate-400"}`} />
+                  <span className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-semibold ${statusBadgeClass(item.status, hasSuccessfulAttempt(item))}`}>
+                    <span className={`h-2 w-2 rounded-full ${item.status === "discovering" ? "workflow-pulse bg-indigo-500" : item.status === "completed" ? "bg-emerald-500" : item.status === "failed" ? hasSuccessfulAttempt(item) ? "bg-amber-500" : "bg-red-500" : item.status === "cancelled" ? "bg-amber-500" : "bg-slate-400"}`} />
                     {item.status}
                   </span>
                 </div>
-                <div className={`mt-3 rounded-xl px-3 py-2 text-xs ${item.status === "failed" ? "border border-red-200 bg-red-50 font-semibold text-red-700" : "text-muted"}`}><span className="mr-1 font-semibold">{item.status === "failed" ? "Failure reason:" : "Progress:"}</span>{item.detail}</div>
+                <div className={`mt-3 rounded-xl px-3 py-2 text-xs ${item.status === "failed" ? hasSuccessfulAttempt(item) ? "border border-amber-200 bg-amber-50 font-semibold text-amber-800" : "border border-red-200 bg-red-50 font-semibold text-red-700" : "text-muted"}`}><span className="mr-1 font-semibold">{item.status === "failed" ? hasSuccessfulAttempt(item) ? "Warning:" : "Failure reason:" : "Progress:"}</span>{item.detail}</div>
                 {item.result?.screenshotPath ? (
                   <a className="mt-2 block text-xs font-semibold text-brand" href={item.result.screenshotPath} target="_blank">
                     Open latest screenshot
@@ -415,7 +415,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                             {attempt.status}
                           </span>
                         </div>
-                        {attempt.errorMessage ? <p className="mt-2 text-xs text-red-700">{attempt.errorMessage}</p> : null}
+                        {attempt.errorMessage ? <p className={`mt-2 rounded-lg border px-2.5 py-2 text-xs ${hasSuccessfulAttempt(item) ? "border-amber-200 bg-amber-50 text-amber-800" : "border-red-200 bg-red-50 text-red-700"}`}>{attempt.errorMessage}</p> : null}
                         {attempt.screenshotPath ? (
                           <a className="mt-2 block text-xs font-semibold text-brand" href={attempt.screenshotPath} target="_blank">
                             Open target screenshot
@@ -601,12 +601,18 @@ function ListBox({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function statusCardClass(status: LiveBatchItem["status"]) {
-  if (status === "discovering") return "border-indigo-200 bg-gradient-to-r from-indigo-50 to-cyan-50 shadow-md shadow-indigo-100/60";
-  if (status === "completed") return "border-emerald-200 bg-emerald-50/60";
-  if (status === "failed") return "border-red-200 bg-red-50/60";
-  if (status === "cancelled") return "border-amber-200 bg-amber-50/60";
+function statusCardClass(item: LiveBatchItem) {
+  if (hasSuccessfulAttempt(item) || item.status === "completed") return "border-emerald-200 bg-emerald-50/60";
+  if (item.status === "discovering") return "border-indigo-200 bg-gradient-to-r from-indigo-50 to-cyan-50 shadow-md shadow-indigo-100/60";
+  if (item.status === "failed") return "border-red-200 bg-red-50/60";
+  if (item.status === "cancelled") return "border-amber-200 bg-amber-50/60";
   return "border-slate-200 bg-slate-50/70";
+}
+
+function hasSuccessfulAttempt(item: LiveBatchItem) {
+  return Boolean(item.result?.attempts?.some(
+    (attempt) => attempt.status.toLowerCase() === "completed"
+  ));
 }
 
 function formatDuration(milliseconds: number) {
@@ -619,7 +625,8 @@ function formatDuration(milliseconds: number) {
   return `${seconds}s`;
 }
 
-function statusBadgeClass(status: LiveBatchItem["status"]) {
+function statusBadgeClass(status: LiveBatchItem["status"], hasSuccessfulSubmission = false) {
+  if (status === "failed" && hasSuccessfulSubmission) return "bg-amber-100 text-amber-800";
   if (status === "discovering") return "bg-indigo-100 text-indigo-700";
   if (status === "completed") return "bg-emerald-100 text-emerald-700";
   if (status === "failed") return "bg-red-100 text-red-700";

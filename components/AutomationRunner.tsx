@@ -39,7 +39,9 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [state, formAction] = useActionState(runAutomationAction, initialState);
   const [selectedWebsiteId, setSelectedWebsiteId] = useState("");
   const [sourceMode, setSourceMode] = useState<"manual" | "excel">("manual");
+  const [automationType, setAutomationType] = useState("auto");
   const [websiteUrl, setWebsiteUrl] = useState("");
+  const [directContactUrl, setDirectContactUrl] = useState("");
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
@@ -174,7 +176,9 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   function openMonitorTab(form: HTMLFormElement) {
     const formData = new FormData(form);
     const shouldOpenTab = formData.get("openMonitorTab") === "on";
-    const targetUrl = websiteUrl.trim();
+    const targetUrl = automationType === "direct_contact"
+      ? directContactUrl.trim()
+      : websiteUrl.trim();
 
     if (shouldOpenTab && targetUrl) {
       const monitorWindow = window.open("about:blank", "_blank");
@@ -187,7 +191,9 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   }
 
   function openCurrentUrl() {
-    const targetUrl = websiteUrl.trim();
+    const targetUrl = automationType === "direct_contact"
+      ? directContactUrl.trim()
+      : websiteUrl.trim();
 
     if (targetUrl) {
       window.open(targetUrl, "_blank", "noopener,noreferrer");
@@ -233,8 +239,11 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             <select
               className="mt-2 w-full rounded-xl border border-line bg-slate-50/70 px-3 py-2.5 text-sm outline-none transition focus:border-brand focus:bg-white focus:ring-4 focus:ring-brand/10"
               name="automationType"
+              onChange={(event) => setAutomationType(event.currentTarget.value)}
+              value={automationType}
             >
               <option value="auto">Auto discover if needed</option>
+              <option value="direct_contact">Direct contact page only — fastest</option>
               <option value="booking">Use this exact URL as booking widget</option>
               <option value="hubspot">Use this exact URL as HubSpot</option>
               <option value="calendly">Use this exact URL as Calendly</option>
@@ -290,6 +299,27 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
               Open Monitor Tab
             </button>
           </div>
+          {automationType === "direct_contact" ? (
+            sourceMode === "manual" ? (
+              <div>
+                <Field
+                  label="Direct Contact Form URL"
+                  name="directContactUrl"
+                  onChange={(event) => setDirectContactUrl(event.currentTarget.value)}
+                  placeholder="https://example.com/contact-us"
+                  type="url"
+                  value={directContactUrl}
+                />
+                <p className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-800">
+                  Only this page will be opened. Homepage discovery, sitemap checks, crawling, Calendly and HubSpot detection are skipped.
+                </p>
+              </div>
+            ) : (
+              <p className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs leading-5 text-indigo-800">
+                Each Excel row must contain a <strong>contactPageUrl</strong>. Rows without one will fail fast without opening the homepage.
+              </p>
+            )
+          ) : null}
           <div className="flex items-center gap-2 pt-1 text-xs font-semibold uppercase tracking-wide text-muted">
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-cyan-100 text-cyan-700">2</span>
             Lead information

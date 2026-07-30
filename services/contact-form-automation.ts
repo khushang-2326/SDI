@@ -846,11 +846,22 @@ export async function submitContactForm({
     }
     page.setDefaultTimeout(timeoutMs);
 
+    // A contact form can be usable even when a legacy script, tracker, or other
+    // resource prevents DOMContentLoaded/networkidle from completing. Continue
+    // as soon as the server commits the document, then wait for form controls.
     await page.goto(websiteUrl, {
-      waitUntil: "domcontentloaded",
+      waitUntil: "commit",
       timeout: timeoutMs
     });
-    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => undefined);
+    await page
+      .locator("form, input, textarea, select, button[type='submit'], input[type='submit']")
+      .first()
+      .waitFor({
+        state: "attached",
+        timeout: Math.min(timeoutMs, 15000)
+      })
+      .catch(() => undefined);
+    await page.waitForTimeout(300);
 
     let fillResult = await fillAllVisibleForms(page, leadData);
     // Exit-intent and delayed marketing forms can mount after the primary form

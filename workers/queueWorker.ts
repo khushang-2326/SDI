@@ -96,6 +96,16 @@ const worker = new Worker(
       let discoveryReason: string | null = null;
       let targetType: string | null = automationType;
 
+      if (automationType === "direct_contact") {
+        if (!website.contactPageUrl) {
+          throw new Error("Direct contact mode requires contactPageUrl for this website.");
+        }
+        websiteUrl = website.contactPageUrl;
+        automationType = "contact";
+        targetType = "contact_form";
+        discoveryReason = "Direct contact mode: opened only the supplied contact page URL.";
+      }
+
       // 2. Acquire browser context
       context = await acquireContext();
       await logger.info("Browser context acquired.");

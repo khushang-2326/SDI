@@ -810,6 +810,7 @@ export async function runSingleAutomationAction(
 ): Promise<AutomationRunnerState> {
   const selectedWebsiteId = readText(formData, "websiteId");
   const manualWebsiteUrl = readText(formData, "websiteUrl");
+  const manualDirectContactUrl = readText(formData, "directContactUrl");
   let websiteUrl = manualWebsiteUrl;
   let automationType = readText(formData, "automationType") || "auto";
   let discoveryReason: string | null = null;
@@ -833,6 +834,33 @@ export async function runSingleAutomationAction(
 
   if (selectedWebsite) {
     websiteUrl = selectedWebsite.contactPageUrl || selectedWebsite.websiteUrl;
+  }
+
+  if (automationType === "direct_contact") {
+    const directUrl = selectedWebsite?.contactPageUrl || manualDirectContactUrl;
+    if (!directUrl) {
+      return {
+        result: {
+          websiteUrl: selectedWebsite?.websiteUrl || manualWebsiteUrl,
+          resolvedUrl: "",
+          discoveryReason: "Direct contact mode does not run automatic discovery.",
+          targetType: "contact_form",
+          status: "failed",
+          errorMessage: "A direct contact form URL is required for direct contact mode.",
+          screenshotPath: null,
+          screenshotPaths: [],
+          selectedDate: null,
+          selectedTime: null,
+          filledFields: [],
+          skippedFields: [],
+          submittedAt: new Date().toISOString()
+        }
+      };
+    }
+    websiteUrl = directUrl;
+    automationType = "contact";
+    targetType = "contact_form";
+    discoveryReason = "Direct contact mode: opened only the supplied contact page URL.";
   }
 
   if (!websiteUrl || !leadData.fullName || !leadData.email) {

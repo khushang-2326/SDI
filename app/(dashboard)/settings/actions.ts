@@ -9,6 +9,7 @@ import { revalidatePath } from "next/cache";
 export type CaptchaSettingsState = {
   success?: boolean;
   error?: string;
+  captchaEnabled?: boolean;
 };
 
 /**
@@ -20,7 +21,8 @@ export async function updateCaptchaSettingsAction(
 ): Promise<CaptchaSettingsState> {
   try {
     const user = await requireUser();
-    const enabled = formData.get("captchaEnabled") === "on";
+    const enabledValue = String(formData.get("captchaEnabled") || "").toLowerCase();
+    const enabled = enabledValue === "true" || enabledValue === "on" || enabledValue === "1";
     const provider = String(formData.get("captchaProvider") || "mock");
     const rawApiKey = String(formData.get("captchaApiKey") || "").trim();
 
@@ -50,7 +52,7 @@ export async function updateCaptchaSettingsAction(
     });
 
     revalidatePath("/settings");
-    return { success: true };
+    return { success: true, captchaEnabled: enabled };
   } catch (error: any) {
     return { success: false, error: error.message || "Failed to save settings." };
   }

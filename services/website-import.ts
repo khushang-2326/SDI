@@ -88,9 +88,12 @@ export async function importWebsitesFromExcel(
   });
   const existingWebsites = await prisma.targetWebsite.findMany({
     where: { userId },
-    select: { websiteUrl: true }
+    select: { id: true, websiteUrl: true, contactPageUrl: true }
   });
   const seenUrls = new Set(existingWebsites.map((website) => normalizeUrl(website.websiteUrl)));
+  const existingByUrl = new Map(
+    existingWebsites.map((website) => [normalizeUrl(website.websiteUrl), website])
+  );
 
   let duplicateRows = 0;
   let invalidRows = 0;
@@ -109,9 +112,15 @@ export async function importWebsitesFromExcel(
     }
 
     let websiteUrl: string;
+    let contactPageUrl = "";
 
     try {
       websiteUrl = normalizeUrl(rawWebsiteUrl);
+      const rawContactPageUrl =
+        readCell(row.contactPageUrl) ||
+        readCell(row.directContactUrl) ||
+        readCell(row.bookingUrl);
+      contactPageUrl = rawContactPageUrl ? normalizeUrl(rawContactPageUrl) : "";
     } catch {
       invalidRows += 1;
       continue;
@@ -125,12 +134,18 @@ export async function importWebsitesFromExcel(
     const normalizedWebsiteUrl = websiteUrl;
 
     if (seenUrls.has(normalizedWebsiteUrl)) {
+      const existing = existingByUrl.get(normalizedWebsiteUrl);
+      if (existing && contactPageUrl && existing.contactPageUrl !== contactPageUrl) {
+        await prisma.targetWebsite.update({
+          where: { id: existing.id },
+          data: { contactPageUrl }
+        });
+      }
       duplicateRows += 1;
       continue;
     }
 
     seenUrls.add(normalizedWebsiteUrl);
-    const contactPageUrl = readCell(row.contactPageUrl) || readCell(row.bookingUrl);
     validRows.push({
       websiteName: readCell(row.websiteName) || websiteNameFromUrl(websiteUrl),
       websiteUrl,

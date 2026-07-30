@@ -86,11 +86,11 @@ export function SettingsForm({ initialSettings, history }: SettingsFormProps) {
                 <p className="text-xs text-muted mt-0.5">Solve bot verification checks dynamically during jobs.</p>
               </div>
               <label className="relative inline-flex cursor-pointer items-center">
+                <input name="captchaEnabled" type="hidden" value={enabled ? "true" : "false"} />
                 <input
                   checked={enabled}
                   className="peer sr-only"
                   id="captchaEnabled"
-                  name="captchaEnabled"
                   onChange={(e) => setEnabled(e.target.checked)}
                   type="checkbox"
                 />

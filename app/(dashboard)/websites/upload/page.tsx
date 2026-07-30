@@ -111,6 +111,15 @@ export default async function WebsiteUploadPage({
                 </code>
               ))}
             </div>
+            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+              <p className="text-sm font-semibold text-emerald-900">Optional fast-mode column</p>
+              <code className="mt-2 block rounded-md border border-emerald-200 bg-white px-3 py-2 text-sm text-emerald-900">
+                contactPageUrl
+              </code>
+              <p className="mt-2 text-xs leading-5 text-emerald-800">
+                Add a verified direct contact-form page for each website. Direct contact mode opens only this URL and skips discovery.
+              </p>
+            </div>
           </section>
 
           {hasSummary ? (

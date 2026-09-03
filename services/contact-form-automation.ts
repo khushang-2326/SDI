@@ -31,7 +31,7 @@ type FormScope = Page | Locator;
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
 const COMMON_INPUT_SELECTOR = [
-  "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='reset'])",
+  "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='reset']):not([type='checkbox']):not([type='radio'])",
   "textarea",
   "select"
 ].join(",");
@@ -351,11 +351,27 @@ async function fillAllVisibleForms(page: Page, leadData: LeadData) {
     for (const field of result.skippedFields) skippedFields.add(field);
   }
 
+  // Also check child frames (e.g. Dubsado, Typeform, embedded forms)
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const frameForms = frame.locator("form");
+    const frameFormCount = await frameForms.count().catch(() => 0);
+    for (let i = 0; i < frameFormCount; i++) {
+      const form = frameForms.nth(i);
+      if (await form.isVisible().catch(() => false)) {
+        visibleFormCount++;
+        const result = await fillDetectedFields(form as any, leadData);
+        for (const field of result.filledFields) filledFields.add(field);
+        for (const field of result.skippedFields) skippedFields.add(field);
+      }
+    }
+  }
+
   for (const field of filledFields) skippedFields.delete(field);
   return { filledFields: [...filledFields], skippedFields: [...skippedFields] };
 }
 
-async function findSubmitButton(page: Page) {
+async function findSubmitButton(page: Page, leadData?: LeadData) {
   const selectors = [
     "button[type='submit']",
     "input[type='submit']",
@@ -381,7 +397,9 @@ async function findSubmitButton(page: Page) {
     "[role='button']:has-text('Submit')",
     "[role='button']:has-text('Send')",
     "[role='button']:has-text('Enviar')",
-    "[role='button']:has-text('Absenden')"
+    "[role='button']:has-text('Absenden')",
+    "button:has-text('Let\'s get started')",
+    "input[value*='started' i]"
   ];
 
   const modalRoots = page.locator([
@@ -393,16 +411,93 @@ async function findSubmitButton(page: Page) {
   for (let rootIndex = 0; rootIndex < await modalRoots.count(); rootIndex++) {
     const root = modalRoots.nth(rootIndex);
     for (const selector of selectors) {
-      const locator = root.locator(selector).first();
-      if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) return locator;
+      const locators = root.locator(selector);
+      const count = await locators.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const loc = locators.nth(i);
+        if (await loc.isVisible().catch(() => false)) return loc;
+      }
     }
   }
 
   for (const selector of selectors) {
-    const locator = page.locator(selector).first();
+    const locators = page.locator(selector);
+    const count = await locators.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const loc = locators.nth(i);
+      if (await loc.isVisible().catch(() => false)) {
+        return loc;
+      }
+    }
+  }
 
-    if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) {
-      return locator;
+  // Multi-step forms (e.g. Elementor, Town & Country Web Design): click "NEXT" button to reveal submit button
+  const nextStepSelectors = [
+    ".e-form__buttons__wrapper__button-next:visible",
+    "button:has-text('NEXT'):visible",
+    "button:has-text('Next'):visible",
+    "button:has-text('Continue'):visible",
+    "button:has-text('Weiter'):visible",
+    "button:has-text('Siguiente'):visible",
+    "input[value='NEXT' i]:visible",
+    "input[value='Next' i]:visible",
+    "[role='button']:has-text('Next'):visible"
+  ];
+
+  for (let step = 0; step < 4; step++) {
+    let clickedNext = false;
+    for (const nextSel of nextStepSelectors) {
+      const nextBtn = page.locator(nextSel).first();
+      if ((await nextBtn.count()) > 0 && (await nextBtn.isVisible().catch(() => false))) {
+        // If there are visible unchecked checkboxes, check the first one to allow next step
+        const visibleCbs = page.locator("input[type='checkbox']:visible");
+        const cbCount = await visibleCbs.count().catch(() => 0);
+        if (cbCount > 0) {
+          const firstCb = visibleCbs.first();
+          if (!(await firstCb.isChecked().catch(() => false))) {
+            await firstCb.check({ force: true }).catch(() => undefined);
+            await page.waitForTimeout(250);
+          }
+        }
+        await nextBtn.scrollIntoViewIfNeeded().catch(() => undefined);
+        await nextBtn.click({ force: true }).catch(() => undefined);
+        await page.waitForTimeout(1200);
+        clickedNext = true;
+        if (leadData) {
+          await fillAllVisibleForms(page, leadData).catch(() => undefined);
+        }
+        break;
+      }
+    }
+
+    if (clickedNext) {
+      for (const selector of selectors) {
+        const locators = page.locator(selector);
+        const count = await locators.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          const loc = locators.nth(i);
+          if (await loc.isVisible().catch(() => false)) {
+            return loc;
+          }
+        }
+      }
+    } else {
+      break;
+    }
+  }
+
+  // Also check inside child frames (e.g. Dubsado on zachtoth.com)
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    for (const selector of selectors) {
+      const locators = frame.locator(selector);
+      const count = await locators.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const loc = locators.nth(i);
+        if (await loc.isVisible().catch(() => false)) {
+          return loc;
+        }
+      }
     }
   }
 
@@ -416,13 +511,19 @@ async function detectBookingWidget(page: Page): Promise<BookingWidgetDetection> 
       for (const iframe of iframes) {
         const src = iframe.getAttribute("src") ?? "";
         const title = iframe.getAttribute("title") ?? "";
+        const lowerSrc = src.toLowerCase();
+        const lowerTitle = title.toLowerCase();
 
-        if (src.toLowerCase().includes("calendly")) {
-          return "iframe src contains calendly";
+        if (lowerSrc.includes("calendly") || lowerTitle.includes("calendly")) {
+          return "iframe contains Calendly";
         }
 
-        if (title.toLowerCase().includes("calendly")) {
-          return "iframe title contains Calendly";
+        if (lowerSrc.includes("leadconnector") || lowerSrc.includes("highlevel") || lowerTitle.includes("leadconnector")) {
+          return "iframe contains LeadConnector / HighLevel booking widget";
+        }
+
+        if (lowerSrc.includes("meetings.hubspot.com")) {
+          return "iframe contains HubSpot Meetings";
         }
       }
 
@@ -555,11 +656,16 @@ async function detectSuccess(page: Page) {
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
-  await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
-  const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
-  const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-  await page.screenshot({ path: absolutePath, fullPage: true });
-  return `/screenshots/${fileName}`;
+  try {
+    await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+    const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
+    const absolutePath = path.join(SCREENSHOT_DIR, fileName);
+    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 8000, animations: "disabled" });
+    return `/screenshots/${fileName}`;
+  } catch (err) {
+    console.warn("Screenshot capture skipped:", err);
+    return null;
+  }
 }
 
 async function persistResult(result: SubmitContactFormResult, leadData: LeadData) {
@@ -881,11 +987,13 @@ export async function submitContactForm({
   leadData,
   headless = true,
   submit = true,
+  liveSubmit,
   timeoutMs = 30000,
   browserContext,
   skipPersist,
   userId
-}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean; userId?: string }): Promise<SubmitContactFormResult> {
+}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean; userId?: string; liveSubmit?: boolean }): Promise<SubmitContactFormResult> {
+  const shouldSubmit = liveSubmit !== undefined ? liveSubmit : submit;
   let browser: Browser | null = null;
   let page: Page | null = null;
   const submittedAt = new Date();
@@ -966,7 +1074,9 @@ export async function submitContactForm({
     // Dismiss any newly popped cookie consent banners
     await dismissCookieBanners(activePage).catch(() => undefined);
 
-    const submitButton = await findSubmitButton(page);
+    const submitButton = await findSubmitButton(page, leadData);
+    const postStepFill = await fillAllVisibleForms(page, leadData).catch(() => ({ filledFields: [], skippedFields: [] }));
+    filledFields = [...new Set([...filledFields, ...postStepFill.filledFields])];
 
     if (!submitButton) {
       const bookingWidget = await detectBookingWidget(page);
@@ -990,7 +1100,7 @@ export async function submitContactForm({
       throw new Error("No visible submit button found.");
     }
 
-    if (submit) {
+    if (shouldSubmit) {
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded().catch(() => undefined);
       await Promise.allSettled([
@@ -999,8 +1109,8 @@ export async function submitContactForm({
       ]);
     }
 
-    const success = submit ? await detectSuccess(page) : true;
-    screenshotPath = await takeScreenshot(page, websiteUrl, submit ? "after-submit" : "dry-run");
+    const success = shouldSubmit ? await detectSuccess(page) : true;
+    screenshotPath = await takeScreenshot(page, websiteUrl, shouldSubmit ? "after-submit" : "dry-run");
 
     if (!success) {
       throw new Error("Submit clicked, but no success message or successful page response was detected.");
@@ -1008,7 +1118,7 @@ export async function submitContactForm({
 
     const result: SubmitContactFormResult = {
       websiteUrl,
-      status: submit ? "success" : "dry_run_ready_to_book",
+      status: shouldSubmit ? "success" : "dry_run_ready_to_book",
       errorMessage: null,
       screenshotPath,
       submittedAt,

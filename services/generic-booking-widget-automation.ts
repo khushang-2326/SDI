@@ -56,11 +56,16 @@ function sleep(ms: number) {
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
-  await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
-  const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
-  const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-  await page.screenshot({ path: absolutePath, fullPage: false });
-  return `/screenshots/${fileName}`;
+  try {
+    await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+    const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
+    const absolutePath = path.join(SCREENSHOT_DIR, fileName);
+    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 8000, animations: "disabled" });
+    return `/screenshots/${fileName}`;
+  } catch (err) {
+    console.warn("Screenshot capture skipped:", err);
+    return "";
+  }
 }
 
 async function persistResult(result: SubmitContactFormResult, leadData: LeadData) {

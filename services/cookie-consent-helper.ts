@@ -29,6 +29,11 @@ const SPECIALIZED_ACCEPT_SELECTORS = [
   "button[data-ccm19-action='accept-all']",
   ".ccm19-button-primary",
   ".ccm19-accept",
+  "button.ccm--save-settings",
+  ".ccm--save-settings",
+  ".ccm--button-primary",
+  "button:has-text('Accept all')",
+  "button:has-text('Alle akzeptieren')",
   // Complianz
   ".cmplz-accept",
   "button.cmplz-btn.cmplz-accept",

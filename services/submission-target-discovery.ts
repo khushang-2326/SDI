@@ -109,11 +109,16 @@ function isSupportedExternalTarget(url: URL) {
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
-  await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
-  const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
-  const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-  await page.screenshot({ path: absolutePath, fullPage: true });
-  return `/screenshots/${fileName}`;
+  try {
+    await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+    const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
+    const absolutePath = path.join(SCREENSHOT_DIR, fileName);
+    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 8000, animations: "disabled" });
+    return `/screenshots/${fileName}`;
+  } catch (err) {
+    console.warn("Screenshot capture skipped:", err);
+    return null;
+  }
 }
 
 async function blockHeavyAssets(page: Page) {
@@ -578,7 +583,7 @@ async function detectTargetOnPage(
     };
   }
 
-  if (/\/(discovery-call|book-call|booking|book-now|schedule-call|consultation|appointment)/i.test(new URL(currentUrl).pathname)) {
+  if (/\/(discovery-call|book-call|booking|book-now|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(new URL(currentUrl).pathname)) {
     return {
       websiteUrl: url,
       discoveredUrl: currentUrl,
@@ -590,11 +595,46 @@ async function detectTargetOnPage(
     };
   }
 
+  // Prefer an actual visible form over generic booking-related page copy.
+  const contactTarget = await detectContactTarget(page, url, candidateReason);
+  if (contactTarget) return contactTarget;
+
+  // Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito)
+  const iframeTarget = await page
+    .locator("iframe")
+    .evaluateAll((iframes) => {
+      for (const iframe of iframes) {
+        const src = iframe.getAttribute("src") ?? "";
+        if (/dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com/i.test(src)) {
+          return { url: src, type: "contact_form" as const };
+        }
+        if (/leadconnectorhq\.com\/widget\/booking|calendly\.com/i.test(src)) {
+          return { url: src, type: "booking_widget" as const };
+        }
+        if (/leadconnectorhq\.com\/widget\/form/i.test(src)) {
+          return { url: src, type: "contact_form" as const };
+        }
+      }
+      return null;
+    })
+    .catch(() => null);
+
+  if (iframeTarget) {
+    return {
+      websiteUrl: url,
+      discoveredUrl: iframeTarget.url,
+      targetType: iframeTarget.type,
+      confidence: 94,
+      reason: `Embedded ${iframeTarget.type === "booking_widget" ? "booking widget" : "form"} iframe found; ${candidateReason}`,
+      checkedUrls: [],
+      screenshotPath: await takeScreenshot(page, url, "embedded-form-discovered").catch(() => null)
+    };
+  }
+
   const html = await page.content().catch(() => "");
   const hasEmbeddedBookingCalendar =
     html.includes('"type":"BookingCalendar"') ||
-    html.includes("bookingcalendar-") ||
-    html.includes("nextStepButtonText");
+    html.includes("bookingcalendar-");
 
   if (hasEmbeddedBookingCalendar) {
     return {
@@ -635,12 +675,6 @@ async function detectTargetOnPage(
     };
   }
 
-  // Prefer an actual visible form over generic booking-related page copy.
-  // Contact pages commonly contain phrases such as "contact details" that do
-  // not indicate a calendar or booking widget.
-  const contactTarget = await detectContactTarget(page, url, candidateReason);
-  if (contactTarget) return contactTarget;
-
   const bodyText = await page.locator("body").innerText({ timeout: 2500 }).catch(() => "");
   const normalizedBodyText = normalizeText(bodyText);
   const bookingText = [
@@ -652,8 +686,7 @@ async function detectTargetOnPage(
     "your info",
     "what time works best",
     "meeting duration",
-    "date/time",
-    "next step"
+    "date/time"
   ].find((phrase) => normalizedBodyText.includes(phrase));
 
   if (bookingText) {
@@ -719,7 +752,31 @@ export async function discoverSubmissionTarget({
     };
   }
 
-  if (/\/(discovery-call|book-call|booking|book-now|schedule-call|consultation|appointment)/i.test(normalizedUrl.pathname)) {
+  if (isCalendlyEventUrl(normalizedUrl)) {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      discoveredUrl: normalizedWebsiteUrl,
+      targetType: "calendly",
+      confidence: 100,
+      reason: "Direct Calendly event URL provided.",
+      checkedUrls: [normalizedWebsiteUrl],
+      screenshotPath: null
+    };
+  }
+
+  if (/\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(contact(-us)?|get-in-touch|reach-us)(\.php|\.html)?\/?$/i.test(normalizedUrl.pathname)) {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      discoveredUrl: normalizedWebsiteUrl,
+      targetType: "contact_form",
+      confidence: 95,
+      reason: "Direct contact URL provided.",
+      checkedUrls: [normalizedWebsiteUrl],
+      screenshotPath: null
+    };
+  }
+
+  if (/\/(discovery-call|book-call|booking|book-now|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(normalizedUrl.pathname)) {
     return {
       websiteUrl: normalizedWebsiteUrl,
       discoveredUrl: normalizedWebsiteUrl,
@@ -763,7 +820,10 @@ export async function discoverSubmissionTarget({
       })
       .then(() => true)
       .catch(() => false);
-    if (homepageLoaded) await page.waitForTimeout(700);
+    if (homepageLoaded) {
+      await dismissCookieBanners(page).catch(() => undefined);
+      await page.waitForTimeout(700);
+    }
 
     const directResult = homepageLoaded
       ? await detectTargetWithLazyScroll(page, page.url(), "entered URL already works")
@@ -799,6 +859,7 @@ export async function discoverSubmissionTarget({
         continue;
       }
 
+      await dismissCookieBanners(page).catch(() => undefined);
       await page.waitForTimeout(500);
 
       const result = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);

@@ -9,8 +9,10 @@ COPY prisma ./prisma/
 
 RUN npm ci
 
-# Generate Prisma Client
+# Generate Prisma Client & push initial schema
 RUN npx prisma generate
+RUN npx prisma db push --accept-data-loss
+RUN cp -f /app/prisma/dev.db /app/dev.db 2>/dev/null || true
 
 # Copy source code
 COPY . .
@@ -26,5 +28,5 @@ ENV NODE_ENV=production
 ENV QUEUE_PROVIDER=local
 ENV STORAGE_PROVIDER=local
 
-# Start Next.js server
-CMD ["sh", "-c", "npx prisma db push --skip-generate || true; npm start"]
+# Start Next.js server with auto-migrated database
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss || true; cp -f /app/prisma/dev.db /app/dev.db 2>/dev/null || true; cp -f /app/dev.db /app/prisma/dev.db 2>/dev/null || true; npm start"]

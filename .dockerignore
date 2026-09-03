@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+public/screenshots/*
+!public/screenshots/.gitkeep
+dev.db
+dev.db-journal
+*.log
+scratch

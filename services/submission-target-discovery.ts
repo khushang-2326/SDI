@@ -9,6 +9,7 @@ import {
   DiscoveredSubmissionTarget,
   SubmissionTargetType
 } from "@/types/automation";
+import { dismissCookieBanners } from "./cookie-consent-helper";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEFAULT_MAX_NAVIGATION_LINKS = 10;
@@ -92,9 +93,19 @@ function withoutHash(value: string) {
   return url.toString();
 }
 
+function isCalendlyEventUrl(url: URL) {
+  const hostname = url.hostname.toLowerCase();
+  if (hostname !== "calendly.com" && !hostname.endsWith(".calendly.com")) return false;
+
+  // Public event URLs always contain the owner and event-slug path segments
+  // (for example /acme/intro-call). Calendly's own /contact and /pricing pages
+  // are ordinary website pages, not scheduling targets.
+  return url.pathname.split("/").filter(Boolean).length >= 2;
+}
+
 function isSupportedExternalTarget(url: URL) {
   const hostname = url.hostname.toLowerCase();
-  return hostname === "calendly.com" || hostname === "meetings.hubspot.com";
+  return isCalendlyEventUrl(url) || hostname === "meetings.hubspot.com";
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
@@ -489,7 +500,7 @@ async function collectSupportedExternalCandidates(page: Page, baseUrl: string): 
     try {
       const resolved = new URL(link.href, baseUrl);
       const hostname = resolved.hostname.toLowerCase();
-      if (hostname !== "calendly.com" && !hostname.endsWith(".calendly.com") && hostname !== "meetings.hubspot.com") {
+      if (!isCalendlyEventUrl(resolved) && hostname !== "meetings.hubspot.com") {
         return [];
       }
       return [{
@@ -512,7 +523,7 @@ function resultFromSupportedExternalCandidate(
   const hostname = resolved.hostname.toLowerCase();
   const targetType = hostname === "meetings.hubspot.com"
     ? "hubspot_booking"
-    : hostname === "calendly.com" || hostname.endsWith(".calendly.com")
+    : isCalendlyEventUrl(resolved)
       ? "calendly"
       : null;
 
@@ -555,7 +566,7 @@ async function detectTargetOnPage(
     };
   }
 
-  if (currentHostname === "calendly.com" || currentHostname.endsWith(".calendly.com")) {
+  if (isCalendlyEventUrl(new URL(currentUrl))) {
     return {
       websiteUrl: url,
       discoveredUrl: currentUrl,
@@ -726,8 +737,14 @@ export async function discoverSubmissionTarget({
       page = await browserContext.newPage();
     } else {
       browser = await chromium.launch({
-        headless,
-        executablePath: await getChromiumExecutablePath()
+        headless: process.env.NODE_ENV === "production" || (!process.env.DISPLAY && process.platform !== "win32") ? true : headless,
+        executablePath: await getChromiumExecutablePath(),
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu"
+        ]
       });
 
       page = await browser.newPage({
@@ -888,8 +905,14 @@ export async function discoverSubmissionTargets({
       page = await browserContext.newPage();
     } else {
       browser = await chromium.launch({
-        headless,
-        executablePath: await getChromiumExecutablePath()
+        headless: process.env.NODE_ENV === "production" || (!process.env.DISPLAY && process.platform !== "win32") ? true : headless,
+        executablePath: await getChromiumExecutablePath(),
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu"
+        ]
       });
       page = await browser.newPage({
         viewport: { width: 1280, height: 820 },
@@ -915,9 +938,29 @@ export async function discoverSubmissionTargets({
       };
     }
 
+    // Auto-accept cookie banners so nav links and forms are visible
+    await dismissCookieBanners(page).catch(() => undefined);
     await page.waitForTimeout(700);
+    await dismissCookieBanners(page).catch(() => undefined);
     checkedUrls.push(withoutHash(page.url()));
-    addResult(await detectTargetWithLazyScroll(page, page.url(), "entered URL already works"));
+    const directResult = await detectTargetWithLazyScroll(page, page.url(), "entered URL already works");
+    addResult(directResult);
+
+    // A direct public scheduling URL is already the exact target. Continuing
+    // through Calendly's navigation discovers its corporate contact pages and
+    // wastes the remaining automation budget on unrelated forms.
+    if (directResult?.targetType === "calendly" || directResult?.targetType === "hubspot_booking") {
+      const targets = Array.from(discovered.values()).sort(
+        (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
+      );
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets,
+        checkedUrls,
+        reason: "The entered URL is a direct booking page.",
+        screenshotPath: targets[0]?.screenshotPath
+      };
+    }
 
     const supportedExternalCandidates = await collectSupportedExternalCandidates(page, page.url());
     for (const candidate of supportedExternalCandidates) {
@@ -942,6 +985,7 @@ export async function discoverSubmissionTargets({
         timeout: Math.min(timeoutMs, 7000)
       }).then(() => true).catch(() => false);
       if (!loaded) continue;
+      await dismissCookieBanners(page).catch(() => undefined);
       await page.waitForTimeout(500);
       addResult(await detectTargetWithLazyScroll(page, page.url(), candidate.reason));
     }

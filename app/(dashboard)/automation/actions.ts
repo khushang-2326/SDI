@@ -433,12 +433,17 @@ async function processLocalQueueResult(userId: string, resultId: string) {
       });
       if (!website) throw new Error("Target website record not found.");
       const showBrowser = payloadFields.get("showBrowser") === "on";
-      const context = await acquireContext({ headless: !showBrowser });
+      const context = await acquireContext({ headless: !showBrowser, userId });
       try {
         const targetIds = new Map<string, string>();
         const attemptIds = new Map<string, string>();
         const key = (target: { targetType: string; url: string }) => `${target.targetType}:${target.url}`;
-        const run = await withAutomationTimeout(runMultiTargetAutomation({
+        // Each target engine already has navigation and action timeouts. Do not
+        // race this shared-context run against a timer here: Promise.race leaves
+        // the automation running and the finally block below closes its context,
+        // producing misleading "target page or browser has been closed" errors
+        // for every remaining target.
+        const run = await runMultiTargetAutomation({
           websiteUrl: website.websiteUrl,
           leadData: {
             fullName: payloadFields.get("fullName") || "",
@@ -457,6 +462,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
           liveSubmit: payload.liveSubmit,
           browserContext: context,
           timeoutMs: config.worker.timeoutMs,
+          deadlineAt: Date.now() + config.worker.websiteTimeoutMs,
           userId,
           cachedTargets: website.discoveredTargets.map((target) => ({
             targetType: target.targetType as "calendly" | "hubspot_booking" | "contact_form" | "booking_widget",
@@ -558,16 +564,16 @@ async function processLocalQueueResult(userId: string, resultId: string) {
               });
             }
           }
-        }), config.worker.websiteTimeoutMs);
+        });
         if (run.targets.length === 0) throw new Error(run.discoveryReason);
         const successes = run.attempts.filter((attempt) =>
           ["success", "dry_run_ready_to_book"].includes(attempt.result.status)
         );
-        const allSuccessful = successes.length === run.attempts.length;
+        const anySuccessful = successes.length > 0;
         await prisma.submissionResult.update({
           where: { id: resultId },
           data: {
-            status: allSuccessful ? "Completed" : "Failed",
+            status: anySuccessful ? "Completed" : "Failed",
             message: `${successes.length}/${run.attempts.length} targets completed successfully`,
             screenshotPath: run.attempts.map((attempt) => attempt.result.screenshotPath).filter(Boolean).at(-1) ?? null,
             submittedAt: new Date()
@@ -839,16 +845,39 @@ export async function runSingleAutomationAction(
   if (automationType === "direct_contact") {
     const directUrl = selectedWebsite?.contactPageUrl || manualDirectContactUrl;
     if (!directUrl) {
+      const targetUrl = selectedWebsite?.websiteUrl || manualWebsiteUrl;
+      let failureScreenshotPath: string | null = null;
+      if (targetUrl) {
+        try {
+          const tempContext = await acquireContext({ headless: !showBrowser, userId });
+          const tempPage = await tempContext.newPage();
+          await tempPage.goto(targetUrl, { waitUntil: "commit", timeout: 10000 }).catch(() => undefined);
+          
+          const fs = await import("node:fs/promises");
+          const path = await import("node:path");
+          const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
+          await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+          const fileName = `${Date.now()}-${targetUrl.replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 70)}-failure.png`;
+          const absolutePath = path.join(SCREENSHOT_DIR, fileName);
+          await tempPage.screenshot({ path: absolutePath, fullPage: false }).catch(() => undefined);
+          failureScreenshotPath = `/screenshots/${fileName}`;
+          
+          await releaseContext(tempContext).catch(() => undefined);
+        } catch (screenshotErr) {
+          console.error("Failed to capture base website screenshot for direct contact mode failure:", screenshotErr);
+        }
+      }
+
       return {
         result: {
-          websiteUrl: selectedWebsite?.websiteUrl || manualWebsiteUrl,
+          websiteUrl: targetUrl,
           resolvedUrl: "",
           discoveryReason: "Direct contact mode does not run automatic discovery.",
           targetType: "contact_form",
           status: "failed",
           errorMessage: "A direct contact form URL is required for direct contact mode.",
-          screenshotPath: null,
-          screenshotPaths: [],
+          screenshotPath: failureScreenshotPath,
+          screenshotPaths: failureScreenshotPath ? [failureScreenshotPath] : [],
           selectedDate: null,
           selectedTime: null,
           filledFields: [],
@@ -883,7 +912,7 @@ export async function runSingleAutomationAction(
     };
   }
 
-  const browserContext = await acquireContext({ headless: !showBrowser });
+  const browserContext = await acquireContext({ headless: !showBrowser, userId });
   try {
   if (automationType === "auto") {
     const savedNotes = selectedWebsite?.notes?.toLowerCase() ?? "";

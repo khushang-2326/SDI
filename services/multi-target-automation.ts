@@ -34,6 +34,16 @@ export type MultiTargetCallbacks = {
 const MAX_TARGET_ATTEMPTS_PER_WEBSITE = 5;
 const MAX_CONSECUTIVE_FAILURES = 3;
 
+function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
+  if (target.targetType !== "calendly") return true;
+  try {
+    const url = new URL(target.url);
+    return url.pathname.split("/").filter(Boolean).length >= 2;
+  } catch {
+    return false;
+  }
+}
+
 function failedResult(target: DiscoveredSubmissionTarget, error: unknown): SubmitContactFormResult {
   return {
     websiteUrl: target.url,
@@ -53,7 +63,8 @@ async function executeTarget({
   bookingPreferences,
   liveSubmit,
   browserContext,
-  userId
+  userId,
+  timeoutMs
 }: {
   target: DiscoveredSubmissionTarget;
   leadData: LeadData;
@@ -61,6 +72,7 @@ async function executeTarget({
   liveSubmit: boolean;
   browserContext: BrowserContext;
   userId?: string;
+  timeoutMs: number;
 }) {
   if (target.targetType === "calendly") {
     return submitCalendlyBooking({
@@ -69,7 +81,8 @@ async function executeTarget({
       bookingPreferences,
       liveSubmit,
       browserContext,
-      skipPersist: true
+      skipPersist: true,
+      timeoutMs
     });
   }
   if (target.targetType === "contact_form") {
@@ -79,7 +92,8 @@ async function executeTarget({
       submit: liveSubmit,
       browserContext,
       skipPersist: true,
-      userId
+      userId,
+      timeoutMs
     });
   }
   if (target.targetType === "hubspot_booking") {
@@ -89,7 +103,8 @@ async function executeTarget({
       bookingPreferences,
       liveSubmit,
       browserContext,
-      skipPersist: true
+      skipPersist: true,
+      timeoutMs
     });
   }
   return submitGenericBookingWidget({
@@ -98,7 +113,8 @@ async function executeTarget({
     bookingPreferences,
     liveSubmit,
     browserContext,
-    skipPersist: true
+    skipPersist: true,
+    timeoutMs
   });
 }
 
@@ -111,7 +127,8 @@ export async function runMultiTargetAutomation({
   timeoutMs,
   cachedTargets = [],
   callbacks = {},
-  userId
+  userId,
+  deadlineAt
 }: {
   websiteUrl: string;
   leadData: LeadData;
@@ -122,11 +139,24 @@ export async function runMultiTargetAutomation({
   cachedTargets?: DiscoveredSubmissionTarget[];
   callbacks?: MultiTargetCallbacks;
   userId?: string;
+  deadlineAt?: number;
 }): Promise<MultiTargetRunResult> {
   const attempts: MultiTargetAttemptResult[] = [];
   let consecutiveFailures = 0;
   let targetSucceeded = false;
+  let timedOut = false;
   const attemptedKeys = new Set<string>();
+  const deadlineTimer = deadlineAt === undefined
+    ? undefined
+    : setTimeout(() => {
+        timedOut = true;
+        // This context belongs to the current website run. Closing it is the
+        // only reliable way to interrupt Playwright waits at the deadline.
+        void browserContext.close().catch(() => undefined);
+      }, Math.max(0, deadlineAt - Date.now()));
+  const stopDeadlineTimer = () => {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  };
   const isSuccessful = (result: SubmitContactFormResult) =>
     ["success", "dry_run_ready_to_book"].includes(result.status);
 
@@ -135,16 +165,27 @@ export async function runMultiTargetAutomation({
       if (
         targetSucceeded ||
         attempts.length >= MAX_TARGET_ATTEMPTS_PER_WEBSITE ||
-        consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+        consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ||
+        timedOut || (deadlineAt !== undefined && Date.now() >= deadlineAt)
       ) break;
       const key = `${target.targetType}:${target.url}`;
       if (attemptedKeys.has(key)) continue;
+      const remainingMs = deadlineAt === undefined ? timeoutMs : deadlineAt - Date.now();
+      if (remainingMs <= 0) break;
       attemptedKeys.add(key);
       const startedAt = new Date();
       await callbacks.onAttemptStarted?.(target);
       let result: SubmitContactFormResult;
       try {
-        result = await executeTarget({ target, leadData, bookingPreferences, liveSubmit, browserContext, userId });
+        result = await executeTarget({
+          target,
+          leadData,
+          bookingPreferences,
+          liveSubmit,
+          browserContext,
+          userId,
+          timeoutMs: Math.max(1000, Math.min(timeoutMs, remainingMs))
+        });
       } catch (error) {
         result = failedResult(target, error);
       }
@@ -159,7 +200,7 @@ export async function runMultiTargetAutomation({
     }
   }
 
-  const orderedCachedTargets = [...cachedTargets].sort(
+  const orderedCachedTargets = cachedTargets.filter(isCalendlyEventTarget).sort(
     (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence
   );
   if (orderedCachedTargets.length > 0) {
@@ -169,6 +210,7 @@ export async function runMultiTargetAutomation({
     );
     await executeTargets(cachedContactTargets);
     if (targetSucceeded) {
+      stopDeadlineTimer();
       return {
         discoveryReason: "A cached normal contact form succeeded; booking targets were skipped.",
         checkedUrls: cachedContactTargets.map((target) => target.url),
@@ -179,9 +221,20 @@ export async function runMultiTargetAutomation({
     consecutiveFailures = 0;
   }
 
+  const discoveryRemainingMs = deadlineAt === undefined ? timeoutMs : deadlineAt - Date.now();
+  if (timedOut || discoveryRemainingMs <= 0) {
+    stopDeadlineTimer();
+    return {
+      discoveryReason: "Website automation exceeded its time limit before target discovery completed.",
+      checkedUrls: orderedCachedTargets.map((target) => target.url),
+      targets: orderedCachedTargets,
+      attempts
+    };
+  }
+
   const discovery = await discoverSubmissionTargets({
     websiteUrl,
-    timeoutMs,
+    timeoutMs: Math.max(1000, Math.min(timeoutMs, discoveryRemainingMs)),
     browserContext,
     maxNavigationLinks: 6,
     maxFallbackPaths: 3
@@ -205,10 +258,13 @@ export async function runMultiTargetAutomation({
     ).values()
   ).sort((a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence);
 
+  stopDeadlineTimer();
   return {
     discoveryReason: targetSucceeded
       ? `${discovery.reason} The first successful target was used and remaining targets were skipped.`
-      : discovery.reason,
+      : timedOut
+        ? "Website automation exceeded its time limit."
+        : discovery.reason,
     checkedUrls: Array.from(new Set([
       ...orderedCachedTargets.map((target) => target.url),
       ...discovery.checkedUrls

@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { createHmac, timingSafeEqual } from "crypto";
+import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 
@@ -49,7 +50,7 @@ export async function clearSessionCookie() {
   cookieStore.delete(COOKIE_NAME);
 }
 
-export async function getCurrentUser() {
+export const getCurrentUser = cache(async () => {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
 
@@ -73,7 +74,7 @@ export async function getCurrentUser() {
     where: { id: userId },
     select: { id: true, name: true, email: true, createdAt: true }
   });
-}
+});
 
 export async function getDemoUser() {
   return prisma.user.upsert({

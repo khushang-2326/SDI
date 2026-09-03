@@ -10,6 +10,7 @@ import {
   SubmitContactFormInput,
   SubmitContactFormResult
 } from "@/types/automation";
+import { dismissCookieBanners } from "./cookie-consent-helper";
 
 type FieldKey = "fullName" | "email" | "mobile" | "address" | "message" | "companyName";
 
@@ -107,6 +108,12 @@ async function collectFieldCandidates(scope: FormScope): Promise<FieldCandidate[
         ? document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent ?? ""
         : "";
       const nearbyText = input.closest("p, div, li, label")?.textContent ?? "";
+      const siblingText = [
+        input.previousElementSibling?.textContent,
+        input.nextElementSibling?.textContent,
+        input.parentElement?.previousElementSibling?.textContent,
+        input.parentElement?.nextElementSibling?.textContent
+      ];
 
       return {
         index,
@@ -118,7 +125,8 @@ async function collectFieldCandidates(scope: FormScope): Promise<FieldCandidate[
           input.getAttribute("autocomplete"),
           explicitLabel,
           ...labels,
-          nearbyText
+          nearbyText,
+          ...siblingText
         ]
           .filter(Boolean)
           .join(" "),
@@ -291,7 +299,30 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
     }
   }
 
-  filledFields.push(...await selectCustomDropdownDefaults(scope));
+    filledFields.push(...await selectCustomDropdownDefaults(scope));
+
+  // Check only controls the form explicitly marks as required. Optional
+  // consent and marketing opt-ins must remain untouched.
+  try {
+    const checkboxes = scope.locator("input[type='checkbox']");
+    const checkboxCount = await checkboxes.count().catch(() => 0);
+    for (let i = 0; i < checkboxCount; i++) {
+      const cb = checkboxes.nth(i);
+      if (await cb.isVisible().catch(() => false)) {
+        const cbRequired = await cb.getAttribute("required");
+        const cbAriaRequired = await cb.getAttribute("aria-required");
+        const isRequired = cbRequired !== null || cbAriaRequired === "true";
+        if (isRequired) {
+          await cb.check({ force: true }).catch(async () => {
+            await cb.click({ force: true }).catch(() => undefined);
+          });
+          filledFields.push("consentCheckbox");
+        }
+      }
+    }
+  } catch {
+    // Continue
+  }
 
   return { filledFields, skippedFields };
 }
@@ -328,17 +359,29 @@ async function findSubmitButton(page: Page) {
   const selectors = [
     "button[type='submit']",
     "input[type='submit']",
+    "button.hs-button",
+    "input.hs-button",
+    ".wpcf7-submit",
+    "form button:not([type='button'])",
+    "form input[type='submit']",
     "button:has-text('Submit')",
     "button:has-text('Send')",
     "button:has-text('Contact')",
+    "button:has-text('Get in touch')",
+    "button:has-text('Request')",
+    "button:has-text('Nachricht')",
+    "button:has-text('Enviar')",
+    "button:has-text('Absenden')",
+    "button:has-text('Envoyer')",
     "input[value*='Submit' i]",
     "input[value*='Send' i]",
+    "input[value*='Contact' i]",
+    "input[value*='Enviar' i]",
+    "input[value*='Absenden' i]",
     "[role='button']:has-text('Submit')",
-    "[role='button']:has-text('Send')"
-    ,"form button:not([type='button'])"
-    ,"form input[type='submit']"
-    ,"button:has-text('Get in touch')"
-    ,"button:has-text('Request')"
+    "[role='button']:has-text('Send')",
+    "[role='button']:has-text('Enviar')",
+    "[role='button']:has-text('Absenden')"
   ];
 
   const modalRoots = page.locator([
@@ -593,6 +636,26 @@ async function persistResult(result: SubmitContactFormResult, leadData: LeadData
   });
 }
 
+async function executeWithRetry<T>(
+  solveFn: () => Promise<T>,
+  maxRetries = 2,
+  delayMs = 3000
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await solveFn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries) {
+        console.warn(`[CAPTCHA] Solver failed (attempt ${attempt + 1}/${maxRetries + 1}). Retrying in ${delayMs}ms... Error: ${error instanceof Error ? error.message : error}`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function trySolveCaptchas(page: Page, userId?: string) {
   if (!userId) return;
 
@@ -627,7 +690,7 @@ async function trySolveCaptchas(page: Page, userId?: string) {
       const startTime = Date.now();
       try {
         console.log(`[CAPTCHA] Solving reCAPTCHA with sitekey: ${siteKey}`);
-        const { token } = await solver.solveReCaptcha(siteKey, pageUrl);
+        const { token } = await executeWithRetry(() => solver.solveReCaptcha(siteKey, pageUrl));
         const duration = Date.now() - startTime;
         
         await page.evaluate((t) => {
@@ -696,7 +759,7 @@ async function trySolveCaptchas(page: Page, userId?: string) {
       const startTime = Date.now();
       try {
         console.log(`[CAPTCHA] Solving hCaptcha with sitekey: ${siteKey}`);
-        const { token } = await solver.solveHCaptcha(siteKey, pageUrl);
+        const { token } = await executeWithRetry(() => solver.solveHCaptcha(siteKey, pageUrl));
         const duration = Date.now() - startTime;
 
         await page.evaluate((t) => {
@@ -764,7 +827,7 @@ async function trySolveCaptchas(page: Page, userId?: string) {
       const startTime = Date.now();
       try {
         console.log(`[CAPTCHA] Solving Turnstile with sitekey: ${siteKey}`);
-        const { token } = await solver.solveTurnstile(siteKey, pageUrl);
+        const { token } = await executeWithRetry(() => solver.solveTurnstile(siteKey, pageUrl));
         const duration = Date.now() - startTime;
 
         await page.evaluate((t) => {
@@ -835,8 +898,14 @@ export async function submitContactForm({
       page = await browserContext.newPage();
     } else {
       browser = await chromium.launch({
-        headless,
-        executablePath: await getChromiumExecutablePath()
+        headless: process.env.NODE_ENV === "production" || (!process.env.DISPLAY && process.platform !== "win32") ? true : headless,
+        executablePath: await getChromiumExecutablePath(),
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu"
+        ]
       });
       page = await browser.newPage({
         viewport: { width: 1366, height: 900 },
@@ -844,16 +913,26 @@ export async function submitContactForm({
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
       });
     }
+    if (!page) {
+      throw new Error("Failed to initialize browser page.");
+    }
     page.setDefaultTimeout(timeoutMs);
 
     // A contact form can be usable even when a legacy script, tracker, or other
     // resource prevents DOMContentLoaded/networkidle from completing. Continue
     // as soon as the server commits the document, then wait for form controls.
-    await page.goto(websiteUrl, {
-      waitUntil: "commit",
+    const activePage = page;
+    await activePage.goto(websiteUrl, {
+      waitUntil: "domcontentloaded",
       timeout: timeoutMs
+    }).catch(async () => {
+      await activePage.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs }).catch(() => undefined);
     });
-    await page
+
+    // Auto-accept cookie consent banners so contact forms and submit buttons become visible
+    await dismissCookieBanners(activePage).catch(() => undefined);
+
+    await activePage
       .locator("form, input, textarea, select, button[type='submit'], input[type='submit']")
       .first()
       .waitFor({
@@ -861,7 +940,9 @@ export async function submitContactForm({
         timeout: Math.min(timeoutMs, 15000)
       })
       .catch(() => undefined);
-    await page.waitForTimeout(300);
+
+    await dismissCookieBanners(activePage).catch(() => undefined);
+    await page.waitForTimeout(500);
 
     let fillResult = await fillAllVisibleForms(page, leadData);
     // Exit-intent and delayed marketing forms can mount after the primary form
@@ -881,6 +962,9 @@ export async function submitContactForm({
     await trySolveCaptchas(page, userId).catch((err) => {
       console.error("Error encountered while solving CAPTCHA:", err);
     });
+
+    // Dismiss any newly popped cookie consent banners
+    await dismissCookieBanners(activePage).catch(() => undefined);
 
     const submitButton = await findSubmitButton(page);
 
@@ -907,6 +991,7 @@ export async function submitContactForm({
     }
 
     if (submit) {
+      await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded().catch(() => undefined);
       await Promise.allSettled([
         page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 12000 }),

@@ -1,7 +1,8 @@
 "use client";
 
 import type { ChangeEvent, FormEvent } from "react";
-import { useActionState, useCallback, useEffect, useRef, useState } from "react";
+import { useActionState, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   runAutomationAction,
   startBackgroundAutomationAction,
@@ -35,6 +36,487 @@ type LiveBatchItem = {
   result?: AutomationResult;
 };
 
+type AnalysisItem = {
+  id: string;
+  name: string;
+  url: string;
+  status: "waiting" | "discovering" | "completed" | "failed" | "cancelled";
+  isSuccess: boolean;
+  trialsCount: number;
+  successfulTrialsCount: number;
+  detail: string;
+  screenshotPath?: string | null;
+  attempts?: AutomationResult["attempts"];
+};
+
+function AutomationAnalysisModal({
+  isOpen,
+  onClose,
+  items,
+  totalTrialsExecuted,
+  totalTrialsSuccessful,
+  batchStatus
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  items: AnalysisItem[];
+  totalTrialsExecuted: number;
+  totalTrialsSuccessful: number;
+  batchStatus: string;
+}) {
+  const [mounted, setMounted] = useState(false);
+  const [filter, setFilter] = useState<"all" | "success" | "failed" | "pending">("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  if (!isOpen || !mounted) return null;
+
+  const totalWebsites = items.length;
+  const successWebsites = items.filter((i) => i.isSuccess);
+  const failedWebsites = items.filter((i) => i.status === "failed" && !i.isSuccess);
+  const pendingWebsites = items.filter((i) => i.status === "waiting" || i.status === "discovering" || i.status === "cancelled");
+
+  const successRate = totalWebsites > 0 ? Math.round((successWebsites.length / totalWebsites) * 100) : 0;
+  const failureRate = totalWebsites > 0 ? Math.round((failedWebsites.length / totalWebsites) * 100) : 0;
+
+  const filteredItems = items.filter((item) => {
+    if (filter === "success" && !item.isSuccess) return false;
+    if (filter === "failed" && (item.isSuccess || item.status !== "failed")) return false;
+    if (filter === "pending" && (item.isSuccess || item.status === "failed")) return false;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.url.toLowerCase().includes(q) ||
+        item.detail.toLowerCase().includes(q)
+      );
+    }
+    return true;
+  });
+
+  const copySummary = () => {
+    const text = `AUTOMATION RUN ANALYSIS REPORT
+Status: ${batchStatus.toUpperCase()}
+Total Websites Analyzed: ${totalWebsites}
+✓ Succeeded Automations: ${successWebsites.length} (${successRate}%)
+✕ Failed Automations (0 tests succeeded): ${failedWebsites.length} (${failureRate}%)
+⏳ Pending / Cancelled: ${pendingWebsites.length}
+Total Target Trials: ${totalTrialsExecuted} (${totalTrialsSuccessful} successful)
+
+WEBSITE BREAKDOWN:
+${items
+  .map(
+    (i, idx) =>
+      `${idx + 1}. [${i.isSuccess ? "SUCCESS" : "FAILED"}] ${i.name} (${i.url}) - Trials: ${
+        i.successfulTrialsCount
+      }/${i.trialsCount} - Detail: ${i.detail}`
+  )
+  .join("\n")}`;
+
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const modalContent = (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-3 sm:p-6 backdrop-blur-md"
+      onClick={onClose}
+    >
+      <div
+        className="relative flex max-h-[90vh] w-full max-w-4xl flex-col rounded-3xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden text-slate-100"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Modal Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 px-6 py-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-indigo-500/20 text-xl text-indigo-400 ring-1 ring-indigo-500/30">
+              📊
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-bold text-white">Automation Performance Analysis</h2>
+                <span
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-extrabold uppercase tracking-wide ${
+                    batchStatus === "completed"
+                      ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40"
+                      : batchStatus === "cancelled"
+                      ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/40"
+                      : "bg-indigo-500/20 text-indigo-300 ring-1 ring-indigo-500/40"
+                  }`}
+                >
+                  {batchStatus}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                Detailed success vs failure metrics across all website trials
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={copySummary}
+              className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-700 hover:text-white"
+              title="Copy analysis summary report"
+            >
+              <span>{copied ? "✓ Copied" : "📋 Copy Report"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-800 text-sm font-bold text-slate-300 hover:bg-red-600 hover:text-white transition"
+              title="Close modal"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        {/* Modal Body */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-6 [scrollbar-width:thin]">
+          {/* Top 4 KPI Cards */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {/* Total Websites */}
+            <div className="rounded-2xl border border-slate-800 bg-slate-800/50 p-4 shadow-inner">
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Targets</p>
+              <p className="mt-2 text-2xl font-black text-white">{totalWebsites}</p>
+              <p className="mt-1 text-xs text-slate-400">Websites in workflow</p>
+            </div>
+
+            {/* Succeeded Websites (GREEN) */}
+            <div className="rounded-2xl border border-emerald-800/50 bg-emerald-950/40 p-4 shadow-inner ring-1 ring-emerald-500/20">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">Succeeded</p>
+                <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                  {successRate}%
+                </span>
+              </div>
+              <p className="mt-2 text-2xl font-black text-emerald-400">{successWebsites.length}</p>
+              <p className="mt-1 text-xs text-emerald-300/80">≥ 1 trial successful</p>
+            </div>
+
+            {/* Failed Websites (0 tests succeeded - RED) */}
+            <div className="rounded-2xl border border-red-800/50 bg-red-950/40 p-4 shadow-inner ring-1 ring-red-500/20">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-wider text-red-400">Failed (0 Success)</p>
+                <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-bold text-red-300">
+                  {failureRate}%
+                </span>
+              </div>
+              <p className="mt-2 text-2xl font-black text-red-400">{failedWebsites.length}</p>
+              <p className="mt-1 text-xs text-red-300/80">0 successful trials</p>
+            </div>
+
+            {/* Total Trials Executed */}
+            <div className="rounded-2xl border border-indigo-800/50 bg-indigo-950/40 p-4 shadow-inner ring-1 ring-indigo-500/20">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-wider text-indigo-300">Trials Executed</p>
+                <span className="text-[11px] font-bold text-indigo-400">
+                  {totalTrialsSuccessful}/{totalTrialsExecuted}
+                </span>
+              </div>
+              <p className="mt-2 text-2xl font-black text-indigo-300">{totalTrialsExecuted}</p>
+              <p className="mt-1 text-xs text-indigo-300/80">
+                {totalWebsites > 0 ? (totalTrialsExecuted / totalWebsites).toFixed(1) : 0} avg trials / website
+              </p>
+            </div>
+          </div>
+
+          {/* Stacked Visual Proportion Bar */}
+          <div className="space-y-2 rounded-2xl border border-slate-800 bg-slate-800/40 p-4">
+            <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+              <span>Outcome Distribution</span>
+              <span>
+                {successWebsites.length} Succeeded • {failedWebsites.length} Failed • {pendingWebsites.length} Other
+              </span>
+            </div>
+            <div className="h-3.5 w-full overflow-hidden rounded-full bg-slate-800 flex">
+              {successWebsites.length > 0 ? (
+                <div
+                  style={{ width: `${(successWebsites.length / totalWebsites) * 100}%` }}
+                  className="bg-emerald-500 transition-all duration-500"
+                  title={`Succeeded: ${successWebsites.length} (${successRate}%)`}
+                />
+              ) : null}
+              {failedWebsites.length > 0 ? (
+                <div
+                  style={{ width: `${(failedWebsites.length / totalWebsites) * 100}%` }}
+                  className="bg-red-500 transition-all duration-500"
+                  title={`Failed: ${failedWebsites.length} (${failureRate}%)`}
+                />
+              ) : null}
+              {pendingWebsites.length > 0 ? (
+                <div
+                  style={{ width: `${(pendingWebsites.length / totalWebsites) * 100}%` }}
+                  className="bg-amber-500 transition-all duration-500"
+                  title={`Pending/Cancelled: ${pendingWebsites.length}`}
+                />
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-4 pt-1 text-[11px] text-slate-400">
+              <span className="flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" /> Succeeded ({successWebsites.length})
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> Failed with 0 success ({failedWebsites.length})
+              </span>
+              {pendingWebsites.length > 0 ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 rounded-full bg-amber-500" /> Pending / Cancelled ({pendingWebsites.length})
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Filters & Search */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setFilter("all")}
+                className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+                  filter === "all"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+                }`}
+              >
+                All ({totalWebsites})
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilter("success")}
+                className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+                  filter === "success"
+                    ? "bg-emerald-600 text-white"
+                    : "bg-slate-800 text-emerald-400 hover:bg-slate-700"
+                }`}
+              >
+                ✓ Succeeded ({successWebsites.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setFilter("failed")}
+                className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+                  filter === "failed"
+                    ? "bg-red-600 text-white"
+                    : "bg-slate-800 text-red-400 hover:bg-slate-700"
+                }`}
+              >
+                ✕ Failed ({failedWebsites.length})
+              </button>
+              {pendingWebsites.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setFilter("pending")}
+                  className={`rounded-xl px-3 py-1.5 text-xs font-bold transition ${
+                    filter === "pending"
+                      ? "bg-amber-600 text-white"
+                      : "bg-slate-800 text-amber-400 hover:bg-slate-700"
+                  }`}
+                >
+                  ⏳ Pending / Cancelled ({pendingWebsites.length})
+                </button>
+              ) : null}
+            </div>
+
+            <input
+              type="text"
+              placeholder="Filter by name, URL, reason..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full sm:w-64 rounded-xl border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs text-white placeholder-slate-400 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20"
+            />
+          </div>
+
+          {/* Filtered Website List */}
+          <div className="space-y-3">
+            {filteredItems.map((item, idx) => (
+              <div
+                key={item.id || idx}
+                className={`rounded-2xl border p-4 transition ${
+                  item.isSuccess
+                    ? "border-emerald-700/60 bg-emerald-950/30 text-emerald-100"
+                    : item.status === "failed"
+                    ? "border-red-700/60 bg-red-950/30 text-red-100"
+                    : "border-slate-800 bg-slate-800/40 text-slate-200"
+                }`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-slate-400">#{idx + 1}</span>
+                      <h4 className="text-sm font-bold text-white">{item.name}</h4>
+                    </div>
+                    <p className="break-all text-xs opacity-75">{item.url}</p>
+                  </div>
+
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-extrabold ${
+                      item.isSuccess
+                        ? "border border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+                        : item.status === "failed"
+                        ? "border border-red-500/40 bg-red-500/20 text-red-300"
+                        : "border border-slate-600 bg-slate-700 text-slate-300"
+                    }`}
+                  >
+                    {item.isSuccess
+                      ? "✓ Succeeded"
+                      : item.status === "failed"
+                      ? "✕ Failed (0 Success)"
+                      : item.status}
+                  </span>
+                </div>
+
+                <div
+                  className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
+                    item.isSuccess
+                      ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
+                      : item.status === "failed"
+                      ? "bg-red-900/40 text-red-200 border border-red-800/50"
+                      : "bg-slate-800/60 text-slate-300"
+                  }`}
+                >
+                  <span className="mr-1 font-bold">
+                    {item.isSuccess ? "Outcome:" : "Failure Reason:"}
+                  </span>
+                  {item.detail}
+                  {item.trialsCount > 0 ? (
+                    <span className="ml-2 font-bold opacity-80">
+                      ({item.successfulTrialsCount}/{item.trialsCount} trials succeeded)
+                    </span>
+                  ) : null}
+                </div>
+
+                {item.screenshotPath ? (
+                  <div className="mt-3">
+                    <ScreenshotViewer src={item.screenshotPath} alt={item.name} />
+                  </div>
+                ) : null}
+              </div>
+            ))}
+
+            {filteredItems.length === 0 ? (
+              <div className="rounded-2xl border border-slate-800 bg-slate-800/30 p-8 text-center text-xs text-slate-400">
+                No websites match the selected filter.
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Modal Footer */}
+        <div className="flex items-center justify-between border-t border-slate-800 bg-slate-900 px-6 py-4">
+          <span className="text-xs text-slate-400">
+            {successWebsites.length} of {totalWebsites} websites succeeded ({successRate}% success rate)
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-bold text-white transition hover:bg-indigo-700 active:scale-95"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return createPortal(modalContent, document.body);
+}
+
+function ScreenshotViewer({ src, alt = "Screenshot" }: { src: string; alt?: string }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen]);
+
+  const modalContent = (
+    <div
+      className="fixed inset-0 z-50 flex flex-col bg-black/80 p-5 backdrop-blur-sm cursor-zoom-out"
+      onClick={() => setIsOpen(false)}
+    >
+      <div
+        className="relative flex flex-1 flex-col rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl overflow-hidden cursor-default"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Top Bar with Title and Close Button */}
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/90 px-6 py-4 text-white">
+          <span className="text-base font-semibold truncate pr-6">{alt}</span>
+          <button
+            type="button"
+            onClick={() => setIsOpen(false)}
+            className="flex items-center justify-center gap-1.5 rounded-xl bg-red-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-red-700 transition active:scale-95 shadow-md"
+            title="Close full screen view"
+          >
+            <span>✕</span>
+            <span>Close</span>
+          </button>
+        </div>
+
+        {/* Full Screen Image Container (scrollable to see tall screenshots) */}
+        <div className="flex-1 overflow-y-auto p-6 flex justify-center items-start bg-slate-950">
+          <div className="w-full max-w-5xl rounded-xl overflow-hidden border border-slate-800 bg-slate-900 shadow-2xl">
+            <img
+              src={src}
+              alt={alt}
+              className="w-full h-auto object-contain block"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="mt-2 w-full">
+      {/* Gallery-style thumbnail with contain sizing so nothing is cropped */}
+      <div
+        onClick={() => setIsOpen(true)}
+        className="group relative flex max-h-48 w-full cursor-zoom-in items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-100 p-1 shadow-sm transition hover:border-brand/40 hover:shadow"
+      >
+        <img
+          src={src}
+          alt={alt}
+          className="max-h-46 max-w-full rounded-lg object-contain transition duration-200 group-hover:scale-[1.01]"
+        />
+        <div className="absolute inset-0 flex items-center justify-center bg-black/10 opacity-0 transition duration-150 group-hover:opacity-100">
+          <span className="rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-md border border-slate-100">
+            Click to maximize
+          </span>
+        </div>
+      </div>
+
+      {isOpen && mounted && createPortal(modalContent, document.body)}
+    </div>
+  );
+}
+
 export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebsiteOption[]; fileGroups: FileGroup[] }) {
   const [state, formAction] = useActionState(runAutomationAction, initialState);
   const [selectedWebsiteId, setSelectedWebsiteId] = useState("");
@@ -43,6 +525,9 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [directContactUrl, setDirectContactUrl] = useState("");
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(false);
+  const [isAnalysisOpen, setIsAnalysisOpen] = useState(false);
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
@@ -65,6 +550,78 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     ? Math.max(0, (elapsedMs / finishedCount) * (liveBatchItems.length - finishedCount))
     : null;
 
+  const analysisItems: AnalysisItem[] = useMemo(() => {
+    if (liveBatchItems.length > 0) {
+      return liveBatchItems.map((item) => {
+        const isSuccess = hasSuccessfulAttempt(item);
+        const trialsCount = item.result?.attempts?.length ?? (item.status === "completed" || item.status === "failed" ? 1 : 0);
+        const successfulTrialsCount = item.result?.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
+        return {
+          id: item.id,
+          name: item.name,
+          url: item.url,
+          status: item.status,
+          isSuccess,
+          trialsCount,
+          successfulTrialsCount,
+          detail: item.detail,
+          screenshotPath: item.result?.screenshotPath,
+          attempts: item.result?.attempts
+        };
+      });
+    }
+
+    if (batchResults.length > 0) {
+      return batchResults.map((res, idx) => {
+        const isSuccess = isResultSuccessful(res);
+        const trialsCount = res.attempts?.length ?? 1;
+        const successfulTrialsCount = res.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
+        return {
+          id: `batch-${idx}`,
+          name: res.websiteUrl,
+          url: res.websiteUrl,
+          status: isSuccess ? "completed" : "failed",
+          isSuccess,
+          trialsCount,
+          successfulTrialsCount,
+          detail: res.errorMessage || res.discoveryReason || (isSuccess ? "Automation completed" : "Failed"),
+          screenshotPath: res.screenshotPath,
+          attempts: res.attempts
+        };
+      });
+    }
+
+    if (state.result) {
+      const isSuccess = isResultSuccessful(state.result);
+      const trialsCount = state.result.attempts?.length ?? 1;
+      const successfulTrialsCount = state.result.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
+      return [
+        {
+          id: "single-1",
+          name: state.result.websiteUrl || "Manual Target",
+          url: state.result.websiteUrl,
+          status: isSuccess ? "completed" : "failed",
+          isSuccess,
+          trialsCount,
+          successfulTrialsCount,
+          detail: state.result.errorMessage || state.result.discoveryReason || (isSuccess ? "Automation completed" : "Failed"),
+          screenshotPath: state.result.screenshotPath,
+          attempts: state.result.attempts
+        }
+      ];
+    }
+
+    return [];
+  }, [liveBatchItems, batchResults, state.result]);
+
+  const totalTrialsExecuted = useMemo(() => {
+    return analysisItems.reduce((acc, item) => acc + Math.max(1, item.trialsCount), 0);
+  }, [analysisItems]);
+
+  const totalTrialsSuccessful = useMemo(() => {
+    return analysisItems.reduce((acc, item) => acc + item.successfulTrialsCount, 0);
+  }, [analysisItems]);
+
   const applyBackgroundJob = useCallback((job: Awaited<ReturnType<typeof getBackgroundAutomationAction>>) => {
     if (!job) return;
     if (cancelledJobId.current === job.id && job.status !== "cancelled") return;
@@ -74,6 +631,14 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     setIsBatchRunning(job.status === "running");
     setBatchStatus(job.status);
   }, []);
+
+  function togglePauseAutomation() {
+    setIsPaused((prev) => {
+      const next = !prev;
+      isPausedRef.current = next;
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (!isBatchRunning) return;
@@ -85,6 +650,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   async function cancelAutomation() {
     if (!currentJobId) return;
     cancelledJobId.current = currentJobId;
+    isPausedRef.current = false;
+    setIsPaused(false);
     setIsBatchRunning(false);
     setBatchStatus("cancelled");
     setLiveBatchItems((items) =>
@@ -96,7 +663,18 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     );
     await cancelBackgroundAutomationAction(currentJobId).catch(() => undefined);
   }
-  async function resetAutomation() { if (!currentJobId || isBatchRunning) return; if (await resetBackgroundAutomationAction(currentJobId)) { cancelledJobId.current = null; setLiveBatchItems([]); setCurrentJobId(null); setIsBatchRunning(false); setBatchStatus("idle"); } }
+  async function resetAutomation() {
+    if (!currentJobId || isBatchRunning) return;
+    isPausedRef.current = false;
+    setIsPaused(false);
+    if (await resetBackgroundAutomationAction(currentJobId)) {
+      cancelledJobId.current = null;
+      setLiveBatchItems([]);
+      setCurrentJobId(null);
+      setIsBatchRunning(false);
+      setBatchStatus("idle");
+    }
+  }
 
   useEffect(() => {
     void getBackgroundAutomationAction().then(applyBackgroundJob);
@@ -130,6 +708,11 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
     async function processSequentially() {
       while (!stopped) {
+        if (isPausedRef.current) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          continue;
+        }
+
         const job = await processLocalBackgroundAutomationAction(jobId).catch(() => null);
         if (stopped) return;
         if (job) applyBackgroundJob(job);
@@ -384,9 +967,105 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-brand">Activity stream</p>
             <h2 className="mt-1 text-xl font-bold text-ink">Workflow result</h2>
           </div>
-          <div className="flex items-center gap-2"><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${isBatchRunning ? "bg-indigo-100 text-indigo-700" : batchStatus === "cancelled" ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>{isBatchRunning ? "● Automation running" : batchStatus === "cancelled" ? "● Cancelled" : "● Ready"}</span>{isBatchRunning ? <button className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-700" onClick={cancelAutomation} type="button">Cancel</button> : null}<button className="rounded-xl border border-line bg-white px-4 py-2 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400" disabled={isBatchRunning || !currentJobId || liveBatchItems.length === 0} onClick={resetAutomation} type="button">Reset</button></div>
+          <div className="flex flex-wrap items-center gap-2">
+            {analysisItems.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => setIsAnalysisOpen(true)}
+                className="flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-gradient-to-r from-indigo-50 to-cyan-50 px-3 py-1.5 text-xs font-bold text-indigo-800 shadow-sm transition hover:border-indigo-300 hover:from-indigo-100 hover:to-cyan-100 active:scale-95"
+                title="Open detailed success/failure analysis"
+              >
+                <span>📊</span>
+                <span>Analysis</span>
+                <span className="ml-1 rounded-md bg-white/90 px-1.5 py-0.5 text-[10px] font-extrabold text-indigo-700 shadow-inner">
+                  {analysisItems.filter((i) => i.isSuccess).length} ✓ / {analysisItems.filter((i) => i.status === "failed" && !i.isSuccess).length} ✕
+                </span>
+              </button>
+            ) : null}
+
+            <span
+              className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                isPaused
+                  ? "bg-amber-100 text-amber-800"
+                  : isBatchRunning
+                  ? "bg-indigo-100 text-indigo-700"
+                  : batchStatus === "cancelled"
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-emerald-100 text-emerald-700"
+              }`}
+            >
+              {isPaused
+                ? "⏸ Paused"
+                : isBatchRunning
+                ? "● Automation running"
+                : batchStatus === "cancelled"
+                ? "● Cancelled"
+                : "● Ready"}
+            </span>
+
+            {isBatchRunning ? (
+              <button
+                className={`rounded-xl px-3 py-1.5 text-xs font-bold text-white shadow-sm transition active:scale-95 ${
+                  isPaused ? "bg-emerald-600 hover:bg-emerald-700" : "bg-amber-500 hover:bg-amber-600"
+                }`}
+                onClick={togglePauseAutomation}
+                type="button"
+              >
+                {isPaused ? "▶ Resume" : "⏸ Pause"}
+              </button>
+            ) : null}
+
+            {isBatchRunning ? (
+              <button
+                className="rounded-xl bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-red-700 transition active:scale-95"
+                onClick={cancelAutomation}
+                type="button"
+              >
+                ✕ Cancel
+              </button>
+            ) : null}
+
+            <button
+              className="rounded-xl border border-line bg-white px-3 py-1.5 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+              disabled={isBatchRunning || !currentJobId || liveBatchItems.length === 0}
+              onClick={resetAutomation}
+              type="button"
+            >
+              Reset
+            </button>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto p-4 [scrollbar-width:thin] sm:p-6">
+        {analysisItems.length > 0 ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50/90 via-white to-cyan-50/90 p-3.5 shadow-sm">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-ink">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-[11px]">📊</span>
+                <span>Run Analysis:</span>
+              </div>
+              <span className="rounded-lg border border-emerald-300 bg-emerald-100/80 px-2.5 py-1 text-xs font-bold text-emerald-900 shadow-sm">
+                ✓ {analysisItems.filter((i) => i.isSuccess).length} Succeeded
+              </span>
+              <span className="rounded-lg border border-red-300 bg-red-100/80 px-2.5 py-1 text-xs font-bold text-red-900 shadow-sm">
+                ✕ {analysisItems.filter((i) => i.status === "failed" && !i.isSuccess).length} Failed (0 Success)
+              </span>
+              {analysisItems.some((i) => i.status === "waiting" || i.status === "discovering") ? (
+                <span className="rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
+                  ⏳ {analysisItems.filter((i) => i.status === "waiting" || i.status === "discovering").length} In Progress
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsAnalysisOpen(true)}
+              className="inline-flex items-center gap-1 rounded-xl bg-brand px-3 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-brand/90 active:scale-95"
+            >
+              <span>View Full Analysis</span>
+              <span>→</span>
+            </button>
+          </div>
+        ) : null}
+
         {liveBatchItems.length > 0 ? (
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -408,55 +1087,70 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
               <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Elapsed</span><strong className="ml-2 text-ink">{formatDuration(elapsedMs)}</strong></div>
               <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Estimated time left</span><strong className="ml-2 text-ink">{estimatedRemainingMs === null ? "Calculating…" : formatDuration(estimatedRemainingMs)}</strong></div>
             </div>
-            {liveBatchItems.map((item, index) => (
-              <div className={`card-enter relative overflow-hidden rounded-2xl border p-4 transition duration-300 ${statusCardClass(item)}`} key={item.id}>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-                      Website {index + 1} of {liveBatchItems.length}
-                    </p>
-                    <p className="mt-1 text-sm font-semibold text-ink">{item.name}</p>
-                    <p className="break-all text-xs text-muted">{item.url}</p>
+            {liveBatchItems.map((item, index) => {
+              const isSuccess = hasSuccessfulAttempt(item);
+              const isFailedZeroSuccess = item.status === "failed" && !isSuccess;
+              const attemptsCount = item.result?.attempts?.length ?? 0;
+              const successfulAttemptsCount = item.result?.attempts?.filter(isAttemptSuccessful).length ?? 0;
+
+              return (
+                <div className={`card-enter relative overflow-hidden rounded-2xl border p-4 transition duration-300 ${statusCardClass(item)}`} key={item.id}>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                        Website {index + 1} of {liveBatchItems.length}
+                      </p>
+                      <p className="mt-1 text-sm font-semibold text-ink">{item.name}</p>
+                      <p className="break-all text-xs text-muted">{item.url}</p>
+                    </div>
+                    <span className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-bold ${statusBadgeClass(item.status, isSuccess)}`}>
+                      <span className={`h-2 w-2 rounded-full ${isSuccess ? "bg-emerald-500" : item.status === "discovering" ? "workflow-pulse bg-indigo-500" : isFailedZeroSuccess ? "bg-red-500" : item.status === "cancelled" ? "bg-amber-500" : "bg-slate-400"}`} />
+                      {isSuccess ? (attemptsCount > 1 ? `Completed (${successfulAttemptsCount}/${attemptsCount} trials)` : "Completed") : isFailedZeroSuccess ? "Failed (0 trials succeeded)" : item.status}
+                    </span>
                   </div>
-                  <span className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-xs font-semibold ${statusBadgeClass(item.status, hasSuccessfulAttempt(item))}`}>
-                    <span className={`h-2 w-2 rounded-full ${item.status === "discovering" ? "workflow-pulse bg-indigo-500" : item.status === "completed" ? "bg-emerald-500" : item.status === "failed" ? hasSuccessfulAttempt(item) ? "bg-amber-500" : "bg-red-500" : item.status === "cancelled" ? "bg-amber-500" : "bg-slate-400"}`} />
-                    {item.status}
-                  </span>
-                </div>
-                <div className={`mt-3 rounded-xl px-3 py-2 text-xs ${item.status === "failed" ? hasSuccessfulAttempt(item) ? "border border-amber-200 bg-amber-50 font-semibold text-amber-800" : "border border-red-200 bg-red-50 font-semibold text-red-700" : "text-muted"}`}><span className="mr-1 font-semibold">{item.status === "failed" ? hasSuccessfulAttempt(item) ? "Warning:" : "Failure reason:" : "Progress:"}</span>{item.detail}</div>
-                {item.result?.screenshotPath ? (
-                  <a className="mt-2 block text-xs font-semibold text-brand" href={item.result.screenshotPath} target="_blank">
-                    Open latest screenshot
-                  </a>
-                ) : null}
-                {item.result?.attempts?.length ? (
-                  <div className="mt-3 space-y-2 border-t border-line/70 pt-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted">Target attempts</p>
-                    {item.result.attempts.map((attempt) => (
-                      <div className="rounded-xl border border-line bg-white/80 p-3" key={attempt.id}>
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <p className="text-xs font-semibold text-ink">
-                              {attempt.executionOrder}. {attempt.targetType}
-                            </p>
-                            <p className="break-all text-[11px] text-muted">{attempt.targetUrl}</p>
+                  <div className={`mt-3 rounded-xl px-3.5 py-2.5 text-xs ${isSuccess ? "border border-emerald-200 bg-emerald-100/70 font-semibold text-emerald-900" : isFailedZeroSuccess ? "border border-red-200 bg-red-100/70 font-semibold text-red-900" : "text-muted"}`}>
+                    <span className="mr-1.5 font-bold">
+                      {isSuccess ? "Success:" : isFailedZeroSuccess ? "Failure (0 successful trials):" : "Progress:"}
+                    </span>
+                    {item.detail}
+                  </div>
+                  {item.result?.screenshotPath ? (
+                    <ScreenshotViewer src={item.result.screenshotPath} alt={item.name} />
+                  ) : null}
+                  {item.result?.attempts?.length ? (
+                    <div className="mt-3 space-y-2 border-t border-line/70 pt-3">
+                      <p className="text-xs font-bold uppercase tracking-wide text-muted">
+                        Target Trials ({successfulAttemptsCount}/{attemptsCount} Succeeded)
+                      </p>
+                      {item.result.attempts.map((attempt) => {
+                        const isAttemptSuccess = isAttemptSuccessful(attempt);
+                        return (
+                          <div className={`rounded-xl border p-3 transition ${isAttemptSuccess ? "border-emerald-300 bg-emerald-50/90 text-emerald-950 shadow-sm" : "border-red-300 bg-red-50/90 text-red-950 shadow-sm"}`} key={attempt.id}>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <p className="text-xs font-bold">
+                                  Trial #{attempt.executionOrder} — {attempt.targetType}
+                                </p>
+                                <p className="break-all text-[11px] opacity-80">{attempt.targetUrl}</p>
+                              </div>
+                              <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${isAttemptSuccess ? "bg-emerald-100 text-emerald-800 border border-emerald-300" : "bg-red-100 text-red-800 border border-red-300"}`}>
+                                {isAttemptSuccess ? "✓ Success" : "✕ Failed"}
+                              </span>
+                            </div>
+                            {attempt.errorMessage ? (
+                              <p className="mt-2 rounded-lg border border-red-200 bg-red-100/80 px-2.5 py-1.5 text-xs text-red-800">{attempt.errorMessage}</p>
+                            ) : null}
+                            {attempt.screenshotPath ? (
+                              <ScreenshotViewer src={attempt.screenshotPath} alt={`Trial ${attempt.executionOrder}`} />
+                            ) : null}
                           </div>
-                          <span className="rounded-full bg-canvas px-2 py-1 text-[11px] font-semibold">
-                            {attempt.status}
-                          </span>
-                        </div>
-                        {attempt.errorMessage ? <p className={`mt-2 rounded-lg border px-2.5 py-2 text-xs ${hasSuccessfulAttempt(item) ? "border-amber-200 bg-amber-50 text-amber-800" : "border-red-200 bg-red-50 text-red-700"}`}>{attempt.errorMessage}</p> : null}
-                        {attempt.screenshotPath ? (
-                          <a className="mt-2 block text-xs font-semibold text-brand" href={attempt.screenshotPath} target="_blank">
-                            Open target screenshot
-                          </a>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ))}
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         ) : null}
         {batchResults.length > 1 ? (
@@ -467,75 +1161,87 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                 {batchResults.length} processed sequentially
               </span>
             </div>
-            {batchResults.map((result, index) => (
-              <div className="rounded-lg border border-line bg-canvas p-4" key={`${result.websiteUrl}-${index}`}>
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="break-all text-sm font-semibold text-ink">{result.websiteUrl}</p>
-                    <p className="mt-1 text-xs text-muted">{result.targetType ?? "Target not detected"}</p>
+            {batchResults.map((result, index) => {
+              const isSuccess = isResultSuccessful(result);
+              return (
+                <div className={`rounded-2xl border p-4 transition duration-300 ${isSuccess ? "border-emerald-300 bg-emerald-50/80 ring-1 ring-emerald-200/70 shadow-sm" : "border-red-300 bg-red-50/80 ring-1 ring-red-200/70 shadow-sm"}`} key={`${result.websiteUrl}-${index}`}>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="break-all text-sm font-semibold text-ink">{result.websiteUrl}</p>
+                      <p className="mt-1 text-xs text-muted">{result.targetType ?? "Target not detected"}</p>
+                    </div>
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${isSuccess ? "border border-emerald-300 bg-emerald-100 text-emerald-800" : "border border-red-300 bg-red-100 text-red-800"}`}>
+                      {isSuccess ? "✓ Success" : "✕ Failed (0 successful tests)"}
+                    </span>
                   </div>
-                  <span className="rounded-full border border-line bg-white px-2 py-1 text-xs font-semibold text-ink">
-                    {result.status}
-                  </span>
+                  {result.errorMessage ? (
+                    <p className="mt-3 rounded-lg border border-red-200 bg-red-100/70 p-2 text-xs text-red-800">{result.errorMessage}</p>
+                  ) : null}
+                  {result.screenshotPath ? (
+                    <ScreenshotViewer src={result.screenshotPath} alt={result.websiteUrl} />
+                  ) : null}
                 </div>
-                {result.errorMessage ? (
-                  <p className="mt-3 text-xs text-red-700">{result.errorMessage}</p>
-                ) : null}
-                {result.screenshotPath ? (
-                  <a className="mt-3 block text-xs font-semibold text-brand" href={result.screenshotPath} target="_blank">
-                    Open screenshot
-                  </a>
-                ) : null}
-              </div>
-            ))}
+              );
+            })}
             <h3 className="pt-2 text-sm font-semibold text-ink">Last processed website details</h3>
           </div>
         ) : null}
-        {state.result ? (
-          <div className="mt-5 space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Summary label="Status" value={state.result.status} />
-              <Summary label="Submitted At" value={new Date(state.result.submittedAt).toLocaleString()} />
-              <Summary label="Resolved URL" value={state.result.resolvedUrl} />
-              <Summary label="Target Type" value={state.result.targetType ?? "-"} />
-              <Summary label="Selected Date" value={state.result.selectedDate ?? "-"} />
-              <Summary label="Selected Time" value={state.result.selectedTime ?? "-"} />
-            </div>
-            {state.result.discoveryReason ? (
-              <p className="rounded-md border border-line bg-canvas px-3 py-2 text-sm text-ink">
-                {state.result.discoveryReason}
-              </p>
-            ) : null}
-            {state.result.errorMessage ? (
-              <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                {state.result.errorMessage}
-              </p>
-            ) : null}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <ListBox title="Filled fields" items={state.result.filledFields} />
-              <ListBox title="Skipped fields" items={state.result.skippedFields} />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-ink">Screenshot proof</h3>
-              <div className="mt-3 space-y-2">
-                {state.result.screenshotPaths.length > 0 ? (
-                  state.result.screenshotPaths.map((screenshotPath) => (
-                    <a
-                      className="block rounded-md border border-line bg-canvas px-3 py-2 text-sm font-medium text-brand"
-                      href={screenshotPath}
-                      key={screenshotPath}
-                      target="_blank"
-                    >
-                      {screenshotPath}
-                    </a>
-                  ))
-                ) : (
-                  <p className="text-sm text-muted">No screenshots saved.</p>
-                )}
+        {state.result ? (() => {
+          const isSuccess = isResultSuccessful(state.result);
+          return (
+            <div className={`mt-5 space-y-4 rounded-2xl border p-5 transition duration-300 ${isSuccess ? "border-emerald-300 bg-emerald-50/80 ring-1 ring-emerald-200/70 shadow-sm" : "border-red-300 bg-red-50/80 ring-1 ring-red-200/70 shadow-sm"}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/5 pb-3">
+                <div>
+                  <h3 className="text-base font-bold text-ink">Automation Outcome</h3>
+                  <p className="text-xs text-muted">Trial completed for {state.result.websiteUrl || "target"}</p>
+                </div>
+                <span className={`rounded-full px-3 py-1 text-xs font-bold ${isSuccess ? "border border-emerald-300 bg-emerald-100 text-emerald-800" : "border border-red-300 bg-red-100 text-red-800"}`}>
+                  {isSuccess ? "✓ SUCCESS" : "✕ FAILED (0 successful tests)"}
+                </span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Summary label="Status" value={state.result.status} />
+                <Summary label="Submitted At" value={new Date(state.result.submittedAt).toLocaleString()} />
+                <Summary label="Resolved URL" value={state.result.resolvedUrl} />
+                <Summary label="Target Type" value={state.result.targetType ?? "-"} />
+                <Summary label="Selected Date" value={state.result.selectedDate ?? "-"} />
+                <Summary label="Selected Time" value={state.result.selectedTime ?? "-"} />
+              </div>
+              {state.result.discoveryReason ? (
+                <p className="rounded-xl border border-line bg-canvas px-3 py-2 text-sm text-ink">
+                  {state.result.discoveryReason}
+                </p>
+              ) : null}
+              {state.result.errorMessage ? (
+                <p className="rounded-xl border border-red-200 bg-red-100/70 px-3 py-2 text-sm font-medium text-red-800">
+                  {state.result.errorMessage}
+                </p>
+              ) : null}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <ListBox title="Filled fields" items={state.result.filledFields} />
+                <ListBox title="Skipped fields" items={state.result.skippedFields} />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-ink">Screenshot proof</h3>
+                <div className="mt-3 space-y-2">
+                  {state.result.screenshotPaths.length > 0 ? (
+                    <div className="flex flex-wrap gap-3">
+                      {state.result.screenshotPaths.map((screenshotPath, index) => (
+                        <ScreenshotViewer
+                          src={screenshotPath}
+                          key={screenshotPath}
+                          alt={`Screenshot Proof ${index + 1}`}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted">No screenshots saved.</p>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        ) : (
+          );
+        })() : (
           <div className="flex min-h-[320px] flex-col items-center justify-center px-2 text-center sm:min-h-[440px]">
             <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-br from-indigo-100 to-cyan-100 text-3xl text-brand shadow-inner">
               ◎
@@ -549,6 +1255,15 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         )}
         </div>
       </div>
+
+      <AutomationAnalysisModal
+        isOpen={isAnalysisOpen}
+        onClose={() => setIsAnalysisOpen(false)}
+        items={analysisItems}
+        totalTrialsExecuted={totalTrialsExecuted}
+        totalTrialsSuccessful={totalTrialsSuccessful}
+        batchStatus={isPaused ? "paused" : batchStatus}
+      />
     </section>
   );
 }
@@ -631,18 +1346,43 @@ function ListBox({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function statusCardClass(item: LiveBatchItem) {
-  if (hasSuccessfulAttempt(item) || item.status === "completed") return "border-emerald-200 bg-emerald-50/60";
-  if (item.status === "discovering") return "border-indigo-200 bg-gradient-to-r from-indigo-50 to-cyan-50 shadow-md shadow-indigo-100/60";
-  if (item.status === "failed") return "border-red-200 bg-red-50/60";
-  if (item.status === "cancelled") return "border-amber-200 bg-amber-50/60";
-  return "border-slate-200 bg-slate-50/70";
+function isAttemptSuccessful(attempt: { status: string }): boolean {
+  const s = (attempt.status || "").toLowerCase();
+  return s === "completed" || s === "success" || s === "dry_run_ready_to_book";
 }
 
-function hasSuccessfulAttempt(item: LiveBatchItem) {
-  return Boolean(item.result?.attempts?.some(
-    (attempt) => attempt.status.toLowerCase() === "completed"
-  ));
+function isResultSuccessful(res?: AutomationResult | null): boolean {
+  if (!res) return false;
+  const s = (res.status || "").toLowerCase();
+  if (s === "success" || s === "completed" || s === "dry_run_ready_to_book") {
+    return true;
+  }
+  if (res.attempts && res.attempts.length > 0) {
+    return res.attempts.some(isAttemptSuccessful);
+  }
+  return false;
+}
+
+function hasSuccessfulAttempt(item: LiveBatchItem): boolean {
+  if (item.status === "completed") return true;
+  if (isResultSuccessful(item.result)) return true;
+  return false;
+}
+
+function statusCardClass(item: LiveBatchItem) {
+  if (hasSuccessfulAttempt(item)) {
+    return "border-emerald-300 bg-emerald-50/80 ring-1 ring-emerald-200/70 shadow-sm";
+  }
+  if (item.status === "discovering") {
+    return "border-indigo-200 bg-gradient-to-r from-indigo-50 to-cyan-50 shadow-md shadow-indigo-100/60";
+  }
+  if (item.status === "failed") {
+    return "border-red-300 bg-red-50/80 ring-1 ring-red-200/70 shadow-sm";
+  }
+  if (item.status === "cancelled") {
+    return "border-amber-200 bg-amber-50/70";
+  }
+  return "border-slate-200 bg-slate-50/70";
 }
 
 function formatDuration(milliseconds: number) {
@@ -655,11 +1395,10 @@ function formatDuration(milliseconds: number) {
   return `${seconds}s`;
 }
 
-function statusBadgeClass(status: LiveBatchItem["status"], hasSuccessfulSubmission = false) {
-  if (status === "failed" && hasSuccessfulSubmission) return "bg-amber-100 text-amber-800";
-  if (status === "discovering") return "bg-indigo-100 text-indigo-700";
-  if (status === "completed") return "bg-emerald-100 text-emerald-700";
-  if (status === "failed") return "bg-red-100 text-red-700";
-  if (status === "cancelled") return "bg-amber-100 text-amber-700";
-  return "bg-slate-200 text-slate-600";
+function statusBadgeClass(status: LiveBatchItem["status"], isSuccess = false) {
+  if (isSuccess || status === "completed") return "bg-emerald-100 text-emerald-800 border border-emerald-300";
+  if (status === "discovering") return "bg-indigo-100 text-indigo-700 border border-indigo-200";
+  if (status === "failed") return "bg-red-100 text-red-800 border border-red-300";
+  if (status === "cancelled") return "bg-amber-100 text-amber-800 border border-amber-200";
+  return "bg-slate-200 text-slate-700 border border-slate-300";
 }

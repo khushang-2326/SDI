@@ -22,6 +22,13 @@ model User {
   captchaProvider        String                  @default("mock")
   captchaApiKey          String?
   captchaSolveHistory    CaptchaSolveHistory[]
+  proxyEnabled           Boolean                 @default(false)
+  proxyProtocol          String                  @default("http")
+  proxyHost              String?
+  proxyPort              Int?
+  proxyUsername          String?
+  proxyPassword          String?
+  proxyBandwidthSaver    Boolean                 @default(true)
 }
 
 model AutomationTransaction {

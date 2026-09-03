@@ -8,6 +8,7 @@ import {
   SubmitCalendlyBookingInput,
   SubmitContactFormResult
 } from "@/types/automation";
+import { dismissCookieBanners } from "./cookie-consent-helper";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
@@ -487,8 +488,14 @@ export async function submitGenericBookingWidget({
       page = await browserContext.newPage();
     } else {
       browser = await chromium.launch({
-        headless,
-        executablePath: await getChromiumExecutablePath()
+        headless: process.env.NODE_ENV === "production" || (!process.env.DISPLAY && process.platform !== "win32") ? true : headless,
+        executablePath: await getChromiumExecutablePath(),
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu"
+        ]
       });
       page = await browser.newPage({
         viewport: { width: 1366, height: 900 },
@@ -499,8 +506,10 @@ export async function submitGenericBookingWidget({
     page.setDefaultTimeout(timeoutMs);
 
     await page.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs });
+    await dismissCookieBanners(page).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => undefined);
-    await page.waitForTimeout(6000);
+    await dismissCookieBanners(page).catch(() => undefined);
+    await page.waitForTimeout(4000);
 
     if (!(await scrollToBookingWidget(page))) {
       return finish("booking_widget_found", "Booking widget source was found, but it did not render on the page.");

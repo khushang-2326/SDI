@@ -1,9 +1,12 @@
 import { PageHeader } from "@/components/PageHeader";
 import { prisma } from "@/lib/prisma";
-import { requireUser } from "@/lib/auth";
+import { getCurrentUser } from "@/lib/auth";
 
 export default async function DashboardPage() {
-  const user = await requireUser();
+  // The dashboard layout has already required this user. getCurrentUser is
+  // request-memoized, so this reuses that result instead of querying twice.
+  const user = await getCurrentUser();
+  if (!user) return null;
   const [leadCount, websiteCount, jobCount] = await Promise.all([
     prisma.lead.count({ where: { userId: user.id } }),
     prisma.targetWebsite.count({ where: { userId: user.id } }),

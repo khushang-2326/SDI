@@ -28,6 +28,15 @@ export const config = {
     maxRetries: nonNegativeInteger(process.env.MAX_RETRIES, 3, 10),
     timeoutMs: positiveInteger(process.env.AUTOMATION_TIMEOUT, 45000, 180000),
     websiteTimeoutMs: positiveInteger(process.env.WEBSITE_TIMEOUT, 75000, 300000),
+  },
+  proxy: {
+    enabled: process.env.PROXY_ENABLED === "true",
+    protocol: (process.env.PROXY_PROTOCOL as "http" | "https" | "socks5") || "http",
+    host: process.env.PROXY_HOST || "",
+    port: positiveInteger(process.env.PROXY_PORT, 10000, 65535),
+    username: process.env.PROXY_USERNAME || "",
+    password: process.env.PROXY_PASSWORD || "",
+    bandwidthSaver: process.env.PROXY_BANDWIDTH_SAVER !== "false"
   }
 };
 

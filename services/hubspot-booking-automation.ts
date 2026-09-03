@@ -8,6 +8,7 @@ import {
   SubmitCalendlyBookingInput,
   SubmitContactFormResult
 } from "@/types/automation";
+import { dismissCookieBanners } from "./cookie-consent-helper";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
@@ -458,8 +459,14 @@ export async function submitHubSpotBooking({
       page = await browserContext.newPage();
     } else {
       browser = await chromium.launch({
-        headless,
-        executablePath: await getChromiumExecutablePath()
+        headless: process.env.NODE_ENV === "production" || (!process.env.DISPLAY && process.platform !== "win32") ? true : headless,
+        executablePath: await getChromiumExecutablePath(),
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu"
+        ]
       });
       page = await browser.newPage({
         viewport: { width: 1366, height: 900 },
@@ -470,7 +477,9 @@ export async function submitHubSpotBooking({
     page.setDefaultTimeout(timeoutMs);
 
     await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    await dismissCookieBanners(page).catch(() => undefined);
     await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
+    await dismissCookieBanners(page).catch(() => undefined);
     await page.locator("body").waitFor({ state: "visible", timeout: 12000 });
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "hubspot-loaded"));
 

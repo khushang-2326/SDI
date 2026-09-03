@@ -11,7 +11,14 @@ export default async function SettingsPage() {
     select: {
       captchaEnabled: true,
       captchaProvider: true,
-      captchaApiKey: true
+      captchaApiKey: true,
+      proxyEnabled: true,
+      proxyProtocol: true,
+      proxyHost: true,
+      proxyPort: true,
+      proxyUsername: true,
+      proxyPassword: true,
+      proxyBandwidthSaver: true
     }
   });
 
@@ -27,14 +34,28 @@ export default async function SettingsPage() {
     hasKey: Boolean(userSettings?.captchaApiKey)
   };
 
+  const initialProxySettings = {
+    proxyEnabled: userSettings?.proxyEnabled ?? false,
+    proxyProtocol: userSettings?.proxyProtocol ?? "http",
+    proxyHost: userSettings?.proxyHost ?? "",
+    proxyPort: userSettings?.proxyPort ? String(userSettings.proxyPort) : "",
+    proxyUsername: userSettings?.proxyUsername ?? "",
+    hasPassword: Boolean(userSettings?.proxyPassword),
+    proxyBandwidthSaver: userSettings?.proxyBandwidthSaver ?? true
+  };
+
   return (
     <>
       <PageHeader
-        description="Enable automated CAPTCHA bypassing, select preferred providers, and monitor solve analytics."
+        description="Configure automated CAPTCHA bypassing, residential proxies (Proxy-Seller), and bandwidth optimization."
         title="Settings"
       />
       <div className="mt-6">
-        <SettingsForm initialSettings={initialSettings} history={history} />
+        <SettingsForm
+          initialSettings={initialSettings}
+          initialProxySettings={initialProxySettings}
+          history={history}
+        />
       </div>
     </>
   );

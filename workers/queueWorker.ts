@@ -80,9 +80,11 @@ const worker = new Worker(
     };
 
     let context = null;
+    let website: any = null;
+    let websiteUrl = "";
     try {
       // 1. Get website info
-      const website = await prisma.targetWebsite.findFirst({
+      website = await prisma.targetWebsite.findFirst({
         where: { id: targetWebsiteId, userId },
         include: { discoveredTargets: { orderBy: [{ executionOrder: "asc" }, { confidence: "desc" }] } }
       });
@@ -91,7 +93,7 @@ const worker = new Worker(
         throw new Error("Target website record not found.");
       }
 
-      let websiteUrl = website.contactPageUrl || website.websiteUrl;
+      websiteUrl = website.contactPageUrl || website.websiteUrl;
       let automationType = fieldsMap.get("automationType") || "auto";
       let discoveryReason: string | null = null;
       let targetType: string | null = automationType;
@@ -107,7 +109,7 @@ const worker = new Worker(
       }
 
       // 2. Acquire browser context
-      context = await acquireContext();
+      context = await acquireContext({ userId });
       await logger.info("Browser context acquired.");
 
       if (automationType === "auto") {
@@ -122,7 +124,8 @@ const worker = new Worker(
           liveSubmit,
           browserContext: context,
           timeoutMs: config.worker.timeoutMs,
-          cachedTargets: website.discoveredTargets.map((target) => ({
+          deadlineAt: Date.now() + config.worker.websiteTimeoutMs,
+          cachedTargets: website.discoveredTargets.map((target: any) => ({
             targetType: target.targetType as "calendly" | "hubspot_booking" | "contact_form" | "booking_widget",
             url: target.url,
             executionOrder: target.targetType === "contact_form"
@@ -231,12 +234,12 @@ const worker = new Worker(
         const successfulAttempts = multiRun.attempts.filter((attempt) =>
           ["success", "dry_run_ready_to_book"].includes(attempt.result.status)
         );
-        const allSuccessful = successfulAttempts.length === multiRun.attempts.length;
+        const anySuccessful = successfulAttempts.length > 0;
         const latestScreenshot = multiRun.attempts.map((attempt) => attempt.result.screenshotPath).filter(Boolean).at(-1) ?? null;
         await prisma.submissionResult.update({
           where: { id: resultId },
           data: {
-            status: allSuccessful ? "Completed" : "Failed",
+            status: anySuccessful ? "Completed" : "Failed",
             message: `${successfulAttempts.length}/${multiRun.attempts.length} targets completed successfully`,
             screenshotPath: latestScreenshot,
             submittedAt: new Date()
@@ -327,7 +330,8 @@ const worker = new Worker(
               submit: liveSubmit,
               headless: true,
               browserContext: context,
-              skipPersist: true
+              skipPersist: true,
+              userId
             })
           : automationType === "hubspot"
             ? await submitHubSpotBooking({
@@ -407,13 +411,56 @@ const worker = new Worker(
       const willRetry = job.attemptsMade + 1 < maxAttempts;
       await logger.error(willRetry ? `Attempt failed; retrying: ${errMsg}` : `Job failed: ${errMsg}`);
       
+      let failureScreenshotUrl: string | null = null;
+      try {
+        let tempContext = context;
+        let createdTemp = false;
+        if (!tempContext) {
+          tempContext = await acquireContext({ userId }).catch(() => null);
+          createdTemp = !!tempContext;
+        }
+        if (tempContext) {
+          const pages = tempContext.pages();
+          const activePage = pages[0] || (await tempContext.newPage());
+          const currentUrl = activePage.url();
+          
+          const targetUrl = websiteUrl || (website ? (website.contactPageUrl || website.websiteUrl) : null);
+          if ((currentUrl === "about:blank" || !currentUrl) && targetUrl) {
+            await activePage.goto(targetUrl, { waitUntil: "commit", timeout: 10000 }).catch(() => undefined);
+          }
+          
+          const fs = await import("node:fs/promises");
+          const path = await import("node:path");
+          const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
+          await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
+          const fileName = `${Date.now()}-${(targetUrl || "unknown").replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 70)}-failure.png`;
+          const absolutePath = path.join(SCREENSHOT_DIR, fileName);
+          
+          await activePage.screenshot({ path: absolutePath, fullPage: false }).catch(() => undefined);
+          const localPath = `/screenshots/${fileName}`;
+          
+          try {
+            failureScreenshotUrl = await uploadScreenshot(localPath, fileName);
+          } catch {
+            failureScreenshotUrl = localPath;
+          }
+          
+          if (createdTemp) {
+            await releaseContext(tempContext).catch(() => undefined);
+          }
+        }
+      } catch (screenshotErr) {
+        console.error("Failed to capture failure screenshot:", screenshotErr);
+      }
+
       await prisma.submissionResult.update({
         where: { id: resultId },
         data: {
           status: willRetry ? "Pending" : "Failed",
           message: willRetry
             ? `Attempt ${job.attemptsMade + 1} failed; waiting to retry: ${errMsg}`
-            : errMsg
+            : errMsg,
+          screenshotPath: failureScreenshotUrl
         }
       });
       

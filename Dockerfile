@@ -9,6 +9,9 @@ COPY prisma ./prisma/
 
 RUN npm ci
 
+# Ensure absolute SQLite path
+ENV DATABASE_URL="file:/app/prisma/dev.db"
+
 # Generate Prisma Client & push initial schema
 RUN npx prisma generate
 RUN npx prisma db push --accept-data-loss

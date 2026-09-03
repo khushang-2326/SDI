@@ -27,4 +27,4 @@ ENV QUEUE_PROVIDER=local
 ENV STORAGE_PROVIDER=local
 
 # Start Next.js server
-CMD ["sh", "-c", "npx prisma migrate deploy && npm start"]
+CMD ["sh", "-c", "npx prisma db push --skip-generate || true; npm start"]

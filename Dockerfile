@@ -8,6 +8,7 @@ COPY package*.json ./
 COPY prisma ./prisma/
 
 RUN npm ci
+RUN npx playwright install chromium
 
 # Ensure absolute SQLite path
 ENV DATABASE_URL="file:/app/prisma/dev.db"

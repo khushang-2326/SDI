@@ -14,13 +14,23 @@ async function firstAccessiblePath(candidates: Array<string | undefined>) {
 }
 
 export async function getChromiumExecutablePath() {
+  let playwrightPath: string | undefined;
+  try {
+    playwrightPath = chromium.executablePath();
+  } catch {
+    playwrightPath = undefined;
+  }
+
   const programFiles = process.env.ProgramFiles;
   const programFilesX86 = process.env["ProgramFiles(x86)"];
   const localAppData = process.env.LOCALAPPDATA;
 
   return firstAccessiblePath([
     process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-    chromium.executablePath(),
+    playwrightPath,
+    "/usr/bin/chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
     programFiles && path.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
     programFilesX86 &&
       path.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),

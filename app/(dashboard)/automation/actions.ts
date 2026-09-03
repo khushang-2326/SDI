@@ -805,9 +805,30 @@ export async function runAutomationAction(
     return { result: results[results.length - 1], results };
   }
 
-  const state = await runSingleAutomationAction(user.id, formData);
-  if (state.result) await storeTransaction(user.id, state.result, formData.get("liveSubmit") === "on").catch(() => undefined);
-  return state;
+  try {
+    const state = await runSingleAutomationAction(user.id, formData);
+    if (state.result) await storeTransaction(user.id, state.result, formData.get("liveSubmit") === "on").catch(() => undefined);
+    return state;
+  } catch (error) {
+    const manualWebsiteUrl = readText(formData, "websiteUrl");
+    const result: AutomationResult = {
+      websiteUrl: manualWebsiteUrl,
+      resolvedUrl: manualWebsiteUrl,
+      discoveryReason: null,
+      targetType: null,
+      status: "failed",
+      errorMessage: error instanceof Error ? error.message : "Automation execution failed.",
+      screenshotPath: null,
+      screenshotPaths: [],
+      selectedDate: null,
+      selectedTime: null,
+      filledFields: [],
+      skippedFields: [],
+      submittedAt: new Date().toISOString()
+    };
+    await storeTransaction(user.id, result, formData.get("liveSubmit") === "on").catch(() => undefined);
+    return { result, results: [result] };
+  }
 }
 
 export async function runSingleAutomationAction(

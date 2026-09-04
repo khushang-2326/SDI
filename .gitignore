@@ -7,6 +7,10 @@ coverage
 *.db-journal
 public/screenshots/*
 !public/screenshots/.gitkeep
+public/uploads/*
+!public/uploads/.gitkeep
+.automation-jobs/
+tsconfig.tsbuildinfo
 
 # Temp/Log files
 *.log

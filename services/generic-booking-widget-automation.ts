@@ -9,6 +9,13 @@ import {
   SubmitContactFormResult
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
+import { detectUnsupportedVerification } from "@/services/verification-detector";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
@@ -57,13 +64,13 @@ function sleep(ms: number) {
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
   try {
+    if (!page || page.isClosed()) return "";
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
     const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
     const absolutePath = path.join(SCREENSHOT_DIR, fileName);
     await page.screenshot({ path: absolutePath, fullPage: false, timeout: 8000, animations: "disabled" });
     return `/screenshots/${fileName}`;
   } catch (err) {
-    console.warn("Screenshot capture skipped:", err);
     return "";
   }
 }
@@ -152,17 +159,39 @@ async function visibleEnabled(locator: Locator) {
 }
 
 async function scrollToBookingWidget(page: Page) {
-  const widgetText = page.locator("text=Step 1:").first();
+  // Keep CSS selectors separate from text matching. Playwright selector
+  // engines cannot safely be combined in one comma-separated locator.
+  const schedulerElements = page.locator([
+    ".widgets-step-1",
+    ".label-select-date",
+    ".vdpCell.selectable",
+    "[class*='booking-calendar' i]",
+    "[class*='scheduler' i]"
+  ].join(", ")).first();
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if ((await widgetText.count().catch(() => 0)) > 0) {
-      await widgetText.scrollIntoViewIfNeeded().catch(() => undefined);
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    if ((await schedulerElements.count().catch(() => 0)) > 0 && (await schedulerElements.isVisible().catch(() => false))) {
+      await schedulerElements.scrollIntoViewIfNeeded().catch(() => undefined);
       await sleep(1000);
       return true;
     }
 
-    await page.mouse.wheel(0, 650).catch(() => undefined);
-    await sleep(900);
+    const pageText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+    const hasSchedulerText = /step\s*1|select date(?: &| and) time|choose date(?: and| &) time|active calendars/i.test(pageText);
+    if (hasSchedulerText) {
+      const dateControls = page.locator("button, [role='button'], .vdpCell.selectable");
+      if (await dateControls.count().then((count) => count >= 2).catch(() => false)) return true;
+    }
+
+    const calendarIsPresent = await page.locator("button, [role='button']")
+      .filter({ hasText: /^\s*(?:today\s*)?\d{1,2}\s*(?:[a-z]+)?\s*$/i })
+      .count()
+      .then((count) => count >= 2)
+      .catch(() => false);
+    if (calendarIsPresent) return true;
+
+    await page.mouse.wheel(0, 850).catch(() => undefined);
+    await sleep(700);
   }
 
   return false;
@@ -170,12 +199,24 @@ async function scrollToBookingWidget(page: Page) {
 
 async function collectDateCandidates(page: Page, preferredDate?: string) {
   const preferredDay = parseDayFromPreference(preferredDate);
-  const candidates = await page.locator("button").evaluateAll((buttons) =>
+  const candidates = await page.locator("button, [role='button'], .vdpCell.selectable").evaluateAll((buttons) =>
     buttons
       .map((button, index) => {
         const style = window.getComputedStyle(button);
         const rect = button.getBoundingClientRect();
-        const text = button.textContent?.replace(/[^\d]/g, "").trim() ?? "";
+        const rawText = button.textContent?.replace(/\s+/g, " ").trim() ?? "";
+        const accessibleLabel = button.getAttribute("aria-label") ?? "";
+        // Pipedrive day cards include the complete accessible date in their
+        // text (e.g. "Today September 4, 2026"). Extract the day before
+        // falling back to compact calendar controls that contain only "4".
+        const dateLabel = `${accessibleLabel} ${rawText}`;
+        const dayFirstMatch = dateLabel.match(
+          /\b(\d{1,2})\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b/i
+        );
+        const monthFirstMatch = dateLabel.match(
+          /(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b/i
+        );
+        const text = dayFirstMatch?.[1] ?? monthFirstMatch?.[1] ?? rawText.replace(/[^\d]/g, "").trim();
         const className = button.className.toString();
         const disabled =
           button.hasAttribute("disabled") ||
@@ -213,7 +254,7 @@ async function collectDateCandidates(page: Page, preferredDate?: string) {
 }
 
 async function visibleTimeSlotExists(page: Page) {
-  const slot = page.locator("button, [role='button'], a").filter({
+  const slot = page.locator("button, [role='button'], a, .widgets-time-slot").filter({
     hasText: /\b\d{1,2}:\d{2}\s?(am|pm)\b/i
   }).first();
 
@@ -222,7 +263,7 @@ async function visibleTimeSlotExists(page: Page) {
 
 async function chooseDate(page: Page, preferredDate?: string) {
   const candidates = await collectDateCandidates(page, preferredDate);
-  const buttons = page.locator("button");
+  const buttons = page.locator("button, [role='button'], .vdpCell.selectable");
 
   for (const candidate of candidates.slice(0, 18)) {
     const button = buttons.nth(candidate.index);
@@ -282,10 +323,10 @@ async function chooseTime(page: Page, preferredTime?: string) {
   const cleanPreferred = rounded ? cleanTimeForComparison(rounded) : "";
   const cleanPreferredNoAmPm = cleanPreferred.replace(/am|pm/g, "");
 
-  const timeButtons = page.locator("button, [role='button'], a").filter({
+  const timeButtons = page.locator("button, [role='button'], a, .widgets-time-slot").filter({
     hasText: /\b\d{1,2}:\d{2}\s?(am|pm)\b/i
   });
-  await timeButtons.first().waitFor({ state: "visible", timeout: 12000 }).catch(() => undefined);
+  await timeButtons.first().waitFor({ state: "visible", timeout: 20000 }).catch(() => undefined);
   const candidates = await timeButtons.evaluateAll((buttons) =>
     buttons
       .map((button, index) => {
@@ -326,8 +367,20 @@ async function chooseTime(page: Page, preferredTime?: string) {
 }
 
 async function clickNextStep(page: Page) {
-  const button = page.locator("button, [role='button']").filter({ hasText: /next step|next|continue/i }).first();
+  // Pipedrive and similar schedulers reveal the invitee form immediately
+  // after choosing a time, with no intermediate Next/Select button.
+  const inviteeField = page.locator([
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[placeholder*="email" i]',
+    'input[name*="name" i]',
+    'input[placeholder="Name" i]'
+  ].join(", ")).first();
+  if (await inviteeField.isVisible().catch(() => false)) return true;
 
+  const button = page.locator("button, [role='button']").filter({ hasText: /next step|next|continue|^select$/i }).first();
+
+  await button.waitFor({ state: "visible", timeout: 20000 }).catch(() => undefined);
   if (!(await visibleEnabled(button))) return false;
 
   await button.scrollIntoViewIfNeeded().catch(() => undefined);
@@ -362,9 +415,14 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
     [
       page.locator('input[name*="first" i]'),
       page.locator('input[placeholder*="First" i]'),
-      page.locator('input[aria-label*="First" i]')
+      page.locator('input[aria-label*="First" i]'),
+      page.locator('input[name="name" i]'),
+      page.locator('input[name*="name" i]:not([type="email"])'),
+      page.locator('input[placeholder="Name" i]'),
+      page.locator('input[aria-label="Name" i]')
     ],
-    firstName
+    // Schedulers with one Name field receive the full lead name.
+    lastName ? leadData.fullName : firstName
   );
   firstNameFilled ? filledFields.push("fullName") : skippedFields.push("fullName");
 
@@ -390,6 +448,19 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
     leadData.email
   );
   emailFilled ? filledFields.push("email") : skippedFields.push("email");
+
+  if (leadData.companyName) {
+    const companyFilled = await fillFirstAvailable(
+      [
+        page.locator('input[name*="company" i]'),
+        page.locator('input[placeholder*="Company" i]'),
+        page.locator('input[aria-label*="Company" i]')
+      ],
+      leadData.companyName,
+      350
+    );
+    companyFilled ? filledFields.push("companyName") : skippedFields.push("companyName");
+  }
 
   const mobile = leadData.mobile ?? leadData.mobileNumber;
   if (mobile) {
@@ -510,13 +581,49 @@ export async function submitGenericBookingWidget({
     }
     page.setDefaultTimeout(timeoutMs);
 
-    await page.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs });
+    let proxy407Hit = false;
+    const responseHandler = (res: any) => {
+      if (res.status() === 407) proxy407Hit = true;
+    };
+    page.on("response", responseHandler);
+
+    let navResponse: any = null;
+    let navError: any = null;
+    try {
+      navResponse = await page.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs });
+    } catch (err: any) {
+      navError = err;
+    } finally {
+      page.off("response", responseHandler);
+    }
+
+    if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const verification = await detectUnsupportedVerification(page, websiteUrl);
+    if (verification) {
+      if (verification.screenshotPath) screenshotPaths.push(verification.screenshotPath);
+      return finish("failed", verification.reason);
+    }
+
     await dismissCookieBanners(page).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => undefined);
     await dismissCookieBanners(page).catch(() => undefined);
-    await page.waitForTimeout(4000);
+    // Third-party schedulers frequently hydrate after the document has loaded.
+    // Wait up to 25 seconds for a usable calendar rather than treating a slow
+    // widget as missing after a fixed four-second delay.
+    const widgetDeadline = Date.now() + Math.min(timeoutMs, 25000);
+    let widgetFound = false;
+    while (Date.now() < widgetDeadline) {
+      if (await scrollToBookingWidget(page)) {
+        widgetFound = true;
+        break;
+      }
+      await page.waitForTimeout(1000);
+    }
 
-    if (!(await scrollToBookingWidget(page))) {
+    if (!widgetFound) {
       return finish("booking_widget_found", "Booking widget source was found, but it did not render on the page.");
     }
 
@@ -545,7 +652,7 @@ export async function submitGenericBookingWidget({
     await page
       .locator('input[type="email"], input[name*="first" i], input[placeholder*="First" i]')
       .first()
-      .waitFor({ state: "visible", timeout: 10000 })
+      .waitFor({ state: "visible", timeout: 25000 })
       .catch(() => undefined);
 
     const fillResult = await fillBookingForm(page, leadData);
@@ -569,7 +676,10 @@ export async function submitGenericBookingWidget({
 
     return finish("success", null);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown booking widget error.";
+    if (isProxyAuthenticationFailure(error)) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+    const errorMessage = redactProxyDetails(error instanceof Error ? error.message : "Unknown booking widget error.");
     return finish("failed", errorMessage);
   } finally {
     if (page && browserContext) {

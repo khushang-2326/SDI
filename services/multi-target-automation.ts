@@ -1,12 +1,20 @@
 import type { BrowserContext } from "playwright";
+import { acquireContext, releaseContext } from "@/lib/browserPool";
 import { submitCalendlyBooking } from "@/services/calendly-booking-automation";
 import { submitContactForm } from "@/services/contact-form-automation";
 import { submitGenericBookingWidget } from "@/services/generic-booking-widget-automation";
 import { submitHubSpotBooking } from "@/services/hubspot-booking-automation";
 import { discoverSubmissionTargets } from "@/services/submission-target-discovery";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
 import type {
   BookingPreferences,
   DiscoveredSubmissionTarget,
+  DiscoverSubmissionTargetsResult,
   LeadData,
   SubmitContactFormResult
 } from "@/types/automation";
@@ -45,10 +53,16 @@ function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
 }
 
 function failedResult(target: DiscoveredSubmissionTarget, error: unknown): SubmitContactFormResult {
+  const isProxy = isProxyAuthenticationFailure(error);
+  const rawMessage = isProxy
+    ? PROXY_407_MESSAGE
+    : error instanceof Error
+      ? error.message
+      : "Unknown target automation error.";
   return {
     websiteUrl: target.url,
     status: "failed",
-    errorMessage: error instanceof Error ? error.message : "Unknown target automation error.",
+    errorMessage: redactProxyDetails(rawMessage),
     screenshotPath: target.screenshotPath,
     screenshotPaths: target.screenshotPath ? [target.screenshotPath] : [],
     submittedAt: new Date(),
@@ -86,7 +100,7 @@ async function executeTarget({
     });
   }
   if (target.targetType === "contact_form") {
-    return submitContactForm({
+    const contactResult = await submitContactForm({
       websiteUrl: target.url,
       leadData,
       submit: liveSubmit,
@@ -95,6 +109,21 @@ async function executeTarget({
       userId,
       timeoutMs
     });
+    // A URL can be labelled "contact" while rendering an inline booking
+    // scheduler. Continue through the generic scheduler rather than treating
+    // the detection result itself as a failed target.
+    if (contactResult.status === "booking_widget_found") {
+      return submitGenericBookingWidget({
+        websiteUrl: target.url,
+        leadData,
+        bookingPreferences,
+        liveSubmit,
+        browserContext,
+        skipPersist: true,
+        timeoutMs
+      });
+    }
+    return contactResult;
   }
   if (target.targetType === "hubspot_booking") {
     return submitHubSpotBooking({
@@ -128,7 +157,9 @@ export async function runMultiTargetAutomation({
   cachedTargets = [],
   callbacks = {},
   userId,
-  deadlineAt
+  deadlineAt,
+  headless = true,
+  isDirectRetry = false
 }: {
   websiteUrl: string;
   leadData: LeadData;
@@ -140,11 +171,14 @@ export async function runMultiTargetAutomation({
   callbacks?: MultiTargetCallbacks;
   userId?: string;
   deadlineAt?: number;
+  headless?: boolean;
+  isDirectRetry?: boolean;
 }): Promise<MultiTargetRunResult> {
   const attempts: MultiTargetAttemptResult[] = [];
   let consecutiveFailures = 0;
   let targetSucceeded = false;
   let timedOut = false;
+  let encounteredProxyFailure = false;
   const attemptedKeys = new Set<string>();
   const deadlineTimer = deadlineAt === undefined
     ? undefined
@@ -164,6 +198,7 @@ export async function runMultiTargetAutomation({
     for (const target of targets) {
       if (
         targetSucceeded ||
+        encounteredProxyFailure ||
         attempts.length >= MAX_TARGET_ATTEMPTS_PER_WEBSITE ||
         consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ||
         timedOut || (deadlineAt !== undefined && Date.now() >= deadlineAt)
@@ -187,7 +222,13 @@ export async function runMultiTargetAutomation({
           timeoutMs: Math.max(1000, Math.min(timeoutMs, remainingMs))
         });
       } catch (error) {
+        if (isProxyAuthenticationFailure(error)) {
+          encounteredProxyFailure = true;
+        }
         result = failedResult(target, error);
+      }
+      if (isProxyAuthenticationFailure(result.errorMessage)) {
+        encounteredProxyFailure = true;
       }
       const attempt = { target, result, startedAt, completedAt: new Date() };
       attempts.push(attempt);
@@ -196,6 +237,48 @@ export async function runMultiTargetAutomation({
       if (isSuccessful(result)) {
         targetSucceeded = true;
         break;
+      }
+      if (encounteredProxyFailure) break;
+    }
+  }
+
+  // Helper to run the 1-shot direct retry when proxy 407 / gateway failure happens
+  async function triggerDirectRetry(_reasonForRetry: string): Promise<MultiTargetRunResult> {
+    stopDeadlineTimer();
+    let directContext: BrowserContext | null = null;
+    try {
+      directContext = await acquireContext({
+        headless: headless ?? true,
+        userId,
+        disableProxy: true,
+        bandwidthSaver: false,
+        startupTimeoutMs: Math.min(20_000, timeoutMs)
+      });
+      const directRun = await runMultiTargetAutomation({
+        websiteUrl,
+        leadData,
+        bookingPreferences,
+        liveSubmit,
+        browserContext: directContext,
+        timeoutMs,
+        cachedTargets,
+        callbacks,
+        userId,
+        deadlineAt: deadlineAt !== undefined ? Math.max(Date.now() + 15000, deadlineAt) : undefined,
+        headless,
+        isDirectRetry: true
+      });
+      const directHasSuccess = directRun.attempts.some((a) => isSuccessful(a.result));
+      if (directHasSuccess) {
+        directRun.discoveryReason = [
+          "Proxy fallback: resolved via direct connection",
+          directRun.discoveryReason
+        ].filter(Boolean).join("; ");
+      }
+      return directRun;
+    } finally {
+      if (directContext) {
+        await releaseContext(directContext).catch(() => undefined);
       }
     }
   }
@@ -209,6 +292,9 @@ export async function runMultiTargetAutomation({
       (target) => target.targetType === "contact_form"
     );
     await executeTargets(cachedContactTargets);
+    if (encounteredProxyFailure && !isDirectRetry) {
+      return triggerDirectRetry("Cached target encountered proxy authentication failure.");
+    }
     if (targetSucceeded) {
       stopDeadlineTimer();
       return {
@@ -232,13 +318,37 @@ export async function runMultiTargetAutomation({
     };
   }
 
-  const discovery = await discoverSubmissionTargets({
-    websiteUrl,
-    timeoutMs: Math.max(1000, Math.min(timeoutMs, discoveryRemainingMs)),
-    browserContext,
-    maxNavigationLinks: 6,
-    maxFallbackPaths: 3
-  });
+  let discovery: DiscoverSubmissionTargetsResult;
+  try {
+    discovery = await discoverSubmissionTargets({
+      websiteUrl,
+      timeoutMs: Math.max(1000, Math.min(timeoutMs, discoveryRemainingMs)),
+      browserContext,
+      maxNavigationLinks: 6,
+      maxFallbackPaths: 3
+    });
+    if (isProxyAuthenticationFailure(discovery.reason)) {
+      encounteredProxyFailure = true;
+    }
+  } catch (discoveryErr) {
+    if (isProxyAuthenticationFailure(discoveryErr)) {
+      encounteredProxyFailure = true;
+    }
+    discovery = {
+      websiteUrl,
+      targets: [],
+      checkedUrls: [websiteUrl],
+      reason: isProxyAuthenticationFailure(discoveryErr)
+        ? PROXY_407_MESSAGE
+        : redactProxyDetails(discoveryErr instanceof Error ? discoveryErr.message : "Target discovery failed"),
+      screenshotPath: null
+    };
+  }
+
+  if (encounteredProxyFailure && !isDirectRetry) {
+    return triggerDirectRetry(discovery.reason);
+  }
+
   await callbacks.onTargetsDiscovered?.(discovery.targets, discovery.reason);
   const discoveredContactTargets = discovery.targets.filter(
     (target) => target.targetType === "contact_form"
@@ -247,7 +357,15 @@ export async function runMultiTargetAutomation({
     .filter((target) => target.targetType !== "contact_form")
     .sort((a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence);
   await executeTargets(discoveredContactTargets);
-  if (!targetSucceeded) await executeTargets(bookingFallbackTargets);
+  if (encounteredProxyFailure && !isDirectRetry) {
+    return triggerDirectRetry("Target execution encountered proxy authentication failure.");
+  }
+  if (!targetSucceeded && !encounteredProxyFailure) {
+    await executeTargets(bookingFallbackTargets);
+    if (encounteredProxyFailure && !isDirectRetry) {
+      return triggerDirectRetry("Target execution encountered proxy authentication failure.");
+    }
+  }
 
   const targets = Array.from(
     new Map(
@@ -264,7 +382,7 @@ export async function runMultiTargetAutomation({
       ? `${discovery.reason} The first successful target was used and remaining targets were skipped.`
       : timedOut
         ? "Website automation exceeded its time limit."
-        : discovery.reason,
+        : redactProxyDetails(discovery.reason),
     checkedUrls: Array.from(new Set([
       ...orderedCachedTargets.map((target) => target.url),
       ...discovery.checkedUrls

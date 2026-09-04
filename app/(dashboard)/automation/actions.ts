@@ -11,10 +11,17 @@ import { SubmitContactFormResult } from "@/types/automation";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { BrowserContext } from "playwright";
 import { config } from "@/lib/config";
-import { getAutomationQueue } from "@/queue/client";
 import { acquireContext, releaseContext } from "@/lib/browserPool";
 import { runMultiTargetAutomation } from "@/services/multi-target-automation";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
+import { getAutomationQueue } from "@/queue/client";
 
 export type AutomationResult = {
     websiteUrl: string;
@@ -226,7 +233,7 @@ export async function startBackgroundAutomationAction(formData: FormData) {
         if (!automationQueue) return;
         await automationQueue
           .getJob(result.id)
-          .then((queuedJob) => queuedJob?.remove())
+          .then((queuedJob: any) => queuedJob?.remove())
           .catch(() => undefined);
       })
     );
@@ -306,6 +313,29 @@ export async function resetBackgroundAutomationAction(jobId: string) {
 export async function getBackgroundAutomationAction(jobId?: string) {
   const user = await requireUser();
   if (jobId) {
+    // A browser/context can occasionally stop responding without rejecting its
+    // promise. Recover that one website shortly after its hard deadline so the
+    // rest of the batch is never held hostage by it.
+    if (config.queueProvider === "local") {
+      const staleResultBefore = new Date(
+        Date.now() - config.worker.websiteTimeoutMs - 30_000
+      );
+      const recovered = await prisma.submissionResult.updateMany({
+        where: {
+          jobId,
+          status: { in: ["Discovering", "Running"] },
+          updatedAt: { lt: staleResultBefore },
+          job: { userId: user.id, status: "Running" }
+        },
+        data: {
+          status: "Failed",
+          message: "Website automation timed out. The batch continued with the next website.",
+          submittedAt: new Date()
+        }
+      });
+      if (recovered.count > 0) localAutomationLocks.delete(jobId);
+    }
+
     const dbJob = await prisma.submissionJob.findFirst({
       where: { id: jobId, userId: user.id },
       include: {
@@ -433,17 +463,19 @@ async function processLocalQueueResult(userId: string, resultId: string) {
       });
       if (!website) throw new Error("Target website record not found.");
       const showBrowser = payloadFields.get("showBrowser") === "on";
-      const context = await acquireContext({ headless: !showBrowser, userId });
+      const context = await acquireContext({
+        headless: !showBrowser,
+        userId,
+        startupTimeoutMs: Math.min(20_000, config.worker.websiteTimeoutMs)
+      });
       try {
         const targetIds = new Map<string, string>();
         const attemptIds = new Map<string, string>();
         const key = (target: { targetType: string; url: string }) => `${target.targetType}:${target.url}`;
-        // Each target engine already has navigation and action timeouts. Do not
-        // race this shared-context run against a timer here: Promise.race leaves
-        // the automation running and the finally block below closes its context,
-        // producing misleading "target page or browser has been closed" errors
-        // for every remaining target.
-        const run = await runMultiTargetAutomation({
+        // This context belongs to this one website. Keep a hard outer cap as a
+        // final safeguard: a broken page or browser wait must never prevent the
+        // remaining queued websites from running.
+        const multiTargetRun = runMultiTargetAutomation({
           websiteUrl: website.websiteUrl,
           leadData: {
             fullName: payloadFields.get("fullName") || "",
@@ -464,6 +496,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
           timeoutMs: config.worker.timeoutMs,
           deadlineAt: Date.now() + config.worker.websiteTimeoutMs,
           userId,
+          headless: !showBrowser,
           cachedTargets: website.discoveredTargets.map((target) => ({
             targetType: target.targetType as "calendly" | "hubspot_booking" | "contact_form" | "booking_widget",
             url: target.url,
@@ -480,9 +513,13 @@ async function processLocalQueueResult(userId: string, resultId: string) {
           })),
           callbacks: {
             onTargetsDiscovered: async (targets, reason) => {
-              await prisma.submissionResult.update({
-                where: { id: resultId },
-                data: { status: "Discovering", message: reason }
+              await prisma.submissionResult.updateMany({
+                where: {
+                  id: resultId,
+                  status: "Discovering",
+                  job: { userId, status: "Running" }
+                },
+                data: { status: "Discovering", message: redactProxyDetails(reason) }
               });
               for (const target of targets) {
                 const saved = await prisma.discoveredSubmissionTarget.upsert({
@@ -523,7 +560,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
               });
               attemptIds.set(key(target), attempt.id);
               await prisma.submissionAttemptLog.create({
-                data: { attemptId: attempt.id, message: `Started ${target.targetType} automation` }
+                data: { attemptId: attempt.id, message: redactProxyDetails(`Started ${target.targetType} automation`) }
               });
             },
             onAttemptFinished: async (attempt) => {
@@ -535,7 +572,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
                 data: {
                   status: successful ? "Completed" : "Failed",
                   message: attempt.result.status,
-                  errorMessage: attempt.result.errorMessage,
+                  errorMessage: redactProxyDetails(attempt.result.errorMessage),
                   screenshotPath: attempt.result.screenshotPath,
                   screenshotPaths: JSON.stringify(attempt.result.screenshotPaths ?? []),
                   submittedAt: attempt.result.submittedAt,
@@ -547,7 +584,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
                   attemptId,
                   level: successful ? "info" : "error",
                   message: `Finished ${attempt.target.targetType} with status ${attempt.result.status}`,
-                  details: attempt.result.errorMessage
+                  details: redactProxyDetails(attempt.result.errorMessage)
                 }
               });
               await prisma.automationTransaction.create({
@@ -557,7 +594,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
                   resolvedUrl: attempt.target.url,
                   targetType: attempt.target.targetType,
                   status: attempt.result.status,
-                  errorMessage: attempt.result.errorMessage,
+                  errorMessage: redactProxyDetails(attempt.result.errorMessage),
                   screenshotPath: attempt.result.screenshotPath,
                   liveSubmit: payload.liveSubmit
                 }
@@ -565,16 +602,28 @@ async function processLocalQueueResult(userId: string, resultId: string) {
             }
           }
         });
+        const run = await withAutomationTimeout(
+          multiTargetRun,
+          config.worker.websiteTimeoutMs
+        );
         if (run.targets.length === 0) throw new Error(run.discoveryReason);
         const successes = run.attempts.filter((attempt) =>
           ["success", "dry_run_ready_to_book"].includes(attempt.result.status)
         );
         const anySuccessful = successes.length > 0;
-        await prisma.submissionResult.update({
-          where: { id: resultId },
+        await prisma.submissionResult.updateMany({
+          where: {
+            id: resultId,
+            status: { in: ["Discovering", "Running"] },
+            job: { userId, status: "Running" }
+          },
           data: {
             status: anySuccessful ? "Completed" : "Failed",
-            message: `${successes.length}/${run.attempts.length} targets completed successfully`,
+            message: redactProxyDetails(
+              run.discoveryReason.includes("Proxy fallback")
+                ? run.discoveryReason
+                : `${successes.length}/${run.attempts.length} targets completed successfully`
+            ),
             screenshotPath: run.attempts.map((attempt) => attempt.result.screenshotPath).filter(Boolean).at(-1) ?? null,
             submittedAt: new Date()
           }
@@ -583,7 +632,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
           where: { id: website.id },
           data: {
             contactPageUrl: run.targets[0]?.url ?? website.contactPageUrl,
-            notes: [website.notes, run.discoveryReason].filter(Boolean).join("\n")
+            notes: [website.notes, redactProxyDetails(run.discoveryReason)].filter(Boolean).join("\n")
           }
         });
         return;
@@ -626,7 +675,7 @@ async function processLocalQueueResult(userId: string, resultId: string) {
       where: { id: resultId, job: { status: "Running" } },
       data: {
         status: localResultCompleted(result) ? "Completed" : "Failed",
-        message: result.errorMessage || result.discoveryReason || result.status,
+        message: redactProxyDetails(result.errorMessage || result.discoveryReason || result.status),
         screenshotPath: result.screenshotPath,
         submittedAt: new Date(result.submittedAt)
       }
@@ -637,11 +686,17 @@ async function processLocalQueueResult(userId: string, resultId: string) {
       where: { id: record.jobId },
       select: { status: true }
     });
+    const isProxy = isProxyAuthenticationFailure(error);
+    const rawError = isProxy
+      ? PROXY_407_MESSAGE
+      : error instanceof Error
+        ? error.message
+        : "Local automation failed";
     await prisma.submissionResult.update({
       where: { id: resultId },
       data: {
         status: parent?.status === "Cancelled" ? "Cancelled" : "Failed",
-        message: error instanceof Error ? error.message : "Local automation failed"
+        message: redactProxyDetails(rawError)
       }
     });
   } finally {
@@ -737,7 +792,7 @@ function serializeResult(
 }
 
 export async function storeTransaction(userId: string, result: AutomationResult, liveSubmit: boolean) {
-  await prisma.automationTransaction.create({ data: { userId, websiteUrl: result.websiteUrl, resolvedUrl: result.resolvedUrl, targetType: result.targetType, status: result.status, errorMessage: result.errorMessage, screenshotPath: result.screenshotPath, liveSubmit } });
+  await prisma.automationTransaction.create({ data: { userId, websiteUrl: result.websiteUrl, resolvedUrl: result.resolvedUrl, targetType: result.targetType, status: result.status, errorMessage: redactProxyDetails(result.errorMessage), screenshotPath: result.screenshotPath, liveSubmit } });
 }
 
 export async function runAutomationAction(
@@ -771,7 +826,7 @@ export async function runAutomationAction(
           discoveryReason: null,
           targetType: null,
           status: "failed",
-          errorMessage: error instanceof Error ? error.message : "Automation failed.",
+          errorMessage: redactProxyDetails(error instanceof Error ? error.message : "Automation failed."),
           screenshotPath: null,
           screenshotPaths: [],
           selectedDate: null,
@@ -817,7 +872,7 @@ export async function runAutomationAction(
       discoveryReason: null,
       targetType: null,
       status: "failed",
-      errorMessage: error instanceof Error ? error.message : "Automation execution failed.",
+      errorMessage: redactProxyDetails(error instanceof Error ? error.message : "Automation execution failed."),
       screenshotPath: null,
       screenshotPaths: [],
       selectedDate: null,
@@ -933,7 +988,11 @@ export async function runSingleAutomationAction(
     };
   }
 
-  const browserContext = await acquireContext({ headless: !showBrowser, userId });
+  const browserContext = await acquireContext({
+    headless: !showBrowser,
+    userId,
+    startupTimeoutMs: Math.min(20_000, config.worker.websiteTimeoutMs)
+  });
   try {
   if (automationType === "auto") {
     const savedNotes = selectedWebsite?.notes?.toLowerCase() ?? "";
@@ -941,18 +1000,25 @@ export async function runSingleAutomationAction(
       selectedWebsite?.contactPageUrl &&
       selectedWebsite.contactPageUrl.replace(/\/$/, "") === selectedWebsite.websiteUrl.replace(/\/$/, "")
     );
+    const cachedTargetHost = selectedWebsite?.contactPageUrl
+      ? new URL(selectedWebsite.contactPageUrl).hostname.toLowerCase()
+      : "";
+    const cachedTargetIsCalendly = cachedTargetHost === "calendly.com" || cachedTargetHost.endsWith(".calendly.com");
+    const cachedTargetIsHubSpot = cachedTargetHost === "meetings.hubspot.com";
     const shouldRediscoverCachedHomepageBooking =
       cachedTargetIsHomepage && (savedNotes.includes("calendly") || savedNotes.includes("booking"));
+    // Older runs could save a generic inline scheduler as "calendly". A
+    // Calendly route is valid only when the target actually points at
+    // calendly.com, so rediscover stale labels on ordinary contact URLs.
+    const hasStaleCalendlyLabel = savedNotes.includes("calendly") && !cachedTargetIsCalendly;
 
-    if (selectedWebsite?.contactPageUrl && !shouldRediscoverCachedHomepageBooking) {
+    if (selectedWebsite?.contactPageUrl && !shouldRediscoverCachedHomepageBooking && !hasStaleCalendlyLabel) {
       discoveryReason = "Using saved discovered contact/booking URL.";
-      const isCalendlyUrl = selectedWebsite.contactPageUrl.toLowerCase().includes("calendly");
-      const isHubSpotUrl = selectedWebsite.contactPageUrl.toLowerCase().includes("meetings.hubspot.com");
       const notes = selectedWebsite.notes?.toLowerCase() ?? "";
       automationType =
-        isHubSpotUrl || notes.includes("hubspot")
+        cachedTargetIsHubSpot
           ? "hubspot"
-          : isCalendlyUrl || notes.includes("calendly")
+          : cachedTargetIsCalendly
             ? "calendly"
             : notes.includes("booking_widget")
               ? "booking"
@@ -962,7 +1028,9 @@ export async function runSingleAutomationAction(
       const discovery = await discoverSubmissionTarget({
         websiteUrl,
         headless: !showBrowser,
-        timeoutMs: 8000,
+        // Contact forms and schedulers often hydrate after the initial HTML.
+        // Give discovery a bounded but realistic page-readiness window.
+        timeoutMs: Math.min(config.worker.websiteTimeoutMs, 30000),
         maxNavigationLinks: 10,
         maxFallbackPaths: 6,
         browserContext
@@ -1059,16 +1127,21 @@ export async function runSingleAutomationAction(
             browserContext
           });
 
+  // Manual mode can be set to Calendly for a link that later changes to an
+  // inline scheduler. If there is no Calendly host/frame, retry the generic
+  // scheduler path rather than reporting a misleading iframe error.
+  const currentTargetHost = new URL(websiteUrl).hostname.toLowerCase();
+  const isActualCalendlyTarget = currentTargetHost === "calendly.com" || currentTargetHost.endsWith(".calendly.com");
   if (
-    automationType === "contact" &&
-    result.status === "booking_widget_found" &&
-    result.bookingWidgetReason?.toLowerCase().includes("calendly")
+    automationType === "calendly" &&
+    !isActualCalendlyTarget &&
+    result.status === "iframe_not_accessible"
   ) {
-    discoveryReason = [discoveryReason, result.bookingWidgetReason]
+    targetType = "booking_widget";
+    discoveryReason = [discoveryReason, "No Calendly iframe found; retried as inline booking scheduler."]
       .filter(Boolean)
       .join("; ");
-    targetType = "calendly";
-    result = await submitCalendlyBooking({
+    result = await submitGenericBookingWidget({
       websiteUrl,
       leadData,
       liveSubmit,
@@ -1076,16 +1149,111 @@ export async function runSingleAutomationAction(
       bookingPreferences,
       browserContext
     });
+  }
+
+  if (automationType === "contact" && result.status === "booking_widget_found") {
+    discoveryReason = [discoveryReason, result.bookingWidgetReason]
+      .filter(Boolean)
+      .join("; ");
+    const detectedCalendly = result.bookingWidgetReason?.toLowerCase().includes("calendly");
+    targetType = detectedCalendly ? "calendly" : "booking_widget";
+    result = detectedCalendly
+      ? await submitCalendlyBooking({
+          websiteUrl,
+          leadData,
+          liveSubmit,
+          headless: !showBrowser,
+          bookingPreferences,
+          browserContext
+        })
+      : await submitGenericBookingWidget({
+          websiteUrl,
+          leadData,
+          liveSubmit,
+          headless: !showBrowser,
+          bookingPreferences,
+          browserContext
+        });
 
     if (selectedWebsite) {
       await prisma.targetWebsite.update({
         where: { id: selectedWebsite.id },
         data: {
-          notes: [selectedWebsite.notes, "Discovered calendly: contact page embeds Calendly"]
+            notes: [selectedWebsite.notes, `Discovered ${targetType}: contact page contains a booking scheduler`]
             .filter(Boolean)
             .join("\n")
         }
       });
+    }
+  }
+
+  // Some schedulers expose no availability to residential proxy IPs even
+  // though the same public page has open slots directly. Retry once without
+  // proxy only after the scheduler explicitly reports zero available slots.
+  if (
+    (targetType === "booking_widget" && result.status === "no_available_slots") ||
+    isProxyAuthenticationFailure(result.errorMessage)
+  ) {
+    const proxyState = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { proxyEnabled: true }
+    });
+    if (proxyState?.proxyEnabled) {
+      let directContext: BrowserContext | null = null;
+      try {
+        directContext = await acquireContext({
+          headless: !showBrowser,
+          userId,
+          disableProxy: true,
+          bandwidthSaver: false,
+          startupTimeoutMs: Math.min(20_000, config.worker.websiteTimeoutMs)
+        });
+        const directRetry = targetType === "contact_form"
+          ? await submitContactForm({
+              websiteUrl,
+              leadData,
+              liveSubmit,
+              headless: !showBrowser,
+              browserContext: directContext,
+              userId
+            })
+          : targetType === "calendly"
+            ? await submitCalendlyBooking({
+                websiteUrl,
+                leadData,
+                bookingPreferences,
+                liveSubmit,
+                browserContext: directContext
+              })
+            : targetType === "hubspot_booking"
+              ? await submitHubSpotBooking({
+                  websiteUrl,
+                  leadData,
+                  bookingPreferences,
+                  liveSubmit,
+                  browserContext: directContext
+                })
+              : await submitGenericBookingWidget({
+                  websiteUrl,
+                  leadData,
+                  liveSubmit,
+                  headless: !showBrowser,
+                  bookingPreferences,
+                  browserContext: directContext
+                });
+        const isSuccess = ["success", "dry_run_ready_to_book"].includes(directRetry.status);
+        if (isSuccess || (result.status === "no_available_slots" && directRetry.status !== "no_available_slots")) {
+          result = directRetry;
+          discoveryReason = [
+            discoveryReason,
+            "Proxy fallback: resolved via direct connection"
+          ]
+            .filter(Boolean)
+            .join("; ");
+        }
+      } finally {
+        if (directContext) await releaseContext(directContext);
+      }
     }
   }
 

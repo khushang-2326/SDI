@@ -525,6 +525,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [directContactUrl, setDirectContactUrl] = useState("");
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const isPausedRef = useRef(false);
   const [isAnalysisOpen, setIsAnalysisOpen] = useState(false);
@@ -648,10 +650,11 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   }, [isBatchRunning]);
 
   async function cancelAutomation() {
-    if (!currentJobId) return;
+    if (!currentJobId || isCancelling) return;
     cancelledJobId.current = currentJobId;
     isPausedRef.current = false;
     setIsPaused(false);
+    setIsCancelling(true);
     setIsBatchRunning(false);
     setBatchStatus("cancelled");
     setLiveBatchItems((items) =>
@@ -661,18 +664,30 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
           : { ...item, status: "cancelled", detail: "Cancelled by user" }
       )
     );
-    await cancelBackgroundAutomationAction(currentJobId).catch(() => undefined);
+    try {
+      const cancelledJob = await cancelBackgroundAutomationAction(currentJobId);
+      // Do not allow Reset to race ahead of the database transaction. The
+      // returned job is already terminal and makes the Reset button valid.
+      if (cancelledJob) applyBackgroundJob(cancelledJob);
+    } finally {
+      setIsCancelling(false);
+    }
   }
   async function resetAutomation() {
-    if (!currentJobId || isBatchRunning) return;
+    if (!currentJobId || isBatchRunning || isCancelling || isResetting) return;
     isPausedRef.current = false;
     setIsPaused(false);
-    if (await resetBackgroundAutomationAction(currentJobId)) {
-      cancelledJobId.current = null;
-      setLiveBatchItems([]);
-      setCurrentJobId(null);
-      setIsBatchRunning(false);
-      setBatchStatus("idle");
+    setIsResetting(true);
+    try {
+      if (await resetBackgroundAutomationAction(currentJobId)) {
+        cancelledJobId.current = null;
+        setLiveBatchItems([]);
+        setCurrentJobId(null);
+        setIsBatchRunning(false);
+        setBatchStatus("idle");
+      }
+    } finally {
+      setIsResetting(false);
     }
   }
 
@@ -694,6 +709,17 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         if (stopped) return;
         if (job) applyBackgroundJob(job);
         if (!job || job.status !== "running") return;
+
+        // If the server watchdog recovered a timed-out website, restart local
+        // queue processing without asking the user to refresh the dashboard.
+        // The server-side lock keeps this harmless when another request owns it.
+        if (!job.items.some((item) => item.status === "discovering")) {
+          void processLocalBackgroundAutomationAction(jobId)
+            .then((resumedJob) => {
+              if (!stopped && resumedJob) applyBackgroundJob(resumedJob);
+            })
+            .catch(() => undefined);
+        }
       }
     }
 
@@ -996,6 +1022,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             >
               {isPaused
                 ? "⏸ Paused"
+                : isCancelling
+                ? "● Cancelling"
                 : isBatchRunning
                 ? "● Automation running"
                 : batchStatus === "cancelled"
@@ -1017,21 +1045,22 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
             {isBatchRunning ? (
               <button
-                className="rounded-xl bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-red-700 transition active:scale-95"
+                className="rounded-xl bg-red-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-red-700 transition active:scale-95 disabled:cursor-not-allowed disabled:bg-red-300"
+                disabled={isCancelling}
                 onClick={cancelAutomation}
                 type="button"
               >
-                ✕ Cancel
+                {isCancelling ? "Cancelling..." : "✕ Cancel"}
               </button>
             ) : null}
 
             <button
               className="rounded-xl border border-line bg-white px-3 py-1.5 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
-              disabled={isBatchRunning || !currentJobId || liveBatchItems.length === 0}
+              disabled={isBatchRunning || isCancelling || isResetting || !currentJobId || liveBatchItems.length === 0}
               onClick={resetAutomation}
               type="button"
             >
-              Reset
+              {isResetting ? "Resetting..." : "Reset"}
             </button>
           </div>
         </div>

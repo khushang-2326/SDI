@@ -9,6 +9,13 @@ import {
   type BrowserContext
 } from "playwright";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
+import { detectUnsupportedVerification } from "@/services/verification-detector";
 
 type CalendlyScope = Page | Frame;
 import { getChromiumExecutablePath } from "@/services/browser-executable";
@@ -798,7 +805,31 @@ export async function submitCalendlyBooking({
     }
     page.setDefaultTimeout(timeoutMs);
 
-    await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    let proxy407Hit = false;
+    const responseHandler = (res: any) => {
+      if (res.status() === 407) proxy407Hit = true;
+    };
+    page.on("response", responseHandler);
+
+    let navResponse: any = null;
+    let navError: any = null;
+    try {
+      navResponse = await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    } catch (err: any) {
+      navError = err;
+    } finally {
+      page.off("response", responseHandler);
+    }
+
+    if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const verification = await detectUnsupportedVerification(page, websiteUrl);
+    if (verification) {
+      if (verification.screenshotPath) screenshotPaths.push(verification.screenshotPath);
+      return finish("failed", verification.reason);
+    }
 
     // Dismiss any cookie consent overlay before looking for frames
     await dismissCookieBanners(page).catch(() => undefined);
@@ -886,7 +917,10 @@ export async function submitCalendlyBooking({
 
     return finish("confirmation_not_found", "Booking was submitted but confirmation was not detected.");
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown Calendly automation error.";
+    if (isProxyAuthenticationFailure(error)) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+    const message = redactProxyDetails(error instanceof Error ? error.message : "Unknown Calendly automation error.");
     return finish("failed", message);
   } finally {
     if (page && !browserContext) {

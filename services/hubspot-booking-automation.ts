@@ -9,6 +9,13 @@ import {
   SubmitContactFormResult
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
+import { detectUnsupportedVerification } from "@/services/verification-detector";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
@@ -481,7 +488,32 @@ export async function submitHubSpotBooking({
     }
     page.setDefaultTimeout(timeoutMs);
 
-    await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    let proxy407Hit = false;
+    const responseHandler = (res: any) => {
+      if (res.status() === 407) proxy407Hit = true;
+    };
+    page.on("response", responseHandler);
+
+    let navResponse: any = null;
+    let navError: any = null;
+    try {
+      navResponse = await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    } catch (err: any) {
+      navError = err;
+    } finally {
+      page.off("response", responseHandler);
+    }
+
+    if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const verification = await detectUnsupportedVerification(page, websiteUrl);
+    if (verification) {
+      if (verification.screenshotPath) screenshotPaths.push(verification.screenshotPath);
+      return finish("failed", verification.reason);
+    }
+
     await dismissCookieBanners(page).catch(() => undefined);
     await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
     await dismissCookieBanners(page).catch(() => undefined);
@@ -526,7 +558,10 @@ export async function submitHubSpotBooking({
 
     return finish("success", null);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown HubSpot error.";
+    if (isProxyAuthenticationFailure(error)) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+    const errorMessage = redactProxyDetails(error instanceof Error ? error.message : "Unknown HubSpot error.");
     return finish("failed", errorMessage);
   } finally {
     if (page && browserContext) {

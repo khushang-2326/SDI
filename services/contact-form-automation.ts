@@ -3,8 +3,13 @@ import path from "node:path";
 import { chromium, type Browser, type Locator, type Page, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 import { prisma } from "@/lib/prisma";
-import { SolverFactory } from "./captcha/solver-factory";
-import { decrypt } from "@/lib/crypto";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
+import { detectUnsupportedVerification } from "@/services/verification-detector";
 import {
   LeadData,
   SubmitContactFormInput,
@@ -12,7 +17,7 @@ import {
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
 
-type FieldKey = "fullName" | "email" | "mobile" | "address" | "message" | "companyName";
+type FieldKey = "fullName" | "email" | "mobile" | "city" | "address" | "message" | "companyName";
 
 type FieldCandidate = {
   index: number;
@@ -30,6 +35,8 @@ type FormScope = Page | Locator;
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
+const REQUIRED_TEXT_FALLBACK = "Seo management";
+const NAME_FIELD_PATTERN = /(?:full[ _-]?name|first[ _-]?name|firstname|fname|given[ _-]?name|middle[ _-]?name|middlename|mname|last[ _-]?name|lastname|lname|surname|family[ _-]?name)/i;
 const COMMON_INPUT_SELECTOR = [
   "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='reset']):not([type='checkbox']):not([type='radio'])",
   "textarea",
@@ -47,7 +54,8 @@ const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
   ],
   email: ["email", "e-mail", "mail"],
   mobile: ["phone", "mobile", "telephone", "tel", "cell", "contact number"],
-  address: ["address", "street", "city", "state", "zip", "postal"],
+  city: ["city", "town", "municipality"],
+  address: ["address", "street", "state", "zip", "postal"],
   message: ["message", "comment", "comments", "details", "description", "note", "enquiry"],
   companyName: ["company", "business", "organization", "organisation", "brand"]
 };
@@ -56,6 +64,7 @@ const FIELD_VALUES: Record<FieldKey, (leadData: LeadData) => string | undefined>
   fullName: (leadData) => leadData.fullName,
   email: (leadData) => leadData.email,
   mobile: (leadData) => leadData.mobile ?? leadData.mobileNumber,
+  city: () => "New York",
   address: (leadData) => leadData.address,
   message: (leadData) => leadData.message,
   companyName: (leadData) => leadData.companyName
@@ -88,6 +97,9 @@ function scoreCandidate(candidate: FieldCandidate, fieldKey: FieldKey) {
   }
 
   if (fieldKey === "email" && candidate.type === "email") score += 6;
+  // Never allow name matching to claim a browser-typed email control simply
+  // because nearby labels include the word "name".
+  if (fieldKey === "fullName" && candidate.type === "email") score -= 100;
   if (fieldKey === "mobile" && ["tel", "phone"].includes(candidate.type)) score += 6;
   if (fieldKey === "message" && candidate.tagName === "textarea") score += 5;
   if (fieldKey === "fullName" && descriptor.includes("username")) score -= 6;
@@ -157,6 +169,27 @@ async function safelyFillField(locator: Locator, value: string) {
   return true;
 }
 
+async function safelyFillCityField(locator: Locator) {
+  if (!(await locator.isVisible().catch(() => false))) return false;
+  if (!(await locator.isEnabled().catch(() => false))) return false;
+
+  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+  if (tagName !== "select") return safelyFillField(locator, "New York");
+
+  const matchingOptionIndex = await locator.evaluate((element) => {
+    const select = element as HTMLSelectElement;
+    return Array.from(select.options).findIndex((option) => {
+      const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      const value = option.value.trim().toLowerCase();
+      return label === "new york" || label === "new york city" || value === "new york" || value === "ny";
+    });
+  }).catch(() => -1);
+
+  if (matchingOptionIndex < 0) return false;
+  await locator.selectOption({ index: matchingOptionIndex }).catch(() => undefined);
+  return true;
+}
+
 async function selectFirstRealOption(locator: Locator) {
   if (!(await locator.isVisible().catch(() => false))) return false;
   if (!(await locator.isEnabled().catch(() => false))) return false;
@@ -180,6 +213,74 @@ async function selectFirstRealOption(locator: Locator) {
   if (optionIndex < 0) return false;
   await locator.selectOption({ index: optionIndex });
   return true;
+}
+
+async function selectRequiredRadioDefaults(scope: FormScope) {
+  const radios = scope.locator("input[type='radio']");
+  const count = await radios.count().catch(() => 0);
+  const groups = new Map<string, Locator>();
+
+  for (let index = 0; index < count; index++) {
+    const radio = radios.nth(index);
+    if (!(await radio.isVisible().catch(() => false)) || !(await radio.isEnabled().catch(() => false))) continue;
+    const metadata = await radio.evaluate((element) => ({
+      name: (element as HTMLInputElement).name,
+      required: (element as HTMLInputElement).required || element.getAttribute("aria-required") === "true"
+    })).catch(() => ({ name: "", required: false }));
+    if (metadata.required && metadata.name && !groups.has(metadata.name)) groups.set(metadata.name, radio);
+  }
+
+  const filled: string[] = [];
+  for (const [name, radio] of groups) {
+    if (await radio.isChecked().catch(() => false)) continue;
+    if (await radio.check({ force: true }).then(() => true).catch(() => false)) filled.push(`radio:${name}`);
+  }
+  return filled;
+}
+
+async function fillRemainingRequiredTextFields(
+  fields: Locator,
+  candidates: FieldCandidate[],
+  usedIndexes: Set<number>
+) {
+  const filled: string[] = [];
+
+  for (const candidate of candidates) {
+    if (usedIndexes.has(candidate.index)) continue;
+    if (candidate.tagName !== "textarea" && candidate.tagName !== "input") continue;
+
+    // A person's name must always come from the lead name mapping below,
+    // never from the generic service-description fallback.
+    if (NAME_FIELD_PATTERN.test(candidate.descriptor)) continue;
+
+    // Do not put generic text into structured controls. Known fields are
+    // handled above, while browser validation rejects this value for these
+    // input types.
+    if (["email", "tel", "number", "date", "time", "url", "file", "password"].includes(candidate.type)) continue;
+
+    const field = fields.nth(candidate.index);
+    const isRequired = await field
+      .evaluate((element) => {
+        const control = element as HTMLInputElement | HTMLTextAreaElement;
+        return control.required || control.getAttribute("aria-required") === "true";
+      })
+      .catch(() => false);
+    if (!isRequired) continue;
+
+    const existingValue = await field.inputValue().catch(() => "");
+    if (existingValue.trim()) {
+      usedIndexes.add(candidate.index);
+      continue;
+    }
+
+    const didFill = await safelyFillField(field, REQUIRED_TEXT_FALLBACK).catch(() => false);
+    if (didFill) {
+      usedIndexes.add(candidate.index);
+      filled.push(`required:${candidate.index}`);
+    }
+  }
+
+  return filled;
 }
 
 async function selectCustomDropdownDefaults(scope: FormScope) {
@@ -239,22 +340,53 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
   const skippedFields: string[] = [];
   const fields = scope.locator(COMMON_INPUT_SELECTOR);
 
+  // Fill true email controls before broad keyword scoring. Some page builders
+  // place all labels in one container, making a nearby name label otherwise
+  // look like a match for the email field.
+  for (const candidate of candidates) {
+    const isEmailField = candidate.type === "email" || /\b(e-?mail|email address)\b/i.test(candidate.descriptor);
+    if (!isEmailField) continue;
+    const didFill = await safelyFillField(fields.nth(candidate.index), leadData.email).catch(() => false);
+    if (didFill) {
+      usedIndexes.add(candidate.index);
+      filledFields.push("email");
+    }
+  }
+
   const nameParts = leadData.fullName.trim().split(/\s+/).filter(Boolean);
   const firstName = nameParts[0] ?? "";
-  const lastName = nameParts.slice(1).join(" ");
+  const lastName = nameParts.at(-1) ?? "";
+  const middleName = nameParts.slice(1, -1).join(" ");
   const firstNameCandidate = candidates.find((candidate) => /first[ _-]?name|firstname|fname|given[ _-]?name/i.test(candidate.descriptor));
+  const middleNameCandidate = candidates.find((candidate) => candidate.index !== firstNameCandidate?.index && /middle[ _-]?name|middlename|mname/i.test(candidate.descriptor));
   const lastNameCandidate = candidates.find((candidate) => candidate.index !== firstNameCandidate?.index && /last[ _-]?name|lastname|lname|surname|family[ _-]?name/i.test(candidate.descriptor));
 
-  if (firstName && lastName && firstNameCandidate && lastNameCandidate) {
+  if (firstNameCandidate) {
     const firstFilled = await safelyFillField(fields.nth(firstNameCandidate.index), firstName).catch(() => false);
-    const lastFilled = await safelyFillField(fields.nth(lastNameCandidate.index), lastName).catch(() => false);
     if (firstFilled) usedIndexes.add(firstNameCandidate.index);
+    if (firstFilled) filledFields.push("firstName");
+  }
+
+  if (middleNameCandidate) {
+    // For a two-part (or single-part) lead name, repeat the supplied full
+    // name in a required middle-name field rather than leaving it blank.
+    const middleValue = middleName || leadData.fullName;
+    const middleFilled = await safelyFillField(fields.nth(middleNameCandidate.index), middleValue).catch(() => false);
+    if (middleFilled) usedIndexes.add(middleNameCandidate.index);
+    if (middleFilled) filledFields.push("middleName");
+  }
+
+  if (lastNameCandidate) {
+    // A one-word lead name is valid: reuse it for a required surname field.
+    const lastValue = nameParts.length > 1 ? lastName : leadData.fullName;
+    const lastFilled = await safelyFillField(fields.nth(lastNameCandidate.index), lastValue).catch(() => false);
     if (lastFilled) usedIndexes.add(lastNameCandidate.index);
-    if (firstFilled && lastFilled) filledFields.push("firstName", "lastName");
+    if (lastFilled) filledFields.push("lastName");
   }
 
   for (const fieldKey of Object.keys(FIELD_VALUES) as FieldKey[]) {
-    if (fieldKey === "fullName" && filledFields.includes("firstName") && filledFields.includes("lastName")) continue;
+    if (fieldKey === "email" && filledFields.includes("email")) continue;
+    if (fieldKey === "fullName" && (filledFields.includes("firstName") || filledFields.includes("lastName"))) continue;
     const value = FIELD_VALUES[fieldKey](leadData);
 
     if (!value) {
@@ -276,9 +408,10 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
       continue;
     }
 
-    const didFill = await safelyFillField(fields.nth(best.candidate.index), value).catch(
-      () => false
-    );
+    const didFill = await (fieldKey === "city"
+      ? safelyFillCityField(fields.nth(best.candidate.index))
+      : safelyFillField(fields.nth(best.candidate.index), value)
+    ).catch(() => false);
 
     if (didFill) {
       usedIndexes.add(best.candidate.index);
@@ -299,7 +432,13 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
     }
   }
 
-    filledFields.push(...await selectCustomDropdownDefaults(scope));
+  // Forms frequently include an unnamed required text field such as
+  // "What service do you need?". It has no reliable semantic mapping, so
+  // supply the requested service value after all known lead fields are done.
+  filledFields.push(...await fillRemainingRequiredTextFields(fields, candidates, usedIndexes));
+
+  filledFields.push(...await selectCustomDropdownDefaults(scope));
+  filledFields.push(...await selectRequiredRadioDefaults(scope));
 
   // Check only controls the form explicitly marks as required. Optional
   // consent and marketing opt-ins must remain untouched.
@@ -327,48 +466,69 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
   return { filledFields, skippedFields };
 }
 
-async function fillAllVisibleForms(page: Page, leadData: LeadData) {
-  const forms = page.locator("form");
-  const formCount = await forms.count();
-  const filledFields = new Set<string>();
-  const skippedFields = new Set<string>();
-  let visibleFormCount = 0;
+async function scorePrimaryForm(form: Locator) {
+  return form.evaluate((element) => {
+    const formText = (element.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+    const controls = Array.from(element.querySelectorAll("input, textarea, select")).filter((control) => {
+      const input = control as HTMLInputElement;
+      const style = window.getComputedStyle(input);
+      const rect = input.getBoundingClientRect();
+      return input.type !== "hidden" && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    }) as Array<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>;
+    const descriptors = controls.map((control) => [
+      control.getAttribute("name"),
+      control.id,
+      control.getAttribute("placeholder"),
+      control.getAttribute("aria-label"),
+      control.getAttribute("autocomplete")
+    ].filter(Boolean).join(" ").toLowerCase()).join(" ");
+    const combinedText = `${formText} ${descriptors}`;
+    const emailCount = controls.filter((control) => (control.getAttribute("type") ?? "").toLowerCase() === "email" || /email|e-mail/.test(control.getAttribute("name") ?? "")).length;
+    const textareaCount = controls.filter((control) => control.tagName.toLowerCase() === "textarea").length;
+    const requiredCount = controls.filter((control) => control.required || control.getAttribute("aria-required") === "true").length;
+    const hasNameField = /first[ _-]?name|last[ _-]?name|full[ _-]?name|\bname\b/.test(combinedText);
+    const hasMessageField = /message|comment|details|enquir|project|budget|service/.test(combinedText);
+    const newsletterLike = /newsletter|subscribe|sign up|stay in the know|get marketing tips/.test(combinedText);
+    const isInsideFooter = Boolean(element.closest("footer, [role='contentinfo']"));
 
-  for (let index = 0; index < formCount; index++) {
-    const form = forms.nth(index);
-    if (!(await form.isVisible().catch(() => false))) continue;
-    if ((await form.locator(COMMON_INPUT_SELECTOR).count()) === 0) continue;
-    visibleFormCount++;
-    const result = await fillDetectedFields(form, leadData);
-    for (const field of result.filledFields) filledFields.add(field);
-    for (const field of result.skippedFields) skippedFields.add(field);
-  }
+    let score = controls.length * 12 + requiredCount * 6 + emailCount * 8 + textareaCount * 18;
+    if (hasNameField) score += 22;
+    if (hasMessageField) score += 22;
+    if (controls.length === 1 && emailCount === 1) score -= 100;
+    if (newsletterLike) score -= 90;
+    if (isInsideFooter) score -= 35;
+    return score;
+  }).catch(() => Number.NEGATIVE_INFINITY);
+}
 
-  // A small number of sites use form controls without a wrapping <form>.
-  if (visibleFormCount === 0) {
-    const result = await fillDetectedFields(page, leadData);
-    for (const field of result.filledFields) filledFields.add(field);
-    for (const field of result.skippedFields) skippedFields.add(field);
-  }
+async function findPrimaryForm(page: Page) {
+  const candidates: Locator[] = [];
+  const addVisibleForms = async (forms: Locator) => {
+    const count = await forms.count().catch(() => 0);
+    for (let index = 0; index < count; index++) {
+      const form = forms.nth(index);
+      if (await form.isVisible().catch(() => false)) candidates.push(form);
+    }
+  };
 
-  // Also check child frames (e.g. Dubsado, Typeform, embedded forms)
+  await addVisibleForms(page.locator("form"));
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
-    const frameForms = frame.locator("form");
-    const frameFormCount = await frameForms.count().catch(() => 0);
-    for (let i = 0; i < frameFormCount; i++) {
-      const form = frameForms.nth(i);
-      if (await form.isVisible().catch(() => false)) {
-        visibleFormCount++;
-        const result = await fillDetectedFields(form as any, leadData);
-        for (const field of result.filledFields) filledFields.add(field);
-        for (const field of result.skippedFields) skippedFields.add(field);
-      }
-    }
+    await addVisibleForms(frame.locator("form"));
   }
 
-  for (const field of filledFields) skippedFields.delete(field);
-  return { filledFields: [...filledFields], skippedFields: [...skippedFields] };
+  let best: { form: Locator; score: number } | null = null;
+  for (const form of candidates) {
+    const score = await scorePrimaryForm(form);
+    if (!best || score > best.score) best = { form, score };
+  }
+  return best?.form ?? null;
+}
+
+async function fillAllVisibleForms(page: Page, leadData: LeadData) {
+  const primaryForm = await findPrimaryForm(page);
+  // A small number of sites use controls without a wrapping <form>.
+  return fillDetectedFields(primaryForm ?? page, leadData);
 }
 
 async function findSubmitButton(page: Page, leadData?: LeadData) {
@@ -397,10 +557,29 @@ async function findSubmitButton(page: Page, leadData?: LeadData) {
     "[role='button']:has-text('Submit')",
     "[role='button']:has-text('Send')",
     "[role='button']:has-text('Enviar')",
-    "[role='button']:has-text('Absenden')",
     "button:has-text('Let\'s get started')",
-    "input[value*='started' i]"
+    "input[value*='started' i]",
+    "a:has-text('Submit')",
+    "a:has-text('Send')",
+    "a:has-text('Send Message')",
+    "a:has-text('Get in touch')",
+    "div[role='button']:has-text('Submit')",
+    "div[role='button']:has-text('Send')",
+    "[class*='form' i] a",
+    "[class*='form' i] [role='button']"
   ];
+
+  const primaryForm = await findPrimaryForm(page);
+  if (primaryForm) {
+    for (const selector of selectors) {
+      const locators = primaryForm.locator(selector);
+      const count = await locators.count().catch(() => 0);
+      for (let index = 0; index < count; index++) {
+        const locator = locators.nth(index);
+        if (await locator.isVisible().catch(() => false)) return locator;
+      }
+    }
+  }
 
   const modalRoots = page.locator([
     "[role='dialog']:visible",
@@ -660,7 +839,7 @@ async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
     const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
     const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 8000, animations: "disabled" });
+    await page.screenshot({ path: absolutePath, fullPage: true, timeout: 15000, animations: "disabled" });
     return `/screenshots/${fileName}`;
   } catch (err) {
     console.warn("Screenshot capture skipped:", err);
@@ -742,246 +921,6 @@ async function persistResult(result: SubmitContactFormResult, leadData: LeadData
   });
 }
 
-async function executeWithRetry<T>(
-  solveFn: () => Promise<T>,
-  maxRetries = 2,
-  delayMs = 3000
-): Promise<T> {
-  let lastError: any;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await solveFn();
-    } catch (error) {
-      lastError = error;
-      if (attempt < maxRetries) {
-        console.warn(`[CAPTCHA] Solver failed (attempt ${attempt + 1}/${maxRetries + 1}). Retrying in ${delayMs}ms... Error: ${error instanceof Error ? error.message : error}`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-    }
-  }
-  throw lastError;
-}
-
-async function trySolveCaptchas(page: Page, userId?: string) {
-  if (!userId) return;
-
-  const userSettings = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { captchaEnabled: true, captchaProvider: true, captchaApiKey: true }
-  });
-
-  if (!userSettings || !userSettings.captchaEnabled || !userSettings.captchaApiKey) {
-    return;
-  }
-
-  const decryptedKey = decrypt(userSettings.captchaApiKey);
-  if (!decryptedKey) {
-    console.error("CAPTCHA API key decryption failed or empty.");
-    return;
-  }
-
-  const solver = SolverFactory.getSolver(userSettings.captchaProvider, decryptedKey);
-  const pageUrl = page.url();
-
-  // 1. Detect ReCAPTCHA v2 / v3
-  const recaptchaIframe = page.locator('iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise"]').first();
-  const hasRecaptcha = (await recaptchaIframe.count()) > 0;
-  
-  if (hasRecaptcha) {
-    const src = await recaptchaIframe.getAttribute("src") || "";
-    const siteKeyMatch = src.match(/k=([^&]+)/);
-    const siteKey = siteKeyMatch ? siteKeyMatch[1] : null;
-    
-    if (siteKey) {
-      const startTime = Date.now();
-      try {
-        console.log(`[CAPTCHA] Solving reCAPTCHA with sitekey: ${siteKey}`);
-        const { token } = await executeWithRetry(() => solver.solveReCaptcha(siteKey, pageUrl));
-        const duration = Date.now() - startTime;
-        
-        await page.evaluate((t) => {
-          const els = document.querySelectorAll('textarea[name="g-recaptcha-response"], [id="g-recaptcha-response"]');
-          els.forEach((el) => {
-            (el as HTMLTextAreaElement).value = t;
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-          });
-        }, token);
-        
-        await page.evaluate(({ t }) => {
-          const elsWithCallback = document.querySelectorAll("[data-callback]");
-          elsWithCallback.forEach((el) => {
-            const cb = el.getAttribute("data-callback");
-            if (cb && typeof (window as any)[cb] === "function") {
-              (window as any)[cb](t);
-            }
-          });
-        }, { t: token });
-
-        await prisma.captchaSolveHistory.create({
-          data: {
-            userId,
-            provider: userSettings.captchaProvider,
-            captchaType: "reCAPTCHA",
-            status: "Success",
-            durationMs: duration
-          }
-        });
-        console.log(`[CAPTCHA] reCAPTCHA solved successfully in ${duration}ms`);
-      } catch (err: any) {
-        const duration = Date.now() - startTime;
-        await prisma.captchaSolveHistory.create({
-          data: {
-            userId,
-            provider: userSettings.captchaProvider,
-            captchaType: "reCAPTCHA",
-            status: "Failed",
-            durationMs: duration,
-            errorMessage: err.message
-          }
-        });
-        console.error("[CAPTCHA] reCAPTCHA solving failed:", err);
-      }
-    }
-  }
-
-  // 2. Detect hCaptcha
-  const hcaptchaIframe = page.locator('iframe[src*="hcaptcha.com/embed"]').first();
-  const hcaptchaElement = page.locator(".h-captcha").first();
-  const hasHcaptcha = (await hcaptchaIframe.count()) > 0 || (await hcaptchaElement.count()) > 0;
-
-  if (hasHcaptcha) {
-    let siteKey = "";
-    if (await hcaptchaElement.count()) {
-      siteKey = await hcaptchaElement.getAttribute("data-sitekey") || "";
-    }
-    if (!siteKey && (await hcaptchaIframe.count())) {
-      const src = await hcaptchaIframe.getAttribute("src") || "";
-      const siteKeyMatch = src.match(/sitekey=([^&]+)/);
-      siteKey = siteKeyMatch ? siteKeyMatch[1] : "";
-    }
-
-    if (siteKey) {
-      const startTime = Date.now();
-      try {
-        console.log(`[CAPTCHA] Solving hCaptcha with sitekey: ${siteKey}`);
-        const { token } = await executeWithRetry(() => solver.solveHCaptcha(siteKey, pageUrl));
-        const duration = Date.now() - startTime;
-
-        await page.evaluate((t) => {
-          const els = document.querySelectorAll('textarea[name="h-captcha-response"], [name="g-recaptcha-response"]');
-          els.forEach((el) => {
-            (el as HTMLTextAreaElement).value = t;
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          });
-        }, token);
-
-        await page.evaluate(({ t }) => {
-          const els = document.querySelectorAll(".h-captcha, [data-callback]");
-          els.forEach((el) => {
-            const cb = el.getAttribute("data-callback");
-            if (cb && typeof (window as any)[cb] === "function") {
-              (window as any)[cb](t);
-            }
-          });
-        }, { t: token });
-
-        await prisma.captchaSolveHistory.create({
-          data: {
-            userId,
-            provider: userSettings.captchaProvider,
-            captchaType: "hCaptcha",
-            status: "Success",
-            durationMs: duration
-          }
-        });
-        console.log(`[CAPTCHA] hCaptcha solved successfully in ${duration}ms`);
-      } catch (err: any) {
-        const duration = Date.now() - startTime;
-        await prisma.captchaSolveHistory.create({
-          data: {
-            userId,
-            provider: userSettings.captchaProvider,
-            captchaType: "hCaptcha",
-            status: "Failed",
-            durationMs: duration,
-            errorMessage: err.message
-          }
-        });
-        console.error("[CAPTCHA] hCaptcha solving failed:", err);
-      }
-    }
-  }
-
-  // 3. Detect Turnstile
-  const turnstileIframe = page.locator('iframe[src*="challenges.cloudflare.com"]').first();
-  const turnstileElement = page.locator(".cf-turnstile").first();
-  const hasTurnstile = (await turnstileIframe.count()) > 0 || (await turnstileElement.count()) > 0;
-
-  if (hasTurnstile) {
-    let siteKey = "";
-    if (await turnstileElement.count()) {
-      siteKey = await turnstileElement.getAttribute("data-sitekey") || "";
-    }
-    if (!siteKey && (await turnstileIframe.count())) {
-      const src = await turnstileIframe.getAttribute("src") || "";
-      const siteKeyMatch = src.match(/(?:sitekey|k)=([^&]+)/);
-      siteKey = siteKeyMatch ? siteKeyMatch[1] : "";
-    }
-
-    if (siteKey) {
-      const startTime = Date.now();
-      try {
-        console.log(`[CAPTCHA] Solving Turnstile with sitekey: ${siteKey}`);
-        const { token } = await executeWithRetry(() => solver.solveTurnstile(siteKey, pageUrl));
-        const duration = Date.now() - startTime;
-
-        await page.evaluate((t) => {
-          const els = document.querySelectorAll('input[name="cf-turnstile-response"], [name="g-recaptcha-response"]');
-          els.forEach((el) => {
-            (el as HTMLInputElement).value = t;
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-          });
-        }, token);
-
-        await page.evaluate(({ t }) => {
-          const els = document.querySelectorAll(".cf-turnstile, [data-callback]");
-          els.forEach((el) => {
-            const cb = el.getAttribute("data-callback");
-            if (cb && typeof (window as any)[cb] === "function") {
-              (window as any)[cb](t);
-            }
-          });
-        }, { t: token });
-
-        await prisma.captchaSolveHistory.create({
-          data: {
-            userId,
-            provider: userSettings.captchaProvider,
-            captchaType: "Turnstile",
-            status: "Success",
-            durationMs: duration
-          }
-        });
-        console.log(`[CAPTCHA] Turnstile solved successfully in ${duration}ms`);
-      } catch (err: any) {
-        const duration = Date.now() - startTime;
-        await prisma.captchaSolveHistory.create({
-          data: {
-            userId,
-            provider: userSettings.captchaProvider,
-            captchaType: "Turnstile",
-            status: "Failed",
-            durationMs: duration,
-            errorMessage: err.message
-          }
-        });
-        console.error("[CAPTCHA] Turnstile solving failed:", err);
-      }
-    }
-  }
-}
-
 export async function submitContactForm({
   websiteUrl,
   leadData,
@@ -1030,12 +969,51 @@ export async function submitContactForm({
     // resource prevents DOMContentLoaded/networkidle from completing. Continue
     // as soon as the server commits the document, then wait for form controls.
     const activePage = page;
-    await activePage.goto(websiteUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: timeoutMs
-    }).catch(async () => {
-      await activePage.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs }).catch(() => undefined);
-    });
+    let proxy407Hit = false;
+    const responseHandler = (res: any) => {
+      if (res.status() === 407) proxy407Hit = true;
+    };
+    activePage.on("response", responseHandler);
+
+    let navResponse: any = null;
+    try {
+      navResponse = await activePage.goto(websiteUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs
+      });
+    } catch (gotoErr: any) {
+      if (isProxyAuthenticationFailure(gotoErr) || proxy407Hit) {
+        screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
+        throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+      }
+      try {
+        navResponse = await activePage.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs });
+      } catch (commitErr: any) {
+        if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
+          screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
+          throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+        }
+      }
+    } finally {
+      activePage.off("response", responseHandler);
+    }
+
+    if (navResponse?.status() === 407 || proxy407Hit) {
+      screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const pageBodyText = await activePage.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+    if (isProxyAuthenticationFailure(null, navResponse?.status(), pageBodyText)) {
+      screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const statusCode = navResponse?.status();
+    const pageTitle = await activePage.title().catch(() => "");
+    if (statusCode === 403 || /403 forbidden/i.test(pageTitle) || /^403 forbidden/i.test(pageBodyText.trim())) {
+      throw new Error("Website blocked access (HTTP 403 Forbidden).");
+    }
 
     // Auto-accept cookie consent banners so contact forms and submit buttons become visible
     await dismissCookieBanners(activePage).catch(() => undefined);
@@ -1052,31 +1030,31 @@ export async function submitContactForm({
     await dismissCookieBanners(activePage).catch(() => undefined);
     await page.waitForTimeout(500);
 
-    let fillResult = await fillAllVisibleForms(page, leadData);
-    // Exit-intent and delayed marketing forms can mount after the primary form
-    // has already been filled. Scan again so both forms receive lead data.
-    await page.waitForTimeout(750);
-    const lateFillResult = await fillAllVisibleForms(page, leadData);
-    fillResult = {
-      filledFields: [...new Set([...fillResult.filledFields, ...lateFillResult.filledFields])],
-      skippedFields: [...new Set([...fillResult.skippedFields, ...lateFillResult.skippedFields])]
-        .filter((field) => !lateFillResult.filledFields.includes(field))
-    };
+    const verification = await detectUnsupportedVerification(page, websiteUrl);
+    if (verification) {
+      if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
+      throw new Error(verification.reason);
+    }
+
+    // Fill the selected primary form only once. Repeating this pass cleared
+    // and retyped every field, making each website visibly slower.
+    const fillResult = await fillAllVisibleForms(page, leadData);
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
     screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit");
 
-    // Attempt to solve any CAPTCHAs before checking/submitting the form
-    await trySolveCaptchas(page, userId).catch((err) => {
-      console.error("Error encountered while solving CAPTCHA:", err);
-    });
-
     // Dismiss any newly popped cookie consent banners
     await dismissCookieBanners(activePage).catch(() => undefined);
 
+    // Some services show bot protection only after their client-side form has
+    // hydrated. Check once more before locating the submit action.
+    const postFillVerification = await detectUnsupportedVerification(page, websiteUrl);
+    if (postFillVerification) {
+      if (postFillVerification.screenshotPath) screenshotPath = postFillVerification.screenshotPath;
+      throw new Error(postFillVerification.reason);
+    }
+
     const submitButton = await findSubmitButton(page, leadData);
-    const postStepFill = await fillAllVisibleForms(page, leadData).catch(() => ({ filledFields: [], skippedFields: [] }));
-    filledFields = [...new Set([...filledFields, ...postStepFill.filledFields])];
 
     if (!submitButton) {
       const bookingWidget = await detectBookingWidget(page);
@@ -1132,10 +1110,16 @@ export async function submitContactForm({
     }
     return result;
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown automation error.";
+    const isProxyErr = isProxyAuthenticationFailure(error);
+    const rawErrorMessage = isProxyErr
+      ? PROXY_407_MESSAGE
+      : error instanceof Error
+        ? error.message
+        : "Unknown automation error.";
+    const errorMessage = redactProxyDetails(rawErrorMessage);
 
-    if (page) {
-      screenshotPath = await takeScreenshot(page, websiteUrl, "failure").catch(
+    if (page && !screenshotPath) {
+      screenshotPath = await takeScreenshot(page, websiteUrl, isProxyErr ? "proxy-407-failure" : "failure").catch(
         () => screenshotPath
       );
     }

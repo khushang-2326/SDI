@@ -27,7 +27,7 @@ export const config = {
     concurrency: positiveInteger(process.env.WORKER_CONCURRENCY, 2, 8),
     maxRetries: nonNegativeInteger(process.env.MAX_RETRIES, 3, 10),
     timeoutMs: positiveInteger(process.env.AUTOMATION_TIMEOUT, 45000, 180000),
-    websiteTimeoutMs: positiveInteger(process.env.WEBSITE_TIMEOUT, 75000, 300000),
+    websiteTimeoutMs: positiveInteger(process.env.WEBSITE_TIMEOUT, 120000, 300000),
   },
   proxy: {
     enabled: process.env.PROXY_ENABLED === "true",

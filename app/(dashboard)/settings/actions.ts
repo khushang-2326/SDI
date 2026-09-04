@@ -19,6 +19,7 @@ export type ProxySettingsState = {
   success?: boolean;
   error?: string;
   proxyEnabled?: boolean;
+  proxyBandwidthSaver?: boolean;
 };
 
 const PROXY_PROTOCOLS = new Set<ProxyProtocol>(["http", "https", "socks5"]);
@@ -164,7 +165,7 @@ export async function updateProxySettingsAction(
     });
 
     revalidatePath("/settings");
-    return { success: true, proxyEnabled: enabled };
+    return { success: true, proxyEnabled: enabled, proxyBandwidthSaver: bandwidthSaver };
   } catch (error: any) {
     return { success: false, error: error.message || "Failed to save proxy settings." };
   }

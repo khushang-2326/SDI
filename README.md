@@ -31,8 +31,14 @@ QUEUE_PROVIDER="local"
 WORKER_CONCURRENCY="1"
 MAX_RETRIES="3"
 AUTOMATION_TIMEOUT="45000"
+WEBSITE_TIMEOUT="120000"
 STORAGE_PROVIDER="local"
 ```
+
+`WEBSITE_TIMEOUT` is a hard cap for one website, including discovery and form
+automation. The default `120000` allows complex forms and booking widgets to
+finish, while still moving past a genuinely unresponsive website after two
+minutes.
 
 ## Production-mode local demo
 

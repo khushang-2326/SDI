@@ -14,6 +14,12 @@ import { submitHubSpotBooking } from "@/services/hubspot-booking-automation";
 import { submitCalendlyBooking } from "@/services/calendly-booking-automation";
 import { submitGenericBookingWidget } from "@/services/generic-booking-widget-automation";
 import { runMultiTargetAutomation } from "@/services/multi-target-automation";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
 
 type AutomationJobData = {
   parentJobId: string;
@@ -141,10 +147,10 @@ const worker = new Worker(
           })),
           callbacks: {
             onTargetsDiscovered: async (targets, reason) => {
-              await logger.info(reason, { targetCount: targets.length });
+              await logger.info(redactProxyDetails(reason), { targetCount: targets.length });
               await prisma.submissionResult.update({
                 where: { id: resultId },
-                data: { status: "Discovering", message: reason }
+                data: { status: "Discovering", message: redactProxyDetails(reason) }
               });
               for (const target of targets) {
                 const savedTarget = await prisma.discoveredSubmissionTarget.upsert({
@@ -187,7 +193,7 @@ const worker = new Worker(
               });
               attemptIds.set(targetKey(target), attempt.id);
               await prisma.submissionAttemptLog.create({
-                data: { attemptId: attempt.id, level: "info", message: `Started ${target.targetType} automation` }
+                data: { attemptId: attempt.id, level: "info", message: redactProxyDetails(`Started ${target.targetType} automation`) }
               });
             },
             onAttemptFinished: async (attempt) => {
@@ -199,7 +205,7 @@ const worker = new Worker(
                 data: {
                   status: successful ? "Completed" : "Failed",
                   message: attempt.result.status,
-                  errorMessage: attempt.result.errorMessage,
+                  errorMessage: redactProxyDetails(attempt.result.errorMessage),
                   screenshotPath: attempt.result.screenshotPath,
                   screenshotPaths: JSON.stringify(attempt.result.screenshotPaths ?? []),
                   submittedAt: attempt.result.submittedAt,
@@ -211,7 +217,7 @@ const worker = new Worker(
                   attemptId,
                   level: successful ? "info" : "error",
                   message: `Finished ${attempt.target.targetType} with status ${attempt.result.status}`,
-                  details: attempt.result.errorMessage
+                  details: redactProxyDetails(attempt.result.errorMessage)
                 }
               });
               await prisma.automationTransaction.create({
@@ -221,7 +227,7 @@ const worker = new Worker(
                   resolvedUrl: attempt.target.url,
                   targetType: attempt.target.targetType,
                   status: attempt.result.status,
-                  errorMessage: attempt.result.errorMessage,
+                  errorMessage: redactProxyDetails(attempt.result.errorMessage),
                   screenshotPath: attempt.result.screenshotPath,
                   liveSubmit
                 }
@@ -240,7 +246,11 @@ const worker = new Worker(
           where: { id: resultId },
           data: {
             status: anySuccessful ? "Completed" : "Failed",
-            message: `${successfulAttempts.length}/${multiRun.attempts.length} targets completed successfully`,
+            message: redactProxyDetails(
+              multiRun.discoveryReason.includes("Proxy fallback")
+                ? multiRun.discoveryReason
+                : `${successfulAttempts.length}/${multiRun.attempts.length} targets completed successfully`
+            ),
             screenshotPath: latestScreenshot,
             submittedAt: new Date()
           }
@@ -249,7 +259,7 @@ const worker = new Worker(
           where: { id: website.id },
           data: {
             contactPageUrl: multiRun.targets[0]?.url ?? website.contactPageUrl,
-            notes: [website.notes, multiRun.discoveryReason].filter(Boolean).join("\n")
+            notes: [website.notes, redactProxyDetails(multiRun.discoveryReason)].filter(Boolean).join("\n")
           }
         });
         await logger.info(`Multi-target run finished: ${successfulAttempts.length}/${multiRun.attempts.length} successful`);
@@ -383,7 +393,7 @@ const worker = new Worker(
         where: { id: resultId },
         data: {
           status: isSuccess ? "Completed" : "Failed",
-          message: result.errorMessage || discoveryReason || result.status,
+          message: redactProxyDetails(result.errorMessage || discoveryReason || result.status),
           screenshotPath: screenshotUrl,
           submittedAt: new Date(result.submittedAt)
         }
@@ -397,7 +407,7 @@ const worker = new Worker(
           resolvedUrl: websiteUrl,
           targetType: targetType || automationType,
           status: result.status,
-          errorMessage: result.errorMessage,
+          errorMessage: redactProxyDetails(result.errorMessage),
           screenshotPath: screenshotUrl,
           liveSubmit
         }
@@ -406,7 +416,8 @@ const worker = new Worker(
       await logger.info(`Job completed with status: ${result.status}`);
 
     } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : "Unknown execution error";
+      const rawErrMsg = error instanceof Error ? error.message : "Unknown execution error";
+      const errMsg = redactProxyDetails(rawErrMsg);
       const maxAttempts = job.opts.attempts ?? 1;
       const willRetry = job.attemptsMade + 1 < maxAttempts;
       await logger.error(willRetry ? `Attempt failed; retrying: ${errMsg}` : `Job failed: ${errMsg}`);

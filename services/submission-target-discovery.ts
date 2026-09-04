@@ -10,6 +10,13 @@ import {
   SubmissionTargetType
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import {
+  isProxyAuthenticationFailure,
+  ProxyAuthenticationError,
+  PROXY_407_MESSAGE,
+  redactProxyDetails
+} from "@/services/proxy-helper";
+import { detectUnsupportedVerification } from "@/services/verification-detector";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEFAULT_MAX_NAVIGATION_LINKS = 10;
@@ -64,6 +71,9 @@ const NAVIGATION_LINK_SELECTOR = [
   ,'[role="main"] a[href]'
 ].join(", ");
 
+const INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR = "button, [role='button'], summary";
+const MAX_INTERACTIVE_DISCOVERY_CLICKS = 3;
+
 const SKIPPED_PATH_PATTERN =
   /\/(privacy|terms|cookies?|blog|news|articles?|category|tags?|login|sign-?in|sign-?up|cart|checkout)(\/|$)/i;
 const SKIPPED_EXTENSION_PATTERN =
@@ -103,9 +113,25 @@ function isCalendlyEventUrl(url: URL) {
   return url.pathname.split("/").filter(Boolean).length >= 2;
 }
 
+function isPipedriveSchedulerUrl(url: URL) {
+  const hostname = url.hostname.toLowerCase();
+  return (
+    (hostname === "pipedrive.com" || hostname.endsWith(".pipedrive.com")) &&
+    /^\/scheduler\/[^/]+\/[^/]+/i.test(url.pathname)
+  );
+}
+
+function isPrivatePipedriveContactUrl(url: URL) {
+  const hostname = url.hostname.toLowerCase();
+  return (
+    (hostname === "pipedrive.com" || hostname.endsWith(".pipedrive.com")) &&
+    /^(?:\/contact\/?|\/auth\/login\b)/i.test(url.pathname)
+  );
+}
+
 function isSupportedExternalTarget(url: URL) {
   const hostname = url.hostname.toLowerCase();
-  return isCalendlyEventUrl(url) || hostname === "meetings.hubspot.com";
+  return isCalendlyEventUrl(url) || isPipedriveSchedulerUrl(url) || hostname === "meetings.hubspot.com";
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
@@ -530,6 +556,8 @@ function resultFromSupportedExternalCandidate(
     ? "hubspot_booking"
     : isCalendlyEventUrl(resolved)
       ? "calendly"
+      : isPipedriveSchedulerUrl(resolved)
+        ? "booking_widget"
       : null;
 
   if (!targetType) return null;
@@ -583,7 +611,19 @@ async function detectTargetOnPage(
     };
   }
 
-  if (/\/(discovery-call|book-call|booking|book-now|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(new URL(currentUrl).pathname)) {
+  if (isPipedriveSchedulerUrl(new URL(currentUrl))) {
+    return {
+      websiteUrl: url,
+      discoveredUrl: currentUrl,
+      targetType: "booking_widget",
+      confidence: 98,
+      reason: `Public Pipedrive scheduler found; ${candidateReason}`,
+      checkedUrls: [],
+      screenshotPath: await takeScreenshot(page, url, "pipedrive-scheduler-discovered").catch(() => null)
+    };
+  }
+
+  if (/\/(discovery-call|book-call|booking|book-now|scheduler|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(new URL(currentUrl).pathname)) {
     return {
       websiteUrl: url,
       discoveredUrl: currentUrl,
@@ -605,10 +645,10 @@ async function detectTargetOnPage(
     .evaluateAll((iframes) => {
       for (const iframe of iframes) {
         const src = iframe.getAttribute("src") ?? "";
-        if (/dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com/i.test(src)) {
+        if (/dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed/i.test(src)) {
           return { url: src, type: "contact_form" as const };
         }
-        if (/leadconnectorhq\.com\/widget\/booking|calendly\.com/i.test(src)) {
+        if (/leadconnectorhq\.com\/widget\/booking|calendly\.com|calendar\.google\.com\/calendar\/appointments|tidycal\.com|acuityscheduling\.com/i.test(src)) {
           return { url: src, type: "booking_widget" as const };
         }
         if (/leadconnectorhq\.com\/widget\/form/i.test(src)) {
@@ -634,7 +674,10 @@ async function detectTargetOnPage(
   const html = await page.content().catch(() => "");
   const hasEmbeddedBookingCalendar =
     html.includes('"type":"BookingCalendar"') ||
-    html.includes("bookingcalendar-");
+    html.includes("bookingcalendar-") ||
+    html.includes("leadconnectorhq") ||
+    html.includes("appointment_widgets") ||
+    html.includes("c-calendar");
 
   if (hasEmbeddedBookingCalendar) {
     return {
@@ -686,7 +729,14 @@ async function detectTargetOnPage(
     "your info",
     "what time works best",
     "meeting duration",
-    "date/time"
+    "date/time",
+    "discovery call",
+    "active calendars",
+    "choose a date",
+    "select date",
+    "select a date",
+    "select time",
+    "book an appointment"
   ].find((phrase) => normalizedBodyText.includes(phrase));
 
   if (bookingText) {
@@ -709,6 +759,54 @@ async function detectTargetOnPage(
   return null;
 }
 
+/**
+ * Some sites keep their navigation or contact form behind a collapsed menu or
+ * a contact modal. Reveal only a small, explicit set of those controls before
+ * giving up. This never presses submit controls or attempts form submission.
+ */
+async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
+  const triggers = await page
+    .locator(INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR)
+    .evaluateAll((elements) => elements
+      .map((element, index) => {
+        const control = element as HTMLElement;
+        const text = [
+          control.textContent,
+          control.getAttribute("aria-label"),
+          control.getAttribute("title")
+        ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        const style = window.getComputedStyle(control);
+        const rect = control.getBoundingClientRect();
+        return {
+          index,
+          text,
+          isVisible: style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0,
+          isSubmit: control.matches("button[type='submit'], input[type='submit']"),
+          expanded: control.getAttribute("aria-expanded")
+        };
+      })
+      .filter((trigger) =>
+        trigger.isVisible &&
+        !trigger.isSubmit &&
+        trigger.expanded !== "true" &&
+        /\b(menu|navigation|contact|contact us|get in touch|let'?s talk|start a project)\b|☰/i.test(trigger.text)
+      )
+      .slice(0, MAX_INTERACTIVE_DISCOVERY_CLICKS)
+    )
+    .catch(() => []);
+
+  let clicked = 0;
+  for (const trigger of triggers) {
+    await page.locator(INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR)
+      .nth(trigger.index)
+      .click({ timeout: 1_500 })
+      .then(() => { clicked += 1; })
+      .catch(() => undefined);
+  }
+  if (clicked > 0) await page.waitForTimeout(250);
+  return clicked;
+}
+
 async function detectTargetWithLazyScroll(
   page: Page,
   url: string,
@@ -717,11 +815,26 @@ async function detectTargetWithLazyScroll(
   const initialResult = await detectTargetOnPage(page, url, candidateReason);
   if (initialResult) return initialResult;
 
-  // Some builders do not mount or reveal the form until it approaches the
-  // viewport. Scroll once only after the fast, above-the-fold scan fails.
-  await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" }));
-  await page.waitForTimeout(400);
-  return detectTargetOnPage(page, url, `${candidateReason}; detected after scrolling`);
+  const revealedControls = await revealInteractiveDiscoveryTargets(page);
+  if (revealedControls > 0) {
+    const revealedResult = await detectTargetOnPage(
+      page,
+      page.url(),
+      `${candidateReason}; checked ${revealedControls} navigation/contact control${revealedControls === 1 ? "" : "s"}`
+    );
+    if (revealedResult) return revealedResult;
+  }
+
+  // Some builders mount forms only when their section enters the viewport.
+  // Scan progressively from body to footer rather than jumping straight to
+  // the end, so both in-content and footer-adjacent contact forms can hydrate.
+  for (let pass = 1; pass <= 8; pass++) {
+    await page.mouse.wheel(0, 900).catch(() => undefined);
+    await page.waitForTimeout(550);
+    const scrolledResult = await detectTargetOnPage(page, url, `${candidateReason}; detected during lazy-page scan ${pass}/8`);
+    if (scrolledResult) return scrolledResult;
+  }
+  return null;
 }
 
 export async function discoverSubmissionTarget({
@@ -764,6 +877,30 @@ export async function discoverSubmissionTarget({
     };
   }
 
+  if (isPipedriveSchedulerUrl(normalizedUrl)) {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      discoveredUrl: normalizedWebsiteUrl,
+      targetType: "booking_widget",
+      confidence: 100,
+      reason: "Direct public Pipedrive scheduler URL provided.",
+      checkedUrls: [normalizedWebsiteUrl],
+      screenshotPath: null
+    };
+  }
+
+  if (isPrivatePipedriveContactUrl(normalizedUrl)) {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      discoveredUrl: null,
+      targetType: "not_found",
+      confidence: 100,
+      reason: "This Pipedrive contact URL requires account login. Use that company's public /scheduler/... booking URL instead.",
+      checkedUrls: [normalizedWebsiteUrl],
+      screenshotPath: null
+    };
+  }
+
   if (/\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?(contact(-us)?|get-in-touch|reach-us)(\.php|\.html)?\/?$/i.test(normalizedUrl.pathname)) {
     return {
       websiteUrl: normalizedWebsiteUrl,
@@ -776,7 +913,7 @@ export async function discoverSubmissionTarget({
     };
   }
 
-  if (/\/(discovery-call|book-call|booking|book-now|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(normalizedUrl.pathname)) {
+  if (/\/(discovery-call|book-call|booking|book-now|scheduler|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(normalizedUrl.pathname)) {
     return {
       websiteUrl: normalizedWebsiteUrl,
       discoveredUrl: normalizedWebsiteUrl,
@@ -813,16 +950,68 @@ export async function discoverSubmissionTarget({
     page.setDefaultTimeout(timeoutMs);
     await blockHeavyAssets(page);
 
-    const homepageLoaded = await page
-      .goto(normalizedWebsiteUrl, {
+    let proxy407Hit = false;
+    const responseHandler = (res: any) => {
+      if (res.status() === 407) proxy407Hit = true;
+    };
+    page.on("response", responseHandler);
+
+    let navResponse: any = null;
+    let navError: any = null;
+    try {
+      navResponse = await page.goto(normalizedWebsiteUrl, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs
-      })
-      .then(() => true)
-      .catch(() => false);
+      });
+    } catch (err: any) {
+      navError = err;
+    } finally {
+      page.off("response", responseHandler);
+    }
+
+    if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
+      await takeScreenshot(page, normalizedWebsiteUrl, "proxy-407-failure").catch(() => null);
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const initialBodyText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+    if (isProxyAuthenticationFailure(null, navResponse?.status(), initialBodyText)) {
+      await takeScreenshot(page, normalizedWebsiteUrl, "proxy-407-failure").catch(() => null);
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const statusCode = navResponse?.status();
+    const pageTitle = await page.title().catch(() => "");
+    if (statusCode === 403 || /403 forbidden/i.test(pageTitle) || /^403 forbidden/i.test(initialBodyText.trim())) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        discoveredUrl: null,
+        targetType: "not_found",
+        confidence: 0,
+        reason: "Website blocked access (HTTP 403 Forbidden).",
+        checkedUrls: [normalizedWebsiteUrl],
+        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "http-403-forbidden").catch(() => null)
+      };
+    }
+
+    const homepageLoaded = Boolean(navResponse && !navError);
     if (homepageLoaded) {
       await dismissCookieBanners(page).catch(() => undefined);
-      await page.waitForTimeout(700);
+      await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 8000) }).catch(() => undefined);
+      await page.waitForTimeout(1200);
+    }
+
+    const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
+    if (verification) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        discoveredUrl: null,
+        targetType: "not_found",
+        confidence: 0,
+        reason: verification.reason,
+        checkedUrls: [normalizedWebsiteUrl],
+        screenshotPath: verification.screenshotPath
+      };
     }
 
     const directResult = homepageLoaded
@@ -850,7 +1039,7 @@ export async function discoverSubmissionTarget({
       const candidateLoaded = await page
         .goto(candidate.url, {
           waitUntil: "domcontentloaded",
-          timeout: Math.min(timeoutMs, 5000)
+          timeout: Math.min(timeoutMs, 12000)
         })
         .then(() => true)
         .catch(() => false);
@@ -860,7 +1049,8 @@ export async function discoverSubmissionTarget({
       }
 
       await dismissCookieBanners(page).catch(() => undefined);
-      await page.waitForTimeout(500);
+      await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 5000) }).catch(() => undefined);
+      await page.waitForTimeout(900);
 
       const result = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
 
@@ -894,12 +1084,15 @@ export async function discoverSubmissionTarget({
       )
     };
   } catch (error) {
+    if (isProxyAuthenticationFailure(error)) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
     return {
       websiteUrl: normalizedWebsiteUrl,
       discoveredUrl: null,
       targetType: "not_found",
       confidence: 0,
-      reason: error instanceof Error ? error.message : "Target discovery failed.",
+      reason: redactProxyDetails(error instanceof Error ? error.message : "Target discovery failed."),
       checkedUrls,
       screenshotPath: null
     };
@@ -984,18 +1177,55 @@ export async function discoverSubmissionTargets({
     page.setDefaultTimeout(timeoutMs);
     await blockHeavyAssets(page);
 
-    const homepageLoaded = await page.goto(normalizedWebsiteUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: timeoutMs
-    }).then(() => true).catch(() => false);
+    let proxy407Hit = false;
+    const responseHandler = (res: any) => {
+      if (res.status() === 407) proxy407Hit = true;
+    };
+    page.on("response", responseHandler);
 
-    if (!homepageLoaded) {
+    let navResponse: any = null;
+    let navError: any = null;
+    try {
+      navResponse = await page.goto(normalizedWebsiteUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs
+      });
+    } catch (err: any) {
+      navError = err;
+    } finally {
+      page.off("response", responseHandler);
+    }
+
+    if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
+      await takeScreenshot(page, normalizedWebsiteUrl, "proxy-407-failure").catch(() => null);
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    const pageBodyText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
+    if (isProxyAuthenticationFailure(null, navResponse?.status(), pageBodyText)) {
+      await takeScreenshot(page, normalizedWebsiteUrl, "proxy-407-failure").catch(() => null);
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    if (navError && !navResponse) {
       return {
         websiteUrl: normalizedWebsiteUrl,
         targets: [],
         checkedUrls: [normalizedWebsiteUrl],
-        reason: "The website could not be loaded for multi-target discovery.",
+        reason: redactProxyDetails(navError.message || "The website could not be loaded for multi-target discovery."),
         screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
+      };
+    }
+
+    // Check for CAPTCHA, Cloudflare managed challenge, or bot-detection screens
+    const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
+    if (verification) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets: [],
+        checkedUrls: [normalizedWebsiteUrl],
+        reason: verification.reason,
+        screenshotPath: verification.screenshotPath
       };
     }
 
@@ -1064,11 +1294,14 @@ export async function discoverSubmissionTargets({
       screenshotPath: targets[0]?.screenshotPath ?? await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
     };
   } catch (error) {
+    if (isProxyAuthenticationFailure(error)) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
     return {
       websiteUrl: normalizedWebsiteUrl,
       targets: Array.from(discovered.values()).sort((a, b) => a.executionOrder - b.executionOrder),
       checkedUrls,
-      reason: error instanceof Error ? error.message : "Unknown multi-target discovery error.",
+      reason: redactProxyDetails(error instanceof Error ? error.message : "Unknown multi-target discovery error."),
       screenshotPath: null
     };
   } finally {

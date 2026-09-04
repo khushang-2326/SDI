@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState, useTransition, useMemo } from "react";
+import { useActionState, useEffect, useState, useTransition, useMemo } from "react";
 import {
   updateCaptchaSettingsAction,
   validateCaptchaKeyAction,
@@ -71,6 +71,19 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
 
   const [isProxyPending, startProxyTransition] = useTransition();
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
+
+  // Server Actions reset native form controls after a save. Reapply the
+  // values confirmed by the database so the visible switches cannot drift
+  // from the saved proxy configuration.
+  useEffect(() => {
+    if (!proxyFormState.success) return;
+    if (typeof proxyFormState.proxyEnabled === "boolean") {
+      setProxyEnabled(proxyFormState.proxyEnabled);
+    }
+    if (typeof proxyFormState.proxyBandwidthSaver === "boolean") {
+      setProxyBandwidthSaver(proxyFormState.proxyBandwidthSaver);
+    }
+  }, [proxyFormState]);
 
   // Filter CAPTCHA providers
   const filteredProviders = useMemo(() => {

@@ -19,6 +19,35 @@ const browserPools: Record<BrowserMode, PooledBrowser> = {
   headed: { browser: null, launchPromise: null, activeContexts: 0, contextsCreated: 0 }
 };
 const contextModes = new WeakMap<BrowserContext, BrowserMode>();
+const DEFAULT_CONTEXT_STARTUP_TIMEOUT_MS = 20_000;
+
+async function withStartupTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  description: string,
+  disposeLateResult?: (value: T) => Promise<void> | void
+): Promise<T> {
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guardedOperation = operation.then(async (value) => {
+    if (timedOut) await disposeLateResult?.(value);
+    return value;
+  });
+
+  try {
+    return await Promise.race([
+      guardedOperation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`${description} exceeded ${Math.round(timeoutMs / 1000)} seconds.`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 async function launchBrowser(headless: boolean): Promise<Browser> {
   const executablePath = await getChromiumExecutablePath();
@@ -38,7 +67,12 @@ async function launchBrowser(headless: boolean): Promise<Browser> {
     launchOptions.executablePath = executablePath;
   }
 
-  const browser = await chromium.launch(launchOptions);
+  const browser = await withStartupTimeout(
+    chromium.launch(launchOptions),
+    DEFAULT_CONTEXT_STARTUP_TIMEOUT_MS,
+    "Chromium startup",
+    (lateBrowser) => lateBrowser.close().catch(() => undefined)
+  );
   return browser;
 }
 
@@ -76,7 +110,11 @@ export type AcquireContextOptions = {
   headless?: boolean;
   userId?: string;
   proxy?: Partial<ProxyConfig>;
+  // Use for a bounded retry when a website returns different content to the
+  // configured proxy (for example, a scheduler with no visible slots).
+  disableProxy?: boolean;
   bandwidthSaver?: boolean;
+  startupTimeoutMs?: number;
 };
 
 /**
@@ -88,6 +126,8 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
   password?: string;
   bandwidthSaver: boolean;
 } | null> {
+  if (options.disableProxy) return null;
+
   // 1. Explicit proxy passed in options
   if (options.proxy?.enabled && options.proxy.host && options.proxy.port) {
     const protocol = options.proxy.protocol || "http";
@@ -150,6 +190,7 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
  */
 export async function acquireContext(options: AcquireContextOptions = {}): Promise<BrowserContext> {
   const headless = options.headless ?? true;
+  const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_CONTEXT_STARTUP_TIMEOUT_MS;
   const browser = await getBrowser(headless);
 
   const proxySettings = await resolveProxyConfig(options);
@@ -167,7 +208,12 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     };
   }
 
-  const context = await browser.newContext(contextOptions);
+  const context = await withStartupTimeout(
+    browser.newContext(contextOptions),
+    startupTimeoutMs,
+    "Browser context startup",
+    (lateContext) => lateContext.close().catch(() => undefined)
+  );
 
   // Bandwidth optimization: block heavy images/media/fonts if enabled
   const shouldSaveBandwidth = proxySettings?.bandwidthSaver ?? options.bandwidthSaver ?? false;

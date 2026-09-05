@@ -196,8 +196,22 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
   const proxySettings = await resolveProxyConfig(options);
   const contextOptions: Parameters<typeof browser.newContext>[0] = {
     viewport: { width: 1280, height: 720 },
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    ignoreHTTPSErrors: true
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    locale: "en-US",
+    timezoneId: "America/New_York",
+    ignoreHTTPSErrors: true,
+    extraHTTPHeaders: {
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+      "Sec-Ch-Ua-Mobile": "?0",
+      "Sec-Ch-Ua-Platform": '"Windows"',
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1"
+    }
   };
 
   if (proxySettings?.server) {
@@ -215,17 +229,47 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     (lateContext) => lateContext.close().catch(() => undefined)
   );
 
-  // Bandwidth optimization: block heavy images/media/fonts if enabled
+  // Anti-bot detection script injection
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    // @ts-ignore
+    window.chrome = { runtime: {}, app: {}, cs: {} };
+    // @ts-ignore
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    }
+  }).catch(() => undefined);
+
+  // Bandwidth & latency optimization: block heavy video/media and hanging analytics beacons
   const shouldSaveBandwidth = proxySettings?.bandwidthSaver ?? options.bandwidthSaver ?? false;
-  if (shouldSaveBandwidth) {
-    await context.route("**/*", (route) => {
-      const resourceType = route.request().resourceType();
-      if (["image", "media", "font"].includes(resourceType)) {
-        return route.abort();
-      }
-      return route.continue();
-    }).catch(() => undefined);
-  }
+  await context.route("**/*", (route) => {
+    const req = route.request();
+    const resourceType = req.resourceType();
+    const url = req.url().toLowerCase();
+
+    // Always block tracking analytics that hang navigation
+    if (
+      url.includes("google-analytics.com") ||
+      url.includes("googletagmanager.com/gtag") ||
+      url.includes("connect.facebook.net") ||
+      url.includes("hotjar.com") ||
+      url.includes("doubleclick.net")
+    ) {
+      return route.abort();
+    }
+
+    // Always block heavy video/audio streams
+    if (resourceType === "media") {
+      return route.abort();
+    }
+
+    // Strict bandwidth saver: block images and fonts when requested
+    if (shouldSaveBandwidth && ["image", "font"].includes(resourceType)) {
+      return route.abort();
+    }
+
+    return route.continue();
+  }).catch(() => undefined);
 
   const mode: BrowserMode = headless ? "headless" : "headed";
   browserPools[mode].activeContexts++;

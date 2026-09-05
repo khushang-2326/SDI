@@ -49,13 +49,50 @@ type AnalysisItem = {
   attempts?: AutomationResult["attempts"];
 };
 
+function copyToClipboard(text: string): boolean {
+  if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopyText(text));
+    return true;
+  }
+  return fallbackCopyText(text);
+}
+
+function fallbackCopyText(text: string): boolean {
+  try {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.position = "fixed";
+    textArea.style.top = "0";
+    textArea.style.left = "0";
+    textArea.style.width = "2em";
+    textArea.style.height = "2em";
+    textArea.style.padding = "0";
+    textArea.style.border = "none";
+    textArea.style.outline = "none";
+    textArea.style.boxShadow = "none";
+    textArea.style.background = "transparent";
+    textArea.style.opacity = "0";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    const successful = document.execCommand("copy");
+    document.body.removeChild(textArea);
+    return successful;
+  } catch (err) {
+    console.error("Fallback copy failed:", err);
+    return false;
+  }
+}
+
 function AutomationAnalysisModal({
   isOpen,
   onClose,
   items,
   totalTrialsExecuted,
   totalTrialsSuccessful,
-  batchStatus
+  batchStatus,
+  runtime,
+  jobId
 }: {
   isOpen: boolean;
   onClose: () => void;
@@ -63,6 +100,8 @@ function AutomationAnalysisModal({
   totalTrialsExecuted: number;
   totalTrialsSuccessful: number;
   batchStatus: string;
+  runtime?: string;
+  jobId?: string | null;
 }) {
   const [mounted, setMounted] = useState(false);
   const [filter, setFilter] = useState<"all" | "success" | "failed" | "pending">("all");
@@ -89,8 +128,41 @@ function AutomationAnalysisModal({
   const failedWebsites = items.filter((i) => i.status === "failed" && !i.isSuccess);
   const pendingWebsites = items.filter((i) => i.status === "waiting" || i.status === "discovering" || i.status === "cancelled");
 
-  const successRate = totalWebsites > 0 ? Math.round((successWebsites.length / totalWebsites) * 100) : 0;
-  const failureRate = totalWebsites > 0 ? Math.round((failedWebsites.length / totalWebsites) * 100) : 0;
+  const successRate = totalWebsites > 0 ? ((successWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
+  const failureRate = totalWebsites > 0 ? ((failedWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
+
+  // Category breakdown for failures
+  const categoryCounts: Record<string, number> = {
+    NAVIGATION_TIMEOUT: 0,
+    FORM_NOT_FOUND: 0,
+    NETWORK_ERROR: 0,
+    HUMAN_VERIFICATION: 0,
+    CAPTCHA: 0,
+    HTTP_403: 0,
+    SUBMISSION_FAILED: 0,
+    OTHER: 0
+  };
+
+  failedWebsites.forEach((item) => {
+    const d = (item.detail || "").toLowerCase();
+    if (d.includes("timeout") || d.includes("timed out") || d.includes("exceeded")) {
+      categoryCounts.NAVIGATION_TIMEOUT++;
+    } else if (d.includes("captcha") || d.includes("turnstile") || d.includes("hcaptcha") || d.includes("recaptcha")) {
+      categoryCounts.CAPTCHA++;
+    } else if (d.includes("cloudflare") || d.includes("challenge") || d.includes("human verification") || d.includes("bot detection")) {
+      categoryCounts.HUMAN_VERIFICATION++;
+    } else if (d.includes("403") || d.includes("forbidden")) {
+      categoryCounts.HTTP_403++;
+    } else if (d.includes("net::") || d.includes("econnrefused") || d.includes("could not be loaded")) {
+      categoryCounts.NETWORK_ERROR++;
+    } else if (d.includes("submit clicked, but") || d.includes("no success message")) {
+      categoryCounts.SUBMISSION_FAILED++;
+    } else if (d.includes("not found") || d.includes("no supported") || d.includes("no visible submit")) {
+      categoryCounts.FORM_NOT_FOUND++;
+    } else {
+      categoryCounts.OTHER++;
+    }
+  });
 
   const filteredItems = items.filter((item) => {
     if (filter === "success" && !item.isSuccess) return false;
@@ -109,14 +181,23 @@ function AutomationAnalysisModal({
 
   const copySummary = () => {
     const text = `AUTOMATION RUN ANALYSIS REPORT
+==================================================
+Job ID: ${jobId || "N/A"}
 Status: ${batchStatus.toUpperCase()}
-Total Websites Analyzed: ${totalWebsites}
-✓ Succeeded Automations: ${successWebsites.length} (${successRate}%)
-✕ Failed Automations (0 tests succeeded): ${failedWebsites.length} (${failureRate}%)
-⏳ Pending / Cancelled: ${pendingWebsites.length}
+Total Targets: ${totalWebsites}
+Succeeded: ${successWebsites.length} (${successRate}%)
+Failed (0 Success): ${failedWebsites.length} (${failureRate}%)
+Pending / Cancelled: ${pendingWebsites.length}
 Total Target Trials: ${totalTrialsExecuted} (${totalTrialsSuccessful} successful)
+Runtime: ${runtime || "N/A"}
 
-WEBSITE BREAKDOWN:
+FAILURE REASON BREAKDOWN:
+${Object.entries(categoryCounts)
+  .filter(([_, count]) => count > 0)
+  .map(([cat, count]) => `- ${cat}: ${count}`)
+  .join("\n") || "- None"}
+
+TARGET DETAILS:
 ${items
   .map(
     (i, idx) =>
@@ -126,10 +207,14 @@ ${items
   )
   .join("\n")}`;
 
-    navigator.clipboard.writeText(text).then(() => {
+    const ok = copyToClipboard(text);
+    if (ok) {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+      setTimeout(() => setCopied(false), 2500);
+    } else {
+      alert("Could not copy automatically. The report has been logged to the console.");
+      console.log(text);
+    }
   };
 
   const modalContent = (
@@ -138,7 +223,7 @@ ${items
       onClick={onClose}
     >
       <div
-        className="relative flex max-h-[90vh] w-full max-w-4xl flex-col rounded-3xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden text-slate-100"
+        className="relative flex max-h-[90vh] w-full max-w-5xl flex-col rounded-3xl border border-slate-700 bg-slate-900 shadow-2xl overflow-hidden text-slate-100"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
@@ -163,7 +248,7 @@ ${items
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Detailed success vs failure metrics across all website trials
+                Detailed success vs failure metrics across all website targets
               </p>
             </div>
           </div>
@@ -172,10 +257,14 @@ ${items
             <button
               type="button"
               onClick={copySummary}
-              className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-700 hover:text-white"
+              className={`flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-bold transition active:scale-95 ${
+                copied
+                  ? "border-emerald-500 bg-emerald-600 text-white ring-2 ring-emerald-400/50"
+                  : "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white"
+              }`}
               title="Copy analysis summary report"
             >
-              <span>{copied ? "✓ Copied" : "📋 Copy Report"}</span>
+              <span>{copied ? "✓ Copied!" : "📋 Copy Report"}</span>
             </button>
             <button
               type="button"
@@ -190,51 +279,58 @@ ${items
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6 [scrollbar-width:thin]">
-          {/* Top 4 KPI Cards */}
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {/* Total Websites */}
+          {/* Top 5 KPI Cards */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            {/* Total Targets */}
             <div className="rounded-2xl border border-slate-800 bg-slate-800/50 p-4 shadow-inner">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Targets</p>
-              <p className="mt-2 text-2xl font-black text-white">{totalWebsites}</p>
-              <p className="mt-1 text-xs text-slate-400">Websites in workflow</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Total Targets</p>
+              <p className="mt-1.5 text-2xl font-black text-white">{totalWebsites}</p>
+              <p className="mt-1 text-[11px] text-slate-400">Websites in workflow</p>
             </div>
 
-            {/* Succeeded Websites (GREEN) */}
+            {/* Succeeded (GREEN) */}
             <div className="rounded-2xl border border-emerald-800/50 bg-emerald-950/40 p-4 shadow-inner ring-1 ring-emerald-500/20">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wider text-emerald-400">Succeeded</p>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-emerald-400">Succeeded</p>
                 <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
                   {successRate}%
                 </span>
               </div>
-              <p className="mt-2 text-2xl font-black text-emerald-400">{successWebsites.length}</p>
-              <p className="mt-1 text-xs text-emerald-300/80">≥ 1 trial successful</p>
+              <p className="mt-1.5 text-2xl font-black text-emerald-400">{successWebsites.length}</p>
+              <p className="mt-1 text-[11px] text-emerald-300/80">≥ 1 trial successful</p>
             </div>
 
-            {/* Failed Websites (0 tests succeeded - RED) */}
+            {/* Failed (0 Success - RED) */}
             <div className="rounded-2xl border border-red-800/50 bg-red-950/40 p-4 shadow-inner ring-1 ring-red-500/20">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wider text-red-400">Failed (0 Success)</p>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-red-400">Failed (0 Success)</p>
                 <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] font-bold text-red-300">
                   {failureRate}%
                 </span>
               </div>
-              <p className="mt-2 text-2xl font-black text-red-400">{failedWebsites.length}</p>
-              <p className="mt-1 text-xs text-red-300/80">0 successful trials</p>
+              <p className="mt-1.5 text-2xl font-black text-red-400">{failedWebsites.length}</p>
+              <p className="mt-1 text-[11px] text-red-300/80">0 successful trials</p>
             </div>
 
             {/* Total Trials Executed */}
             <div className="rounded-2xl border border-indigo-800/50 bg-indigo-950/40 p-4 shadow-inner ring-1 ring-indigo-500/20">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wider text-indigo-300">Trials Executed</p>
-                <span className="text-[11px] font-bold text-indigo-400">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-indigo-300">Trials Executed</p>
+                <span className="text-[10px] font-bold text-indigo-400">
                   {totalTrialsSuccessful}/{totalTrialsExecuted}
                 </span>
               </div>
-              <p className="mt-2 text-2xl font-black text-indigo-300">{totalTrialsExecuted}</p>
-              <p className="mt-1 text-xs text-indigo-300/80">
-                {totalWebsites > 0 ? (totalTrialsExecuted / totalWebsites).toFixed(1) : 0} avg trials / website
+              <p className="mt-1.5 text-2xl font-black text-indigo-300">{totalTrialsExecuted}</p>
+              <p className="mt-1 text-[11px] text-indigo-300/80">
+                {totalWebsites > 0 ? (totalTrialsExecuted / totalWebsites).toFixed(1) : 0} avg / target
               </p>
+            </div>
+
+            {/* Runtime Duration */}
+            <div className="rounded-2xl border border-cyan-800/50 bg-cyan-950/40 p-4 shadow-inner ring-1 ring-cyan-500/20">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-cyan-300">Total Runtime</p>
+              <p className="mt-1.5 text-2xl font-black text-cyan-300">{runtime || "—"}</p>
+              <p className="mt-1 text-[11px] text-cyan-300/80">Elapsed workflow time</p>
             </div>
           </div>
 
@@ -243,7 +339,7 @@ ${items
             <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
               <span>Outcome Distribution</span>
               <span>
-                {successWebsites.length} Succeeded • {failedWebsites.length} Failed • {pendingWebsites.length} Other
+                {successWebsites.length} Succeeded ({successRate}%) • {failedWebsites.length} Failed ({failureRate}%) {pendingWebsites.length > 0 ? `• ${pendingWebsites.length} In Progress` : ""}
               </span>
             </div>
             <div className="h-3.5 w-full overflow-hidden rounded-full bg-slate-800 flex">
@@ -541,7 +637,26 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const usingUploadedWebsite = sourceMode === "excel";
   const processingAllUploaded = selectedWebsiteId.startsWith("__file__:");
   const selectedFileGroup = fileGroups.find((group) => `__file__:${group.fileName}` === selectedWebsiteId);
-  const batchWebsites = selectedFileGroup ? websites.filter((website) => selectedFileGroup.websiteIds.includes(website.id)) : [];
+  const batchWebsites = useMemo(() => {
+    if (!selectedFileGroup) return [];
+    const matched = websites.filter((website) => selectedFileGroup.websiteIds.includes(website.id));
+    const seenDomains = new Set<string>();
+    const unique: typeof matched = [];
+    for (const w of matched) {
+      let domain = "";
+      try {
+        const u = new URL(/^https?:\/\//i.test(w.websiteUrl) ? w.websiteUrl : `https://${w.websiteUrl}`);
+        domain = u.hostname.replace(/^www\./i, "").toLowerCase();
+      } catch {
+        domain = w.websiteUrl.toLowerCase().trim();
+      }
+      if (!seenDomains.has(domain)) {
+        seenDomains.add(domain);
+        unique.push(w);
+      }
+    }
+    return unique;
+  }, [selectedFileGroup, websites]);
   const batchResults = state.results ?? [];
   const finishedCount = liveBatchItems.filter(
     (item) => item.status === "completed" || item.status === "failed" || item.status === "cancelled"
@@ -560,6 +675,16 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         const isSuccess = hasSuccessfulAttempt(item);
         const trialsCount = item.result?.attempts?.length ?? (item.status === "completed" || item.status === "failed" ? 1 : 0);
         const successfulTrialsCount = item.result?.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
+
+        let selectedScreenshot: string | null = null;
+        if (isSuccess) {
+          const successAttempt = item.result?.attempts?.find(isAttemptSuccessful);
+          selectedScreenshot = successAttempt?.screenshotPath || item.result?.screenshotPath || null;
+        } else {
+          const firstAttemptWithScreenshot = item.result?.attempts?.find((a) => a.screenshotPath);
+          selectedScreenshot = firstAttemptWithScreenshot?.screenshotPath || item.result?.screenshotPath || null;
+        }
+
         return {
           id: item.id,
           name: item.name,
@@ -569,7 +694,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
           trialsCount,
           successfulTrialsCount,
           detail: item.detail,
-          screenshotPath: item.result?.screenshotPath,
+          screenshotPath: selectedScreenshot,
           attempts: item.result?.attempts
         };
       });
@@ -580,6 +705,16 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         const isSuccess = isResultSuccessful(res);
         const trialsCount = res.attempts?.length ?? 1;
         const successfulTrialsCount = res.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
+
+        let selectedScreenshot: string | null = null;
+        if (isSuccess) {
+          const successAttempt = res.attempts?.find(isAttemptSuccessful);
+          selectedScreenshot = successAttempt?.screenshotPath || res.screenshotPath || null;
+        } else {
+          const firstAttemptWithScreenshot = res.attempts?.find((a) => a.screenshotPath);
+          selectedScreenshot = firstAttemptWithScreenshot?.screenshotPath || res.screenshotPath || null;
+        }
+
         return {
           id: `batch-${idx}`,
           name: res.websiteUrl,
@@ -589,7 +724,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
           trialsCount,
           successfulTrialsCount,
           detail: res.errorMessage || res.discoveryReason || (isSuccess ? "Automation completed" : "Failed"),
-          screenshotPath: res.screenshotPath,
+          screenshotPath: selectedScreenshot,
           attempts: res.attempts
         };
       });
@@ -599,6 +734,16 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
       const isSuccess = isResultSuccessful(state.result);
       const trialsCount = state.result.attempts?.length ?? 1;
       const successfulTrialsCount = state.result.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
+
+      let selectedScreenshot: string | null = null;
+      if (isSuccess) {
+        const successAttempt = state.result.attempts?.find(isAttemptSuccessful);
+        selectedScreenshot = successAttempt?.screenshotPath || state.result.screenshotPath || null;
+      } else {
+        const firstAttemptWithScreenshot = state.result.attempts?.find((a) => a.screenshotPath);
+        selectedScreenshot = firstAttemptWithScreenshot?.screenshotPath || state.result.screenshotPath || null;
+      }
+
       return [
         {
           id: "single-1",
@@ -609,7 +754,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
           trialsCount,
           successfulTrialsCount,
           detail: state.result.errorMessage || state.result.discoveryReason || (isSuccess ? "Automation completed" : "Failed"),
-          screenshotPath: state.result.screenshotPath,
+          screenshotPath: selectedScreenshot,
           attempts: state.result.attempts
         }
       ];
@@ -1205,9 +1350,20 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                     </span>
                     {item.detail}
                   </div>
-                  {item.result?.screenshotPath ? (
-                    <ScreenshotViewer src={item.result.screenshotPath} alt={item.name} />
-                  ) : null}
+                  {(() => {
+                    const singleScreenshot = isSuccess
+                      ? (item.result?.attempts?.find(isAttemptSuccessful)?.screenshotPath || item.result?.screenshotPath)
+                      : (item.result?.attempts?.find((a) => a.screenshotPath)?.screenshotPath || item.result?.screenshotPath);
+
+                    return singleScreenshot ? (
+                      <div className="mt-3">
+                        <ScreenshotViewer
+                          src={singleScreenshot}
+                          alt={isSuccess ? `Success Proof - ${item.name}` : `Failure Screenshot - ${item.name}`}
+                        />
+                      </div>
+                    ) : null;
+                  })()}
                   {item.result?.attempts?.length ? (
                     <div className="mt-3 space-y-2 border-t border-line/70 pt-3">
                       <p className="text-xs font-bold uppercase tracking-wide text-muted">
@@ -1230,9 +1386,6 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                             </div>
                             {attempt.errorMessage ? (
                               <p className="mt-2 rounded-lg border border-red-200 bg-red-100/80 px-2.5 py-1.5 text-xs text-red-800">{attempt.errorMessage}</p>
-                            ) : null}
-                            {attempt.screenshotPath ? (
-                              <ScreenshotViewer src={attempt.screenshotPath} alt={`Trial ${attempt.executionOrder}`} />
                             ) : null}
                           </div>
                         );
@@ -1354,6 +1507,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         totalTrialsExecuted={totalTrialsExecuted}
         totalTrialsSuccessful={totalTrialsSuccessful}
         batchStatus={isPaused ? "paused" : batchStatus}
+        runtime={formatDuration(elapsedMs)}
+        jobId={currentJobId}
       />
     </section>
   );

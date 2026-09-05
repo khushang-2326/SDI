@@ -26,22 +26,32 @@ const COMMON_TARGET_PATHS = [
   "/contact",
   "/contact-us",
   "/contactus",
+  "/contact-me",
+  "/contact-form",
+  "/get-in-touch",
+  "/reach-us",
+  "/reach-out",
   "/book",
   "/book-now",
   "/booknow",
+  "/book-a-demo",
+  "/request-demo",
   "/schedule",
   "/schedule-a-call",
+  "/strategy-call",
   "/appointment",
   "/consultation",
+  "/free-consultation",
   "/request-a-quote",
   "/quote",
-  "/get-started"
-  ,"/contact-1"
-  ,"/contact-me"
-  ,"/connect"
-  ,"/inquire"
-  ,"/lets-talk"
-  ,"/work-with-us"
+  "/get-started",
+  "/contact-1",
+  "/connect",
+  "/inquire",
+  "/lets-talk",
+  "/work-with-us",
+  "/start-a-project",
+  "/talk-to-us"
 ];
 
 type Candidate = {
@@ -1238,8 +1248,7 @@ export async function discoverSubmissionTargets({
     addResult(directResult);
 
     // A direct public scheduling URL is already the exact target. Continuing
-    // through Calendly's navigation discovers its corporate contact pages and
-    // wastes the remaining automation budget on unrelated forms.
+    // through navigation wastes the remaining automation budget on unrelated forms.
     if (directResult?.targetType === "calendly" || directResult?.targetType === "hubspot_booking") {
       const targets = Array.from(discovered.values()).sort(
         (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
@@ -1249,6 +1258,21 @@ export async function discoverSubmissionTargets({
         targets,
         checkedUrls,
         reason: "The entered URL is a direct booking page.",
+        screenshotPath: targets[0]?.screenshotPath
+      };
+    }
+
+    // Fast-path: if a contact form is already present on the page, use it immediately
+    // rather than spending seconds crawling secondary navigation links.
+    if (directResult?.targetType === "contact_form") {
+      const targets = Array.from(discovered.values()).sort(
+        (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
+      );
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets,
+        checkedUrls,
+        reason: "Contact form found directly on the entered page.",
         screenshotPath: targets[0]?.screenshotPath
       };
     }
@@ -1278,7 +1302,9 @@ export async function discoverSubmissionTargets({
       if (!loaded) continue;
       await dismissCookieBanners(page).catch(() => undefined);
       await page.waitForTimeout(500);
-      addResult(await detectTargetWithLazyScroll(page, page.url(), candidate.reason));
+      const candResult = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
+      addResult(candResult);
+      if (candResult?.targetType === "contact_form") break;
     }
 
     const targets = Array.from(discovered.values()).sort(

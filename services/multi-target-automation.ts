@@ -203,11 +203,19 @@ export async function runMultiTargetAutomation({
         consecutiveFailures >= MAX_CONSECUTIVE_FAILURES ||
         timedOut || (deadlineAt !== undefined && Date.now() >= deadlineAt)
       ) break;
-      const key = `${target.targetType}:${target.url}`;
-      if (attemptedKeys.has(key)) continue;
+      let normalizedKey = `${target.targetType}:${target.url}`;
+      try {
+        const u = new URL(target.url);
+        u.hash = "";
+        const cleanPath = u.pathname.replace(/\/+$/, "");
+        normalizedKey = `${target.targetType}:${u.origin}${cleanPath}`;
+      } catch {
+        // fallback to raw
+      }
+      if (attemptedKeys.has(normalizedKey)) continue;
       const remainingMs = deadlineAt === undefined ? timeoutMs : deadlineAt - Date.now();
       if (remainingMs <= 0) break;
-      attemptedKeys.add(key);
+      attemptedKeys.add(normalizedKey);
       const startedAt = new Date();
       await callbacks.onAttemptStarted?.(target);
       let result: SubmitContactFormResult;
@@ -229,6 +237,15 @@ export async function runMultiTargetAutomation({
       }
       if (isProxyAuthenticationFailure(result.errorMessage)) {
         encounteredProxyFailure = true;
+      }
+      if (result.websiteUrl) {
+        try {
+          const ru = new URL(result.websiteUrl);
+          ru.hash = "";
+          attemptedKeys.add(`${target.targetType}:${ru.origin}${ru.pathname.replace(/\/+$/, "")}`);
+        } catch {
+          // ignore
+        }
       }
       const attempt = { target, result, startedAt, completedAt: new Date() };
       attempts.push(attempt);

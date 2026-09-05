@@ -17,7 +17,7 @@ import {
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
 
-type FieldKey = "fullName" | "email" | "mobile" | "city" | "address" | "message" | "companyName";
+type FieldKey = "fullName" | "email" | "mobile" | "city" | "address" | "message" | "companyName" | "website" | "jobTitle";
 
 type FieldCandidate = {
   index: number;
@@ -57,7 +57,9 @@ const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
   city: ["city", "town", "municipality"],
   address: ["address", "street", "state", "zip", "postal"],
   message: ["message", "comment", "comments", "details", "description", "note", "enquiry"],
-  companyName: ["company", "business", "organization", "organisation", "brand"]
+  companyName: ["company", "business", "organization", "organisation", "brand"],
+  website: ["website", "web site", "url", "domain", "company website", "site url", "web page"],
+  jobTitle: ["job title", "title", "role", "position", "occupation"]
 };
 
 const FIELD_VALUES: Record<FieldKey, (leadData: LeadData) => string | undefined> = {
@@ -67,7 +69,12 @@ const FIELD_VALUES: Record<FieldKey, (leadData: LeadData) => string | undefined>
   city: () => "New York",
   address: (leadData) => leadData.address,
   message: (leadData) => leadData.message,
-  companyName: (leadData) => leadData.companyName
+  companyName: (leadData) => leadData.companyName,
+  website: (leadData) => {
+    const raw = leadData.companyName?.toLowerCase().replace(/[^a-z0-9]/g, "") || "example";
+    return `https://${raw}.com`;
+  },
+  jobTitle: () => "Business Owner"
 };
 
 function normalizeStatus(status: SubmitContactFormResult["status"]) {
@@ -97,6 +104,8 @@ function scoreCandidate(candidate: FieldCandidate, fieldKey: FieldKey) {
   }
 
   if (fieldKey === "email" && candidate.type === "email") score += 6;
+  if (fieldKey === "website" && candidate.type === "url") score += 6;
+  if (fieldKey === "jobTitle" && descriptor.includes("title")) score += 4;
   // Never allow name matching to claim a browser-typed email control simply
   // because nearby labels include the word "name".
   if (fieldKey === "fullName" && candidate.type === "email") score -= 100;
@@ -813,25 +822,89 @@ async function submitBookingWidget({
 }
 
 async function detectSuccess(page: Page) {
-  const successPatterns = [
-    "thank you",
-    "thanks",
-    "success",
-    "submitted",
-    "sent",
-    "message has been",
-    "we will be in touch"
-  ];
-
   await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => undefined);
   await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(2000);
 
-  const bodyText = (await page.locator("body").innerText({ timeout: 5000 }).catch(() => ""))
+  // 1. Check URL redirect or path
+  const currentUrl = page.url().toLowerCase();
+  if (/(thank[_-]?you|thanks|success|confirmed|submission-received|message-sent|inquiry-received)/i.test(currentUrl)) {
+    return true;
+  }
+
+  // 2. Check known successful form framework selectors
+  const successSelectors = [
+    ".wpcf7-mail-sent-ok:visible",
+    ".wpcf7-response-output:has-text('Thank')",
+    ".wpcf7-response-output:has-text('sent')",
+    ".elementor-message-success:visible",
+    ".w-form-done:visible",
+    ".form-submission-success:visible",
+    ".alert-success:visible",
+    ".success-message:visible",
+    "[role='alert']:has-text('thank')",
+    "[role='alert']:has-text('sent')",
+    ".submitted-message:visible",
+    ".form-success:visible",
+    ".gform_confirmation_message:visible",
+    ".nf-response-msg:visible",
+    ".fluentform-submission-success:visible",
+    ".wpforms-confirmation-container:visible"
+  ];
+
+  for (const selector of successSelectors) {
+    const isMatched = await page.locator(selector).first().isVisible().catch(() => false);
+    if (isMatched) return true;
+  }
+
+  // 3. Check page and child frames body text
+  const successPatterns = [
+    "thank you",
+    "thanks for reaching out",
+    "thanks for contacting",
+    "thanks for your inquiry",
+    "thank you for contacting",
+    "thank you for reaching out",
+    "message has been sent",
+    "successfully sent",
+    "message sent successfully",
+    "your message was sent",
+    "your message has been sent",
+    "your submission has been received",
+    "submission received",
+    "we will be in touch",
+    "we'll be in touch",
+    "we will get back to you",
+    "we'll get back to you",
+    "talk to you soon",
+    "inquiry has been sent",
+    "request submitted",
+    "form submitted successfully",
+    "as soon as possible"
+  ];
+
+  const bodyText = (await page.locator("body").innerText({ timeout: 4000 }).catch(() => ""))
     .toLowerCase()
     .replace(/\s+/g, " ");
 
-  return successPatterns.some((pattern) => bodyText.includes(pattern));
+  if (successPatterns.some((pattern) => bodyText.includes(pattern))) {
+    return true;
+  }
+
+  // Also check child frames (e.g. Dubsado, HubSpot, Typeform frames)
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const frameUrl = frame.url().toLowerCase();
+    if (/(thank[_-]?you|thanks|success|confirmed)/i.test(frameUrl)) return true;
+    const frameText = (await frame.locator("body").innerText({ timeout: 2000 }).catch(() => ""))
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+    if (successPatterns.some((pattern) => frameText.includes(pattern))) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {

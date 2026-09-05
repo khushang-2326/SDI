@@ -716,9 +716,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         if (job) applyBackgroundJob(job);
         if (!job || job.status !== "running") return;
 
-        // If the server watchdog recovered a timed-out website, restart local
-        // queue processing without asking the user to refresh the dashboard.
-        // The server-side lock keeps this harmless when another request owns it.
+        // If no workers are actively discovering/running, make sure the local worker pool is started
         if (!job.items.some((item) => item.status === "discovering")) {
           void processLocalBackgroundAutomationAction(jobId, workerCount)
             .then((resumedJob) => {
@@ -730,32 +728,6 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     }
 
     void refreshProgress();
-    return () => { stopped = true; };
-  }, [applyBackgroundJob, currentJobId, isBatchRunning, workerCount]);
-
-  useEffect(() => {
-    if (!currentJobId || !isBatchRunning) return;
-    const jobId = currentJobId;
-    let stopped = false;
-
-    async function processSequentially() {
-      while (!stopped) {
-        if (isPausedRef.current) {
-          await new Promise((resolve) => window.setTimeout(resolve, 500));
-          continue;
-        }
-
-        const job = await processLocalBackgroundAutomationAction(jobId, workerCount).catch(() => null);
-        if (stopped) return;
-        if (job) applyBackgroundJob(job);
-        if (!job || job.status !== "running") return;
-
-        // Avoid request contention if another open dashboard tab currently owns the job lock.
-        await new Promise((resolve) => window.setTimeout(resolve, 250));
-      }
-    }
-
-    void processSequentially();
     return () => { stopped = true; };
   }, [applyBackgroundJob, currentJobId, isBatchRunning, workerCount]);
 
@@ -784,6 +756,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     cancelledJobId.current = null;
 
     baseFormData.set("websiteIds", JSON.stringify(batchWebsites.map((website) => website.id)));
+    baseFormData.set("workerCount", String(workerCount));
     try { applyBackgroundJob(await startBackgroundAutomationAction(baseFormData)); }
     catch (error) { setIsBatchRunning(false); setBatchStatus("completed"); setLiveBatchItems((items) => items.map((item) => ({ ...item, status: "failed", detail: error instanceof Error ? error.message : "Unable to start background automation" }))); }
   }

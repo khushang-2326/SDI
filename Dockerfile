@@ -33,4 +33,4 @@ ENV QUEUE_PROVIDER=local
 ENV STORAGE_PROVIDER=local
 
 # Start Next.js server with auto-migrated database
-CMD ["sh", "-c", "npx prisma db push --accept-data-loss || true; cp -f /app/prisma/dev.db /app/dev.db 2>/dev/null || true; cp -f /app/dev.db /app/prisma/dev.db 2>/dev/null || true; npm start"]
+CMD ["sh", "-c", "npx prisma generate || true; npx prisma db push --accept-data-loss || true; cp -f /app/prisma/dev.db /app/dev.db 2>/dev/null || true; cp -f /app/dev.db /app/prisma/dev.db 2>/dev/null || true; npm start"]

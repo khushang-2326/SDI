@@ -273,6 +273,23 @@ export async function startBackgroundAutomationAction(formData: FormData) {
     );
   }
 
+  // If running in local queue mode, start the parallel worker pool in the background
+  if (!automationQueue) {
+    const workerCount = Number(fieldsMap.get("workerCount") || config.worker.maxWorkers);
+    const processing = runParallelWorkerPool({
+      jobId: job.id,
+      userId: user.id,
+      workerCount
+    }).catch((err) => {
+      console.error(`[WorkerPool Action] Error processing job ${job.id}:`, err);
+    });
+
+    localAutomationLocks.set(job.id, processing as Promise<any>);
+    void processing.finally(() => {
+      localAutomationLocks.delete(job.id);
+    });
+  }
+
   const mappedJob = await mapJobToBackgroundJob({
     ...job,
     results
@@ -728,26 +745,18 @@ export async function processLocalBackgroundAutomationAction(jobId: string, work
   const user = await requireUser();
   if (config.queueProvider === "local" && !localAutomationLocks.has(jobId)) {
     const workerCount = workerCountParam ?? config.worker.maxWorkers;
-    const processing = (async () => {
-      try {
-        await runParallelWorkerPool({
-          jobId,
-          userId: user.id,
-          workerCount
-        });
-      } catch (err) {
-        console.error(`[WorkerPool Action] Error processing job ${jobId}:`, err);
-      }
-    })();
+    const processing = runParallelWorkerPool({
+      jobId,
+      userId: user.id,
+      workerCount
+    }).catch((err) => {
+      console.error(`[WorkerPool Action] Error processing job ${jobId}:`, err);
+    });
 
-    localAutomationLocks.set(jobId, processing);
-    try {
-      await processing;
-    } finally {
-      if (localAutomationLocks.get(jobId) === processing) {
-        localAutomationLocks.delete(jobId);
-      }
-    }
+    localAutomationLocks.set(jobId, processing as Promise<any>);
+    void processing.finally(() => {
+      localAutomationLocks.delete(jobId);
+    });
   }
 
   const job = await prisma.submissionJob.findFirst({

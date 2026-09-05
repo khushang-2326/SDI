@@ -533,6 +533,8 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
+  const [workerCount, setWorkerCount] = useState<number>(4);
+  const [activeWorkers, setActiveWorkers] = useState<any[]>([]);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   const cancelledJobId = useRef<string | null>(null);
@@ -628,6 +630,9 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     if (!job) return;
     if (cancelledJobId.current === job.id && job.status !== "cancelled") return;
     setLiveBatchItems(job.items);
+    if ((job as any)?.workers) {
+      setActiveWorkers((job as any).workers);
+    }
     setCurrentJobId(job.id);
     setJobStartedAt(new Date(job.createdAt).getTime());
     setIsBatchRunning(job.status === "running");
@@ -682,6 +687,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
       if (await resetBackgroundAutomationAction(currentJobId)) {
         cancelledJobId.current = null;
         setLiveBatchItems([]);
+        setActiveWorkers([]);
         setCurrentJobId(null);
         setIsBatchRunning(false);
         setBatchStatus("idle");
@@ -714,7 +720,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         // queue processing without asking the user to refresh the dashboard.
         // The server-side lock keeps this harmless when another request owns it.
         if (!job.items.some((item) => item.status === "discovering")) {
-          void processLocalBackgroundAutomationAction(jobId)
+          void processLocalBackgroundAutomationAction(jobId, workerCount)
             .then((resumedJob) => {
               if (!stopped && resumedJob) applyBackgroundJob(resumedJob);
             })
@@ -725,7 +731,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
     void refreshProgress();
     return () => { stopped = true; };
-  }, [applyBackgroundJob, currentJobId, isBatchRunning]);
+  }, [applyBackgroundJob, currentJobId, isBatchRunning, workerCount]);
 
   useEffect(() => {
     if (!currentJobId || !isBatchRunning) return;
@@ -739,7 +745,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
           continue;
         }
 
-        const job = await processLocalBackgroundAutomationAction(jobId).catch(() => null);
+        const job = await processLocalBackgroundAutomationAction(jobId, workerCount).catch(() => null);
         if (stopped) return;
         if (job) applyBackgroundJob(job);
         if (!job || job.status !== "running") return;
@@ -751,7 +757,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
     void processSequentially();
     return () => { stopped = true; };
-  }, [applyBackgroundJob, currentJobId, isBatchRunning]);
+  }, [applyBackgroundJob, currentJobId, isBatchRunning, workerCount]);
 
   async function submitWorkflow(event: FormEvent<HTMLFormElement>) {
     if (!processingAllUploaded) {
@@ -956,6 +962,34 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">3</span>
             Run settings
           </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3.5">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-ink">Parallel Worker Pool</label>
+              <span className="rounded-md bg-indigo-100 px-2 py-0.5 text-[11px] font-extrabold text-indigo-700">
+                {workerCount} Concurrent Workers
+              </span>
+            </div>
+            <div className="mt-2.5 flex items-center gap-2">
+              {[3, 4, 5, 6].map((count) => (
+                <button
+                  key={count}
+                  type="button"
+                  onClick={() => setWorkerCount(count)}
+                  className={`flex-1 rounded-xl py-2 text-xs font-bold transition active:scale-95 ${
+                    workerCount === count
+                      ? "bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-400"
+                      : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-100"
+                  }`}
+                >
+                  {count} Workers
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-muted leading-relaxed">
+              Processes {workerCount} websites simultaneously in parallel with dynamic queue load balancing (Recommended: 4).
+            </p>
+            <input type="hidden" name="workerCount" value={workerCount} />
+          </div>
           <label className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-sm text-ink transition hover:border-indigo-200 hover:bg-indigo-50/40">
             <input className="mt-1" defaultChecked name="openMonitorTab" type="checkbox" />
             <span>
@@ -1097,6 +1131,61 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
         {liveBatchItems.length > 0 ? (
           <div className="space-y-4">
+            {activeWorkers.length > 0 && isBatchRunning ? (
+              <div className="rounded-2xl border border-indigo-900/40 bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-950 p-4 text-white shadow-lg">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-2.5 w-2.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75"></span>
+                      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-cyan-400"></span>
+                    </span>
+                    <p className="text-xs font-bold uppercase tracking-wider text-cyan-300">
+                      Parallel Worker Pool ({activeWorkers.filter((w) => w.status === "running").length} / {activeWorkers.length} Active)
+                    </p>
+                  </div>
+                  <span className="rounded-md bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-slate-300">
+                    Dynamic Load-Balanced Queue
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                  {activeWorkers.map((w) => {
+                    const isRunning = w.status === "running";
+                    return (
+                      <div
+                        key={w.workerId}
+                        className={`rounded-xl border p-2.5 transition ${
+                          isRunning
+                            ? "border-cyan-500/60 bg-white/10 shadow-sm"
+                            : "border-white/10 bg-white/5 opacity-60"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-xs font-bold text-cyan-300">
+                            {w.workerId.toUpperCase()}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                              isRunning
+                                ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40"
+                                : "bg-slate-700 text-slate-300"
+                            }`}
+                          >
+                            {isRunning ? "● Running" : "○ Idle"}
+                          </span>
+                        </div>
+                        <p className="mt-1.5 truncate text-xs font-medium text-slate-200" title={w.currentTargetUrl || ""}>
+                          {w.currentTargetUrl || "Waiting for next target..."}
+                        </p>
+                        <p className="mt-0.5 truncate text-[11px] text-slate-400">
+                          {w.currentStep || "Idle"}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-ink">Live automation progress</h3>
               <span className="rounded-full bg-canvas px-3 py-1 text-xs font-semibold text-muted">

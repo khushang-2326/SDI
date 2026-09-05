@@ -16,9 +16,8 @@ const globalForPrisma = globalThis as unknown as {
   prisma?: PrismaClient;
 };
 
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
+function createPrismaClient(): PrismaClient {
+  const client = new PrismaClient({
     datasources: {
       db: {
         url: getSqliteUrl()
@@ -26,6 +25,22 @@ export const prisma =
     },
     log: ["error"]
   });
+
+  // Enable WAL mode & busy timeout for robust multi-worker concurrency
+  void (async () => {
+    try {
+      await client.$queryRawUnsafe("PRAGMA journal_mode = WAL;");
+      await client.$queryRawUnsafe("PRAGMA busy_timeout = 10000;");
+      await client.$queryRawUnsafe("PRAGMA synchronous = NORMAL;");
+    } catch {
+      // Ignore in environments where raw pragmas are restricted
+    }
+  })();
+
+  return client;
+}
+
+export const prisma = globalForPrisma.prisma ?? createPrismaClient();
 
 globalForPrisma.prisma = prisma;
 

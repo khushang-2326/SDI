@@ -22,6 +22,11 @@ import {
   redactProxyDetails
 } from "@/services/proxy-helper";
 import { getAutomationQueue } from "@/queue/client";
+import {
+  runParallelWorkerPool,
+  getActiveWorkers,
+  type WorkerStatusInfo
+} from "@/services/worker-pool";
 
 export type AutomationResult = {
     websiteUrl: string;
@@ -59,7 +64,21 @@ export type AutomationRunnerState = {
   results?: AutomationResult[];
 };
 
-export type BackgroundAutomationJob = { id: string; userId: string; status: "running" | "completed" | "cancelled"; createdAt: string; items: Array<{ id: string; name: string; url: string; status: "waiting" | "discovering" | "completed" | "failed" | "cancelled"; detail: string; result?: AutomationResult }> };
+export type BackgroundAutomationJob = {
+  id: string;
+  userId: string;
+  status: "running" | "completed" | "cancelled";
+  createdAt: string;
+  workers?: WorkerStatusInfo[];
+  items: Array<{
+    id: string;
+    name: string;
+    url: string;
+    status: "waiting" | "discovering" | "completed" | "failed" | "cancelled";
+    detail: string;
+    result?: AutomationResult;
+  }>;
+};
 
 const globalForLocalAutomation = globalThis as typeof globalThis & {
   localAutomationLocks?: Map<string, Promise<void>>;
@@ -94,6 +113,7 @@ async function mapJobToBackgroundJob(dbJob: any): Promise<BackgroundAutomationJo
     userId: dbJob.userId,
     status: mapDbStatusToBackground(dbJob.status),
     createdAt: dbJob.createdAt.toISOString(),
+    workers: getActiveWorkers(dbJob.id),
     items: dbJob.results.map((res: any) => ({
       id: res.targetWebsite.id,
       name: res.targetWebsite.websiteName,
@@ -704,37 +724,20 @@ async function processLocalQueueResult(userId: string, resultId: string) {
   }
 }
 
-export async function processLocalBackgroundAutomationAction(jobId: string) {
+export async function processLocalBackgroundAutomationAction(jobId: string, workerCountParam?: number) {
   const user = await requireUser();
   if (config.queueProvider === "local" && !localAutomationLocks.has(jobId)) {
+    const workerCount = workerCountParam ?? config.worker.maxWorkers;
     const processing = (async () => {
-      const activeResult = await prisma.submissionResult.findFirst({
-        where: {
+      try {
+        await runParallelWorkerPool({
           jobId,
-          status: { in: ["Discovering", "Running"] },
-          job: { userId: user.id, status: "Running" }
-        },
-        select: { id: true }
-      });
-      if (activeResult) {
-        // An active item without this process's lock was interrupted by a server restart.
-        await prisma.submissionResult.updateMany({
-          where: {
-            id: activeResult.id,
-            status: { in: ["Discovering", "Running"] },
-            job: { userId: user.id, status: "Running" }
-          },
-          data: { status: "Pending", message: "Recovered after an interrupted automation run" }
+          userId: user.id,
+          workerCount
         });
+      } catch (err) {
+        console.error(`[WorkerPool Action] Error processing job ${jobId}:`, err);
       }
-
-      const nextResults = await prisma.submissionResult.findMany({
-        where: { jobId, status: "Pending", job: { userId: user.id, status: "Running" } },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        take: config.worker.concurrency,
-        select: { id: true }
-      });
-      await Promise.all(nextResults.map((result) => processLocalQueueResult(user.id, result.id)));
     })();
 
     localAutomationLocks.set(jobId, processing);

@@ -18,8 +18,10 @@ async function main() {
   await page.goto("https://sdi-production-c505.up.railway.app/automation");
 
   console.log("Entering manual URL...");
+  // Select contact form automation type
+  await page.selectOption('select[name="automationType"]', "contact");
   // Fill website URL
-  await page.fill('input[name="websiteUrl"]', "https://bigbuda.cl/agendar");
+  await page.fill('input[name="websiteUrl"]', "https://www.aoe.com/en/contact");
   
   // Uncheck 'Show Playwright automation browser' since in cloud it's headless
   const showBrowser = page.locator('input[name="showBrowser"]');
@@ -40,7 +42,14 @@ async function main() {
   await page.waitForTimeout(30000);
 
   const text = await page.innerText("body");
-  console.log("Page text after 30s:\n", text.slice(0, 1000));
+  const activityStream = await page.innerText("h2:has-text('Workflow result')").catch(() => "");
+  console.log("Activity stream header found:", Boolean(activityStream));
+  
+  const resultCard = await page.$(".card-enter, [class*='card-']");
+  console.log("Result card present:", Boolean(resultCard));
+
+  const allText = await page.innerText("main, section");
+  console.log("Main section text:\n", allText);
 
   await browser.close();
 }

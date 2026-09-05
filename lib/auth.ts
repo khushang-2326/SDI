@@ -9,7 +9,12 @@ const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
 
 function getAuthSecret() {
-  return process.env.AUTH_SECRET ?? "development-only-change-me";
+  return (
+    process.env.AUTH_SECRET ??
+    process.env.APP_SECRET ??
+    process.env.NEXTAUTH_SECRET ??
+    "sdi_production_secret_key_2026"
+  );
 }
 
 function signPayload(payload: string) {
@@ -39,8 +44,9 @@ export async function setSessionCookie(userId: string) {
   cookieStore.set(COOKIE_NAME, createSessionToken(userId), {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/"
+    secure: process.env.COOKIE_SECURE === "true",
+    path: "/",
+    maxAge: SESSION_MAX_AGE_SECONDS
   });
 }
 

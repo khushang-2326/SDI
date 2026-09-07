@@ -407,7 +407,10 @@ async function processSingleTarget(
         ["success", "dry_run_ready_to_book"].includes(a.result.status)
       );
       const anySuccessful = successes.length > 0;
-      const lastScreenshot = run.attempts.map((a) => a.result.screenshotPath).filter(Boolean).at(-1) ?? null;
+      // Requirement: Show ONLY the screenshot representing the successful submission for successes
+      const successScreenshot = successes.find((a) => a.result.screenshotPath)?.result.screenshotPath ?? null;
+      const failureScreenshot = run.attempts.map((a) => a.result.screenshotPath).filter(Boolean).at(-1) ?? null;
+      const finalScreenshot = anySuccessful ? successScreenshot : failureScreenshot;
       const lastAttempt = run.attempts.at(-1);
 
       // Determine explicit status classification
@@ -430,7 +433,7 @@ async function processSingleTarget(
               ? `[${workerId}] ${run.discoveryReason}`
               : `[${workerId}] ${successes.length}/${run.attempts.length} targets completed successfully`
           ),
-          screenshotPath: lastScreenshot,
+          screenshotPath: finalScreenshot,
           targetType: run.targets[0]?.targetType ?? null,
           resolvedUrl: run.targets[0]?.url ?? null,
           submittedAt: new Date()
@@ -459,12 +462,16 @@ async function processSingleTarget(
 
     let failureStatus = "Failed";
     const errText = rawError.toLowerCase();
-    if (errText.includes("exceeded timeout") || errText.includes("timed out")) {
-      failureStatus = "Timeout";
+    if (errText.includes("net::err_name_not_resolved") || errText.includes("enotfound") || errText.includes("dns")) {
+      failureStatus = "Dns_Unresolvable";
     } else if (errText.includes("403") || errText.includes("forbidden")) {
       failureStatus = "Http_403";
-    } else if (errText.includes("captcha") || errText.includes("challenge") || errText.includes("turnstile")) {
+    } else if (errText.includes("captcha") || errText.includes("turnstile") || errText.includes("recaptcha") || errText.includes("hcaptcha")) {
       failureStatus = "Captcha_Required";
+    } else if (errText.includes("human verification") || errText.includes("robot challenge") || errText.includes("bot detection")) {
+      failureStatus = "Human_Verification";
+    } else if (errText.includes("exceeded timeout") || errText.includes("timed out")) {
+      failureStatus = "Timeout";
     }
 
     console.warn(`[${workerId}] Error on target ${resultId}: ${rawError} (Status: ${failureStatus})`);

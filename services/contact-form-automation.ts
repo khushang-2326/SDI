@@ -822,17 +822,33 @@ async function submitBookingWidget({
 }
 
 async function detectSuccess(page: Page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => undefined);
-  await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
-  await page.waitForTimeout(2000);
+  // Fast-path polling loop: check immediately and every 500ms for up to 6s
+  // Many forms redirect or show confirmation immediately without waiting for background network requests.
+  const startTime = Date.now();
+  const maxWaitMs = 6000;
 
-  // 1. Check URL redirect or path
-  const currentUrl = page.url().toLowerCase();
-  if (/(thank[_-]?you|thanks|success|confirmed|submission-received|message-sent|inquiry-received)/i.test(currentUrl)) {
-    return true;
+  while (Date.now() - startTime < maxWaitMs) {
+    // 1. Check URL redirect or path
+    const currentUrl = page.url().toLowerCase();
+    if (/(thank[_-]?you|thanks|success|confirmed|submission-received|message-sent|inquiry-received)/i.test(currentUrl)) {
+      return true;
+    }
+
+    // 2. Check known successful form framework selectors
+    const isMatched = await checkSuccessFrameworkSelectors(page);
+    if (isMatched) return true;
+
+    // 3. Check page and child frames body text
+    const textMatched = await checkSuccessText(page);
+    if (textMatched) return true;
+
+    await page.waitForTimeout(400);
   }
 
-  // 2. Check known successful form framework selectors
+  return false;
+}
+
+async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
   const successSelectors = [
     ".wpcf7-mail-sent-ok:visible",
     ".wpcf7-response-output:has-text('Thank')",
@@ -856,8 +872,10 @@ async function detectSuccess(page: Page) {
     const isMatched = await page.locator(selector).first().isVisible().catch(() => false);
     if (isMatched) return true;
   }
+  return false;
+}
 
-  // 3. Check page and child frames body text
+async function checkSuccessText(page: Page): Promise<boolean> {
   const successPatterns = [
     "thank you",
     "thanks for reaching out",
@@ -883,7 +901,7 @@ async function detectSuccess(page: Page) {
     "as soon as possible"
   ];
 
-  const bodyText = (await page.locator("body").innerText({ timeout: 4000 }).catch(() => ""))
+  const bodyText = (await page.locator("body").innerText({ timeout: 1500 }).catch(() => ""))
     .toLowerCase()
     .replace(/\s+/g, " ");
 
@@ -896,7 +914,7 @@ async function detectSuccess(page: Page) {
     if (frame === page.mainFrame()) continue;
     const frameUrl = frame.url().toLowerCase();
     if (/(thank[_-]?you|thanks|success|confirmed)/i.test(frameUrl)) return true;
-    const frameText = (await frame.locator("body").innerText({ timeout: 2000 }).catch(() => ""))
+    const frameText = (await frame.locator("body").innerText({ timeout: 1000 }).catch(() => ""))
       .toLowerCase()
       .replace(/\s+/g, " ");
     if (successPatterns.some((pattern) => frameText.includes(pattern))) {
@@ -1088,6 +1106,11 @@ export async function submitContactForm({
       throw new Error("Website blocked access (HTTP 403 Forbidden).");
     }
 
+    if (statusCode === 202 && (/robot challenge/i.test(pageTitle) || /security/i.test(pageBodyText))) {
+      screenshotPath = await takeScreenshot(page, websiteUrl, "robot-challenge-202").catch(() => null);
+      throw new Error("Unsupported verification: Robot Challenge Screen detected. Manual verification required.");
+    }
+
     // Auto-accept cookie consent banners so contact forms and submit buttons become visible
     await dismissCookieBanners(activePage).catch(() => undefined);
 
@@ -1154,9 +1177,10 @@ export async function submitContactForm({
     if (shouldSubmit) {
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded().catch(() => undefined);
+      // Wait for either navigation (redirect) or immediate DOM update/AJAX completion
       await Promise.allSettled([
-        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 12000 }),
-        submitButton.click({ timeout: 10000 })
+        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 6000 }),
+        submitButton.click({ timeout: 8000 })
       ]);
     }
 

@@ -212,7 +212,7 @@ ${items
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
     } else {
-      alert("Could not copy automatically. The report has been logged to the console.");
+      alert("Unable to copy report. Please try again.");
       console.log(text);
     }
   };

@@ -179,9 +179,9 @@ export async function detectUnsupportedVerification(
 
   // Generic human-verification or bot-detection challenge screens
   const humanVerificationChallenge =
-    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|checking your browser|automated traffic|unusual traffic|bot (?:detection|verification|protection)|access denied.*bot|security check to proceed/i.test(
+    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|robot challenge|checking (?:your browser|the site connection security)|automated traffic|unusual traffic|bot (?:detection|verification|protection)|access denied.*bot|security check to proceed/i.test(
       pageText
-    );
+    ) || /robot challenge screen/i.test(title);
 
   if (humanVerificationChallenge) {
     const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, "Human Verification Challenge");

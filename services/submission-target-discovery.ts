@@ -1007,8 +1007,10 @@ export async function discoverSubmissionTarget({
     const homepageLoaded = Boolean(navResponse && !navError);
     if (homepageLoaded) {
       await dismissCookieBanners(page).catch(() => undefined);
-      await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 8000) }).catch(() => undefined);
-      await page.waitForTimeout(1200);
+      // Do not wait indefinitely for background trackers/analytics.
+      // 2.5s networkidle or immediate DOM interactive is plenty.
+      await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => undefined);
+      await page.waitForTimeout(400);
     }
 
     const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
@@ -1059,8 +1061,8 @@ export async function discoverSubmissionTarget({
       }
 
       await dismissCookieBanners(page).catch(() => undefined);
-      await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 5000) }).catch(() => undefined);
-      await page.waitForTimeout(900);
+      await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => undefined);
+      await page.waitForTimeout(300);
 
       const result = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
 
@@ -1224,6 +1226,28 @@ export async function discoverSubmissionTargets({
         checkedUrls: [normalizedWebsiteUrl],
         reason: redactProxyDetails(navError.message || "The website could not be loaded for multi-target discovery."),
         screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
+      };
+    }
+
+    const statusCode = navResponse?.status();
+    const pageTitle = await page.title().catch(() => "");
+    if (statusCode === 403 || /403 forbidden/i.test(pageTitle) || /^403 forbidden/i.test(pageBodyText.trim())) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets: [],
+        checkedUrls: [normalizedWebsiteUrl],
+        reason: "Website blocked access (HTTP 403 Forbidden).",
+        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "http-403-forbidden").catch(() => null)
+      };
+    }
+
+    if (statusCode === 202 && (/robot challenge/i.test(pageTitle) || /security/i.test(pageBodyText))) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets: [],
+        checkedUrls: [normalizedWebsiteUrl],
+        reason: "Unsupported verification: Robot Challenge Screen detected. Manual verification required.",
+        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "robot-challenge-202").catch(() => null)
       };
     }
 

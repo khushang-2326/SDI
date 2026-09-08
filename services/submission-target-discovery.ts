@@ -489,35 +489,60 @@ async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candi
 }
 
 async function getVisibleFormScore(container: Page | Frame) {
-  return container
-    .locator("form, input, textarea, button")
-    .evaluateAll((elements) => {
-      const visible = elements.filter((element) => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.height > 0;
-      });
-      const hasEmail = visible.some((element) => {
-        const input = element as HTMLInputElement;
-        return (
-          input.type === "email" ||
-          /email/i.test(input.name ?? "") ||
-          /email/i.test(input.placeholder ?? "") ||
-          /email/i.test(input.getAttribute("aria-label") ?? "")
-        );
-      });
-      const hasMessage = visible.some((element) => element.tagName.toLowerCase() === "textarea");
-      const hasName = visible.some((element) => /name/i.test(`${(element as HTMLInputElement).name ?? ""} ${(element as HTMLInputElement).placeholder ?? ""}`));
-      const hasSubmit = visible.some((element) =>
-        /submit|send|contact|request|quote/i.test(
-          `${element.textContent ?? ""} ${(element as HTMLInputElement).value ?? ""}`
-        )
-      );
-      const hasFormSubmit = visible.some((element) => element.matches("button[type='submit'], input[type='submit']"));
+  try {
+    const inputCount = await container.locator("input, textarea").count().catch(() => 0);
+    if (inputCount === 0) return 0;
 
-      return Number(hasEmail) * 35 + Number(hasMessage) * 25 + Number(hasName) * 15 + Number(hasSubmit || hasFormSubmit) * 25;
-    })
-    .catch(() => 0);
+    return await container
+      .locator("form, input:not([type=hidden]), textarea, button[type='submit'], input[type='submit'], button")
+      .evaluateAll((elements) => {
+        const sliced = elements.slice(0, 50);
+        let hasEmail = false;
+        let hasMessage = false;
+        let hasName = false;
+        let hasSubmit = false;
+        let hasFormSubmit = false;
+
+        for (const element of sliced) {
+          const style = window.getComputedStyle(element);
+          if (style.display === "none" || style.visibility === "hidden") continue;
+          const rect = element.getBoundingClientRect();
+          if (rect.height <= 0) continue;
+
+          const tag = element.tagName.toLowerCase();
+          if (tag === "textarea") {
+            hasMessage = true;
+          } else if (tag === "input") {
+            const input = element as HTMLInputElement;
+            if (
+              input.type === "email" ||
+              /email/i.test(input.name ?? "") ||
+              /email/i.test(input.placeholder ?? "") ||
+              /email/i.test(input.getAttribute("aria-label") ?? "")
+            ) {
+              hasEmail = true;
+            }
+            if (/name/i.test(`${input.name ?? ""} ${input.placeholder ?? ""}`)) {
+              hasName = true;
+            }
+            if (input.type === "submit" || /submit|send|contact|request|quote/i.test(input.value ?? "")) {
+              hasSubmit = true;
+              hasFormSubmit = true;
+            }
+          } else if (tag === "button") {
+            if (element.getAttribute("type") === "submit") hasFormSubmit = true;
+            if (/submit|send|contact|request|quote/i.test(element.textContent ?? "")) {
+              hasSubmit = true;
+            }
+          }
+        }
+
+        return Number(hasEmail) * 35 + Number(hasMessage) * 25 + Number(hasName) * 15 + Number(hasSubmit || hasFormSubmit) * 25;
+      })
+      .catch(() => 0);
+  } catch {
+    return 0;
+  }
 }
 
 function commonPathCandidates(baseUrl: string): Candidate[] {
@@ -600,9 +625,18 @@ async function detectContactTarget(
     };
   }
 
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame() || !/^https?:/i.test(frame.url())) continue;
-    const frameFormScore = await getVisibleFormScore(frame);
+  const relevantFrames = page.frames().filter((frame) => {
+    if (frame === page.mainFrame() || !/^https?:/i.test(frame.url())) return false;
+    const fUrl = frame.url().toLowerCase();
+    if (/google|doubleclick|facebook|analytics|gtm|clarity|hotjar|segment|datadog|sentry|recaptcha|turnstile|hcaptcha/i.test(fUrl)) return false;
+    return true;
+  }).slice(0, 5);
+
+  for (const frame of relevantFrames) {
+    const frameFormScore = await Promise.race([
+      getVisibleFormScore(frame),
+      new Promise<number>((r) => setTimeout(() => r(0), 1000))
+    ]);
     if (frameFormScore < 60) continue;
     return {
       websiteUrl,
@@ -769,13 +803,16 @@ async function detectTargetOnPage(
     };
   }
 
-  const html = await page.content().catch(() => "");
-  const hasEmbeddedBookingCalendar =
-    html.includes('"type":"BookingCalendar"') ||
-    html.includes("bookingcalendar-") ||
-    html.includes("leadconnectorhq.com/widget/booking") ||
-    html.includes("appointment_widgets") ||
-    html.includes("c-calendar");
+  const hasEmbeddedBookingCalendar = await page.evaluate(() => {
+    const bodyHtml = document.body ? document.body.innerHTML : "";
+    return (
+      bodyHtml.includes('"type":"BookingCalendar"') ||
+      bodyHtml.includes("bookingcalendar-") ||
+      bodyHtml.includes("leadconnectorhq.com/widget/booking") ||
+      bodyHtml.includes("appointment_widgets") ||
+      bodyHtml.includes("c-calendar")
+    );
+  }).catch(() => false);
 
   if (hasEmbeddedBookingCalendar) {
     return {
@@ -865,32 +902,29 @@ async function detectTargetOnPage(
 async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
   const triggers = await page
     .locator(INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR)
-    .evaluateAll((elements) => elements
-      .map((element, index) => {
-        const control = element as HTMLElement;
+    .evaluateAll((elements) => {
+      const candidates: { index: number }[] = [];
+      for (let i = 0; i < elements.length; i++) {
+        const control = elements[i] as HTMLElement;
         const text = [
           control.textContent,
           control.getAttribute("aria-label"),
           control.getAttribute("title")
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        if (!/\b(menu|navigation|contact|contact us|get in touch|let'?s talk|start a project)\b|☰/i.test(text)) {
+          continue;
+        }
+        if (control.matches("button[type='submit'], input[type='submit']")) continue;
+        if (control.getAttribute("aria-expanded") === "true") continue;
         const style = window.getComputedStyle(control);
+        if (style.display === "none" || style.visibility === "hidden") continue;
         const rect = control.getBoundingClientRect();
-        return {
-          index,
-          text,
-          isVisible: style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0,
-          isSubmit: control.matches("button[type='submit'], input[type='submit']"),
-          expanded: control.getAttribute("aria-expanded")
-        };
-      })
-      .filter((trigger) =>
-        trigger.isVisible &&
-        !trigger.isSubmit &&
-        trigger.expanded !== "true" &&
-        /\b(menu|navigation|contact|contact us|get in touch|let'?s talk|start a project)\b|☰/i.test(trigger.text)
-      )
-      .slice(0, MAX_INTERACTIVE_DISCOVERY_CLICKS)
-    )
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        candidates.push({ index: i });
+        if (candidates.length >= MAX_INTERACTIVE_DISCOVERY_CLICKS) break;
+      }
+      return candidates;
+    })
     .catch(() => []);
 
   let clicked = 0;
@@ -923,13 +957,11 @@ async function detectTargetWithLazyScroll(
     if (revealedResult) return revealedResult;
   }
 
-  // Some builders mount forms only when their section enters the viewport.
-  // Scan progressively from body to footer rather than jumping straight to
-  // the end, so both in-content and footer-adjacent contact forms can hydrate.
-  for (let pass = 1; pass <= 8; pass++) {
-    await page.mouse.wheel(0, 900).catch(() => undefined);
-    await page.waitForTimeout(550);
-    const scrolledResult = await detectTargetOnPage(page, url, `${candidateReason}; detected during lazy-page scan ${pass}/8`);
+  // Progressive 3-pass scan down the page to trigger lazy-loaded forms
+  for (let pass = 1; pass <= 3; pass++) {
+    await page.mouse.wheel(0, 1200).catch(() => undefined);
+    await page.waitForTimeout(300);
+    const scrolledResult = await detectTargetOnPage(page, url, `${candidateReason}; detected during lazy-page scan ${pass}/3`);
     if (scrolledResult) return scrolledResult;
   }
   return null;

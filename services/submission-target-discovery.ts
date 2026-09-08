@@ -174,7 +174,7 @@ async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
     const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
     const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 8000, animations: "disabled" });
+    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 2500, animations: "disabled" });
     return `/screenshots/${fileName}`;
   } catch (err) {
     console.warn("Screenshot capture skipped:", err);

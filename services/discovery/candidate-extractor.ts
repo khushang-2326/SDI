@@ -61,8 +61,8 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
 
         const docHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight, 1);
 
-        // 1. Anchors across the rendered page
-        const anchors = Array.from(document.querySelectorAll("a[href]"));
+        // 1. Anchors across the rendered page (capped at 300 to prevent DOM thrashing)
+        const anchors = Array.from(document.querySelectorAll("a[href]")).slice(0, 300);
         for (const anchor of anchors) {
           const href = (anchor.getAttribute("href") ?? "").trim();
           if (!href || href === "#" || href.startsWith("javascript:void")) continue;
@@ -71,7 +71,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           const top = window.scrollY + rect.top;
           const distanceFromTop = Math.min(1.0, Math.max(0.0, top / docHeight));
 
-          const text = (anchor.textContent ?? "").replace(/\s+/g, " ").trim();
+          const text = (anchor.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
           const ariaLabel = (anchor.getAttribute("aria-label") ?? "").trim();
           const title = (anchor.getAttribute("title") ?? "").trim();
           const parentText = (anchor.parentElement?.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
@@ -110,15 +110,11 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           });
         }
 
-        // 2. Buttons and JS navigation elements
+        // 2. Buttons and JS navigation elements (capped to 200, URL evaluated first)
         const buttons = Array.from(
           document.querySelectorAll("button, [role='button'], div[onclick], a[href='#'], [data-url], [data-href]")
-        );
+        ).slice(0, 200);
         for (const el of buttons) {
-          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-          const ariaLabel = (el.getAttribute("aria-label") ?? "").trim();
-          const title = (el.getAttribute("title") ?? "").trim();
-
           const dataUrl =
             el.getAttribute("data-url") ||
             el.getAttribute("data-href") ||
@@ -135,6 +131,10 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           }
 
           if (!extractedUrl) continue;
+
+          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
+          const ariaLabel = (el.getAttribute("aria-label") ?? "").trim();
+          const title = (el.getAttribute("title") ?? "").trim();
 
           const rect = el.getBoundingClientRect();
           const top = window.scrollY + rect.top;

@@ -1035,7 +1035,11 @@ export async function discoverSubmissionTarget({
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-gpu"
+          "--disable-gpu",
+          "--disable-software-rasterizer",
+          "--disable-webgl",
+          "--disable-3d-apis",
+          "--disable-accelerated-2d-canvas"
         ]
       });
 
@@ -1210,7 +1214,7 @@ export async function discoverSubmissionTarget({
   }
 }
 
-export async function discoverSubmissionTargets({
+async function discoverSubmissionTargetsInternal({
   websiteUrl,
   headless = true,
   timeoutMs = 8000,
@@ -1277,7 +1281,11 @@ export async function discoverSubmissionTargets({
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-gpu"
+          "--disable-gpu",
+          "--disable-software-rasterizer",
+          "--disable-webgl",
+          "--disable-3d-apis",
+          "--disable-accelerated-2d-canvas"
         ]
       });
       page = await browser.newPage({
@@ -1591,5 +1599,30 @@ export async function discoverSubmissionTargets({
   } finally {
     if (page && browserContext) await page.close().catch(() => undefined);
     else await browser?.close().catch(() => undefined);
+  }
+}
+
+export async function discoverSubmissionTargets(
+  input: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }
+): Promise<DiscoverSubmissionTargetsResult> {
+  const timeoutMs = input.timeoutMs ?? 8000;
+  const overallBudgetMs = Math.max(timeoutMs * 4, 60000);
+  let timer: NodeJS.Timeout | null = null;
+  const timeoutPromise = new Promise<DiscoverSubmissionTargetsResult>((resolve) => {
+    timer = setTimeout(() => {
+      resolve({
+        websiteUrl: input.websiteUrl,
+        targets: [],
+        checkedUrls: [input.websiteUrl],
+        reason: `Target discovery exceeded overall budget limit (${Math.round(overallBudgetMs / 1000)}s).`,
+        screenshotPath: null
+      });
+    }, overallBudgetMs);
+  });
+
+  try {
+    return await Promise.race([discoverSubmissionTargetsInternal(input), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

@@ -17,6 +17,12 @@ import {
   redactProxyDetails
 } from "@/services/proxy-helper";
 import { detectUnsupportedVerification } from "@/services/verification-detector";
+import { analyzePageContext } from "./discovery/page-context-analyzer";
+import { extractRawCandidates } from "./discovery/candidate-extractor";
+import { extractFeatureVector } from "./discovery/feature-extractor";
+import { scoreAndRankCandidates } from "./discovery/hybrid-ranker";
+import { recordDiscoveryFeedback } from "./discovery/feedback-store";
+import type { CandidateFeatureVector } from "./discovery/types";
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEFAULT_MAX_NAVIGATION_LINKS = 10;
@@ -54,11 +60,18 @@ const COMMON_TARGET_PATHS = [
   "/talk-to-us"
 ];
 
-type Candidate = {
+export type CandidateLocation = "header" | "nav" | "footer" | "main CTA" | "body";
+export type CandidateType = "anchor" | "button" | "CTA" | "URL pattern";
+
+export type Candidate = {
   url: string;
   score: number;
   reason: string;
   matchedTargetHint: boolean;
+  candidateText?: string;
+  candidateHref?: string;
+  candidateLocation?: CandidateLocation;
+  candidateType?: CandidateType;
 };
 
 type HttpDocument = { url: string; body: string };
@@ -76,9 +89,21 @@ const NAVIGATION_LINK_SELECTOR = [
   ".navbar a[href]",
   ".menu a[href]",
   ".site-header a[href]",
-  ".site-footer a[href]"
-  ,"main a[href]"
-  ,'[role="main"] a[href]'
+  ".site-footer a[href]",
+  "main a[href]",
+  '[role="main"] a[href]',
+  ".hero a[href]",
+  ".cta a[href]",
+  "a[href*='contact']",
+  "a[href*='talk']",
+  "a[href*='touch']",
+  "a[href*='quote']",
+  "a[href*='book']",
+  "a[href*='schedule']",
+  "a[href*='meeting']",
+  "a[href*='consult']",
+  "a[href*='started']",
+  "a[href*='inquire']"
 ].join(", ");
 
 const INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR = "button, [role='button'], summary";
@@ -179,101 +204,91 @@ async function blockHeavyAssets(page: Page) {
   });
 }
 
-function scoreTargetHint(text: string, href: string) {
-  const combined = normalizeText(`${text} ${href}`);
+export function scoreTargetHint(text: string, href: string, location?: "header" | "nav" | "footer" | "main CTA" | "body") {
+  const normalizedText = normalizeText(text);
+  const normalizedHref = normalizeText(href);
+  const combined = `${normalizedText} ${normalizedHref}`;
   let score = 0;
 
-  const hints = [
-    ["contact us", 35],
-    ["contact", 30],
-    ["get in touch", 15],
-    ["let's talk", 15],
-    ["lets talk", 15],
-    ["talk to sales", 15],
-    ["request quote", 13],
-    ["get quote", 13],
-    ["book now", 14],
-    ["book a call", 14],
-    ["book", 10],
-    ["schedule", 12],
-    ["appointment", 11],
-    ["consultation", 10],
-    ["inquiry", 9],
-    ["enquiry", 9],
-    ["quote", 8],
-    ["get started", 7],
-    ["meeting", 7]
-    ,["connect", 8]
-    ,["reach us", 10]
-    ,["work with us", 11]
-    ,["start a project", 11]
-    ,["estimate", 7]
-  ] as const;
+  // Primary High Priority Keywords
+  if (normalizedText === "contact" || /\bcontact\b/i.test(normalizedText)) score = Math.max(score, 100);
+  if (combined.includes("contact us")) score = Math.max(score, 95);
+  if (combined.includes("get in touch")) score = Math.max(score, 90);
+  if (combined.includes("book a call") || combined.includes("book call")) score = Math.max(score, 90);
+  if (combined.includes("schedule a call") || combined.includes("schedule call")) score = Math.max(score, 85);
+  if (combined.includes("let's talk") || combined.includes("lets talk") || combined.includes("talk to us") || combined.includes("talk with us")) score = Math.max(score, 85);
+  if (combined.includes("request a quote") || combined.includes("request quote") || combined.includes("get a quote") || combined.includes("get quote")) score = Math.max(score, 80);
+  if (combined.includes("free consultation") || combined.includes("request consultation") || combined.includes("consultation")) score = Math.max(score, 75);
+  if (combined.includes("get started") || combined.includes("start a project")) score = Math.max(score, 70);
+  if (combined.includes("work with us") || combined.includes("book a meeting") || combined.includes("schedule a meeting")) score = Math.max(score, 70);
+  if (combined.includes("talk to sales") || combined.includes("book now") || combined.includes("schedule demo") || combined.includes("request demo")) score = Math.max(score, 65);
+  if (combined.includes("reach us") || combined.includes("reach out") || combined.includes("connect")) score = Math.max(score, 60);
 
-  for (const [hint, value] of hints) {
-    if (combined.includes(hint)) score += value;
+  // URL Path Matches
+  if (
+    /\/(contact|contact-us|contactus|get-in-touch|book-a-call|book-call|schedule|schedule-a-call|meeting|book-meeting|consultation|quote|request-quote|get-started|inquire|lets-talk)(\/|\?|#|$)/i.test(
+      normalizedHref
+    )
+  ) {
+    score += 60;
   }
 
-  if (combined.includes("mailto:") || combined.includes("tel:")) score -= 20;
-  if (combined.includes("privacy") || combined.includes("terms")) score -= 10;
+  // Location Boosts
+  if (location === "header" || location === "nav") {
+    score += 30;
+  } else if (location === "footer") {
+    score += 30;
+  } else if (location === "main CTA") {
+    score += 20;
+  }
+
+  // Penalties
+  if (combined.includes("mailto:") || combined.includes("tel:")) score -= 50;
+  if (combined.includes("privacy") || combined.includes("terms") || combined.includes("cookies") || combined.includes("blog") || combined.includes("news")) {
+    score -= 30;
+  }
+
   return score;
 }
 
-async function collectNavigationCandidates(page: Page, baseUrl: string): Promise<Candidate[]> {
-  const base = new URL(baseUrl);
+export async function collectNavigationCandidates(
+  page: Page,
+  baseUrl: string,
+  maxCandidates: number = DEFAULT_MAX_NAVIGATION_LINKS
+): Promise<Candidate[]> {
+  try {
+    const pageContext = await analyzePageContext(page);
+    const rawCandidates = await extractRawCandidates(page, baseUrl);
+    const featureVectors = rawCandidates.map((raw) =>
+      extractFeatureVector(raw, baseUrl, pageContext)
+    );
+    const scoredCandidates = scoreAndRankCandidates(featureVectors, {
+      maxCandidates
+    });
 
-  return page
-    .locator(NAVIGATION_LINK_SELECTOR)
-    .evaluateAll((anchors) =>
-      anchors.map((anchor) => ({
-        href: anchor.getAttribute("href") ?? "",
-        text: anchor.textContent ?? "",
-        ariaLabel: anchor.getAttribute("aria-label") ?? "",
-        title: anchor.getAttribute("title") ?? "",
-        source: anchor.closest("footer, .site-footer")
-          ? "footer"
-          : anchor.closest("header, .site-header")
-            ? "header"
-            : anchor.closest("main, [role='main']") ? "main CTA" : "navigation"
-      }))
-    )
-    .then((links) =>
-      links
-        .map((link) => {
-          try {
-            const resolved = new URL(link.href, base);
+    const candidates: Candidate[] = scoredCandidates.map((sc) => {
+      console.log(
+        `[CONTACT-DISCOVERY] Candidate ${sc.rank}/${scoredCandidates.length}: text="${sc.candidateText}" href="${sc.url}" location="${sc.location}" ruleScore=${sc.ruleScore} mlScore=${sc.mlScore} finalScore=${sc.finalScore} type="${sc.candidateType}"`
+      );
+      return {
+        url: sc.url,
+        score: sc.finalScore,
+        matchedTargetHint: sc.finalScore > 0,
+        candidateText: sc.candidateText,
+        candidateHref: sc.candidateHref,
+        candidateLocation: sc.location,
+        candidateType: sc.candidateType as CandidateType,
+        reason: sc.reason,
+        // Store features on candidate for later feedback logging
+        features: sc.features
+      } as Candidate & { features?: CandidateFeatureVector };
+    });
 
-            if (
-              (resolved.origin !== base.origin && !isSupportedExternalTarget(resolved)) ||
-              ["mailto:", "tel:", "javascript:"].includes(resolved.protocol) ||
-              SKIPPED_PATH_PATTERN.test(resolved.pathname) ||
-              SKIPPED_EXTENSION_PATTERN.test(`${resolved.pathname}${resolved.search}`)
-            ) {
-              return null;
-            }
-
-            const score = scoreTargetHint(
-              `${link.text} ${link.ariaLabel} ${link.title}`,
-              resolved.toString()
-            );
-
-            if (link.source === "main CTA" && score <= 0) return null;
-
-            return {
-              url: withoutHash(resolved.toString()),
-              score,
-              matchedTargetHint: score > 0,
-              reason: `${link.source} link "${normalizeText(
-                link.text || link.ariaLabel || link.title || resolved.pathname
-              )}"${score > 0 ? " matched a contact/booking hint" : " checked as navigation fallback"}`
-            };
-          } catch {
-            return null;
-          }
-        })
-        .filter((candidate): candidate is Candidate => Boolean(candidate))
-    )
-    .catch(() => []);
+    return candidates;
+  } catch (err) {
+    console.warn("[CONTACT-DISCOVERY] Error collecting navigation candidates:", err);
+    return [];
+  }
 }
 
 async function fetchHttpDocument(url: string, deadline: number): Promise<HttpDocument | null> {
@@ -481,10 +496,14 @@ function mergeCandidates(candidates: Candidate[], limit: number) {
     }
   }
 
+  const isSynthetic = (c: Candidate) => c.reason.startsWith("common path");
+
   return Array.from(byUrl.values())
     .sort(
       (a, b) =>
-        Number(b.matchedTargetHint) - Number(a.matchedTargetHint) || b.score - a.score
+        Number(!isSynthetic(b)) - Number(!isSynthetic(a)) ||
+        Number(b.matchedTargetHint) - Number(a.matchedTargetHint) ||
+        b.score - a.score
     )
     .slice(0, limit);
 }
@@ -633,29 +652,13 @@ async function detectTargetOnPage(
     };
   }
 
-  if (/\/(discovery-call|book-call|booking|book-now|scheduler|schedule(-a)?-call|schedule-meeting|consultation|appointment)/i.test(new URL(currentUrl).pathname)) {
-    return {
-      websiteUrl: url,
-      discoveredUrl: currentUrl,
-      targetType: "booking_widget",
-      confidence: 78,
-      reason: `Booking-style URL path found; ${candidateReason}`,
-      checkedUrls: [],
-      screenshotPath: await takeScreenshot(page, url, "target-discovered").catch(() => null)
-    };
-  }
-
-  // Prefer an actual visible form over generic booking-related page copy.
-  const contactTarget = await detectContactTarget(page, url, candidateReason);
-  if (contactTarget) return contactTarget;
-
-  // Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito)
+  // 1. Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito)
   const iframeTarget = await page
     .locator("iframe")
     .evaluateAll((iframes) => {
       for (const iframe of iframes) {
         const src = iframe.getAttribute("src") ?? "";
-        if (/dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed/i.test(src)) {
+        if (/hsforms\.com|hubspot|dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed/i.test(src)) {
           return { url: src, type: "contact_form" as const };
         }
         if (/leadconnectorhq\.com\/widget\/booking|calendly\.com|calendar\.google\.com\/calendar\/appointments|tidycal\.com|acuityscheduling\.com/i.test(src)) {
@@ -681,11 +684,29 @@ async function detectTargetOnPage(
     };
   }
 
+  // 2. Prioritize an actual visible form over generic booking-related page copy or URL words.
+  const contactTarget = await detectContactTarget(page, url, candidateReason);
+  if (contactTarget) return contactTarget;
+
+  // 3. If no actual contact form was found, only check for booking-style URL paths if candidate was an explicit link/CTA or page has calendar/form cues
+  const isSyntheticCommonPath = candidateReason.includes("common path");
+  if (!isSyntheticCommonPath && /\/(discovery-call|book-call|booking|book-now|scheduler|schedule(-a)?-call|schedule-meeting|appointment)/i.test(new URL(currentUrl).pathname)) {
+    return {
+      websiteUrl: url,
+      discoveredUrl: currentUrl,
+      targetType: "booking_widget",
+      confidence: 78,
+      reason: `Booking-style URL path found; ${candidateReason}`,
+      checkedUrls: [],
+      screenshotPath: await takeScreenshot(page, url, "target-discovered").catch(() => null)
+    };
+  }
+
   const html = await page.content().catch(() => "");
   const hasEmbeddedBookingCalendar =
     html.includes('"type":"BookingCalendar"') ||
     html.includes("bookingcalendar-") ||
-    html.includes("leadconnectorhq") ||
+    html.includes("leadconnectorhq.com/widget/booking") ||
     html.includes("appointment_widgets") ||
     html.includes("c-calendar");
 
@@ -1044,14 +1065,19 @@ export async function discoverSubmissionTarget({
       maxFallbackPaths
     );
     const candidates = [...navigationCandidates, ...fallbackCandidates];
+    const discoveryDeadline = Date.now() + timeoutMs;
 
     for (const candidate of candidates) {
+      if (Date.now() >= discoveryDeadline) {
+        break;
+      }
       checkedUrls.push(candidate.url);
 
+      const remainingCandidateTimeout = Math.max(2000, Math.min(12000, discoveryDeadline - Date.now()));
       const candidateLoaded = await page
         .goto(candidate.url, {
           waitUntil: "domcontentloaded",
-          timeout: Math.min(timeoutMs, 12000)
+          timeout: remainingCandidateTimeout
         })
         .then(() => true)
         .catch(() => false);
@@ -1148,6 +1174,10 @@ export async function discoverSubmissionTargets({
     const targetType = result.targetType;
     const url = withoutHash(result.discoveredUrl);
     const key = `${targetType}:${url}`;
+    const cleanNormalized = withoutHash(normalizedWebsiteUrl).replace(/\/+$/, "");
+    const cleanUrl = url.replace(/\/+$/, "");
+    const isSuppliedPage = cleanUrl === cleanNormalized;
+    const discoveryResult = isSuppliedPage ? "FOUND_ON_SUPPLIED_PAGE" : "FOUND_ON_OTHER_PAGE";
     const target: DiscoveredSubmissionTarget = {
       targetType,
       url,
@@ -1155,7 +1185,10 @@ export async function discoverSubmissionTargets({
       confidence: result.confidence,
       reason: result.reason,
       screenshotPath: result.screenshotPath,
-      metadata: { discoveredFrom: normalizedWebsiteUrl }
+      metadata: {
+        discoveredFrom: normalizedWebsiteUrl,
+        discoveryResult
+      }
     };
     const existing = discovered.get(key);
     if (!existing || target.confidence > existing.confidence) discovered.set(key, target);
@@ -1190,18 +1223,28 @@ export async function discoverSubmissionTargets({
     await blockHeavyAssets(page);
 
     let proxy407Hit = false;
+    let on407Reject: ((err: any) => void) | null = null;
+    const proxy407Promise = new Promise((_, reject) => {
+      on407Reject = reject;
+    });
     const responseHandler = (res: any) => {
-      if (res.status() === 407) proxy407Hit = true;
+      if (res.status() === 407) {
+        proxy407Hit = true;
+        if (on407Reject) on407Reject(new ProxyAuthenticationError(PROXY_407_MESSAGE));
+      }
     };
     page.on("response", responseHandler);
 
     let navResponse: any = null;
     let navError: any = null;
     try {
-      navResponse = await page.goto(normalizedWebsiteUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: timeoutMs
-      });
+      navResponse = await Promise.race([
+        page.goto(normalizedWebsiteUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: timeoutMs
+        }),
+        proxy407Promise
+      ]);
     } catch (err: any) {
       navError = err;
     } finally {
@@ -1209,7 +1252,6 @@ export async function discoverSubmissionTargets({
     }
 
     if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
-      await takeScreenshot(page, normalizedWebsiteUrl, "proxy-407-failure").catch(() => null);
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
     }
 
@@ -1319,16 +1361,63 @@ export async function discoverSubmissionTargets({
       const candidateUrl = withoutHash(candidate.url);
       if (checkedUrls.includes(candidateUrl)) continue;
       checkedUrls.push(candidateUrl);
+
+      console.log(`[CONTACT-DISCOVERY] Trying candidate: ${candidate.url} (reason: ${candidate.reason})`);
+
       const loaded = await page.goto(candidate.url, {
         waitUntil: "domcontentloaded",
         timeout: Math.min(timeoutMs, 7000)
       }).then(() => true).catch(() => false);
-      if (!loaded) continue;
+      if (!loaded) {
+        console.log(`[CONTACT-DISCOVERY] Failed to load candidate: ${candidate.url}`);
+        continue;
+      }
       await dismissCookieBanners(page).catch(() => undefined);
-      await page.waitForTimeout(500);
+      // Bounded wait for dynamic client-side forms (HubSpot, Marketo, LeadConnector, SPA embeds)
+      await page
+        .locator("form:not([action*='search']), input:not([type=hidden]):not([type=search]), textarea, iframe[src*='hsforms'], iframe[src*='marketo']")
+        .first()
+        .waitFor({ state: "attached", timeout: 2500 })
+        .catch(() => undefined);
+      await page.waitForTimeout(400);
       const candResult = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
       addResult(candResult);
-      if (candResult?.targetType === "contact_form") break;
+
+      const formFound = Boolean(candResult && candResult.targetType !== "not_found");
+      const formType = (formFound && candResult ? candResult.targetType : "none") as "contact_form" | "booking_widget" | "none";
+      const fieldsDetected = formFound ? 1 : 0;
+
+      // Async record sanitized feedback for offline learning
+      const mappedType = (candidate.candidateType?.toLowerCase() === "cta" ? "cta" : (candidate.candidateType || "anchor")) as any;
+      recordDiscoveryFeedback(
+        normalizedWebsiteUrl,
+        {
+          url: candidate.url,
+          normalizedUrl: candidate.url,
+          candidateText: candidate.candidateText || "",
+          candidateHref: candidate.candidateHref || candidate.url,
+          location: candidate.candidateLocation || "body",
+          candidateType: mappedType,
+          features: (candidate as any).features || ({} as any),
+          ruleScore: candidate.score,
+          mlScore: 0,
+          finalScore: candidate.score,
+          rank: checkedUrls.length,
+          reason: candidate.reason
+        },
+        true,
+        formFound,
+        formType,
+        fieldsDetected,
+        formFound ? "FORM_FOUND" : "NO_FORM"
+      ).catch(() => undefined);
+
+      if (candResult && candResult.targetType !== "not_found") {
+        console.log(
+          `[CONTACT-DISCOVERY] FORM/WIDGET FOUND: targetType=${candResult.targetType} source=${candidate.candidateLocation || "other"} status=FOUND_ON_OTHER_PAGE url=${candResult.discoveredUrl}`
+        );
+        if (candResult.targetType === "contact_form") break;
+      }
     }
 
     const targets = Array.from(discovered.values()).sort(
@@ -1340,7 +1429,7 @@ export async function discoverSubmissionTargets({
       checkedUrls,
       reason: targets.length > 0
         ? `Discovered ${targets.length} supported submission target${targets.length === 1 ? "" : "s"}.`
-        : `No supported submission target was found after checking ${checkedUrls.length} page${checkedUrls.length === 1 ? "" : "s"}.`,
+        : `No supported contact form found on the supplied page or relevant discovered pages.`,
       screenshotPath: targets[0]?.screenshotPath ?? await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
     };
   } catch (error) {

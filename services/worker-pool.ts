@@ -395,7 +395,7 @@ async function processSingleTarget(
 
       const run = await withTargetTimeout(
         multiTargetRun,
-        config.worker.totalTargetTimeoutMs,
+        config.worker.totalTargetTimeoutMs + 2000,
         `Target ${website.websiteUrl}`
       );
 
@@ -413,26 +413,48 @@ async function processSingleTarget(
       const finalScreenshot = anySuccessful ? successScreenshot : failureScreenshot;
       const lastAttempt = run.attempts.at(-1);
 
-      // Determine explicit status classification
+      // Determine explicit status classification and true message
       let finalStatus = anySuccessful ? "Completed" : "Failed";
-      if (!anySuccessful && lastAttempt) {
-        const err = (lastAttempt.result.errorMessage || "").toLowerCase();
-        if (err.includes("403") || err.includes("forbidden")) {
+      let finalMessage = "";
+
+      if (anySuccessful) {
+        finalMessage = run.discoveryReason.includes("Proxy fallback")
+          ? `[${workerId}] ${run.discoveryReason}`
+          : `[${workerId}] Successfully submitted contact target`;
+      } else {
+        const attemptErr = lastAttempt?.result?.errorMessage || "";
+        const combinedErr = (attemptErr || run.discoveryReason || "").toLowerCase();
+
+        if (combinedErr.includes("403") || combinedErr.includes("forbidden")) {
           finalStatus = "Http_403";
-        } else if (err.includes("captcha") || err.includes("cloudflare") || err.includes("turnstile")) {
+        } else if (combinedErr.includes("captcha") || combinedErr.includes("turnstile") || combinedErr.includes("recaptcha") || combinedErr.includes("hcaptcha")) {
           finalStatus = "Captcha_Required";
+        } else if (combinedErr.includes("human verification") || combinedErr.includes("robot challenge") || combinedErr.includes("bot detection")) {
+          finalStatus = "Human_Verification";
+        } else if (combinedErr.includes("no supported contact form") || combinedErr.includes("no form detected") || combinedErr.includes("no contact form found") || combinedErr.includes("no valid submission target")) {
+          finalStatus = "No_Form_Detected";
+        } else if (combinedErr.includes("no visible submit button") || combinedErr.includes("submit button not found")) {
+          finalStatus = "Submit_Button_Not_Found";
+        } else if (combinedErr.includes("no date with available time slots") || combinedErr.includes("no_available_slots")) {
+          finalStatus = "Booking_Widget_Empty";
+        } else if (combinedErr.includes("booking widget source was found, but it did not render") || combinedErr.includes("did not render")) {
+          finalStatus = "Widget_Mount_Failure";
+        } else if (combinedErr.includes("validation error") || combinedErr.includes("required field missing")) {
+          finalStatus = "Validation_Error";
+        } else if (combinedErr.includes("exceeded timeout") || combinedErr.includes("timed out")) {
+          finalStatus = "Timeout";
+        } else if (combinedErr.includes("net::err_connection_closed") || combinedErr.includes("net::err_connection_refused") || combinedErr.includes("econnrefused")) {
+          finalStatus = "Network_Error";
         }
+
+        finalMessage = `[${workerId}] ${attemptErr || run.discoveryReason || "Target execution failed"}`;
       }
 
       await prisma.submissionResult.updateMany({
         where: { id: resultId, job: { userId, status: "Running" } },
         data: {
           status: finalStatus,
-          message: redactProxyDetails(
-            run.discoveryReason.includes("Proxy fallback")
-              ? `[${workerId}] ${run.discoveryReason}`
-              : `[${workerId}] ${successes.length}/${run.attempts.length} targets completed successfully`
-          ),
+          message: redactProxyDetails(finalMessage),
           screenshotPath: finalScreenshot,
           targetType: run.targets[0]?.targetType ?? null,
           resolvedUrl: run.targets[0]?.url ?? null,
@@ -470,8 +492,18 @@ async function processSingleTarget(
       failureStatus = "Captcha_Required";
     } else if (errText.includes("human verification") || errText.includes("robot challenge") || errText.includes("bot detection")) {
       failureStatus = "Human_Verification";
-    } else if (errText.includes("exceeded timeout") || errText.includes("timed out")) {
+    } else if (errText.includes("no supported contact form") || errText.includes("no form detected") || errText.includes("no contact form found") || errText.includes("no valid submission target")) {
+      failureStatus = "No_Form_Detected";
+    } else if (errText.includes("no visible submit button") || errText.includes("submit button not found")) {
+      failureStatus = "Submit_Button_Not_Found";
+    } else if (errText.includes("validation error") || errText.includes("required field missing")) {
+      failureStatus = "Validation_Error";
+    } else if (errText.includes("exceeded timeout") || errText.includes("timed out") || errText.includes("timeout 90000ms") || errText.includes("timeout 120000ms")) {
       failureStatus = "Timeout";
+    } else if (errText.includes("err_connection_closed") || errText.includes("err_connection_refused") || errText.includes("err_failed") || errText.includes("err_http_response_code_failure")) {
+      failureStatus = "Network_Error";
+    } else if (errText.includes("facebook.com") || errText.includes("yelp.com")) {
+      failureStatus = "Unsupported_Platform";
     }
 
     console.warn(`[${workerId}] Error on target ${resultId}: ${rawError} (Status: ${failureStatus})`);

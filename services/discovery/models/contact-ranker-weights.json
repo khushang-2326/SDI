@@ -1,0 +1,58 @@
+{
+  "version": "1.0.0",
+  "featureNames": [
+    "contactKeywordSignals",
+    "bookingKeywordSignals",
+    "consultationSignals",
+    "leadSignals",
+    "negativeSignals",
+    "hasPathMatch",
+    "isHeaderNav",
+    "isFooter",
+    "isCTA",
+    "isButton",
+    "mobileMenuSource",
+    "urlPathDepth",
+    "distanceFromTop",
+    "headingAlignment"
+  ],
+  "contactCoefficients": {
+    "contactKeywordSignals": 1.587,
+    "bookingKeywordSignals": 0.187,
+    "consultationSignals": 0.324,
+    "leadSignals": 0.819,
+    "negativeSignals": -1.503,
+    "hasPathMatch": 2.553,
+    "isHeaderNav": -0.515,
+    "isFooter": -0.247,
+    "isCTA": 0.868,
+    "isButton": 0.868,
+    "mobileMenuSource": 0.308,
+    "urlPathDepth": -0.093,
+    "distanceFromTop": -0.296,
+    "headingAlignment": 0.528
+  },
+  "contactIntercept": -1.03,
+  "formCoefficients": {
+    "contactKeywordSignals": 1.587,
+    "bookingKeywordSignals": 0.187,
+    "consultationSignals": 0.324,
+    "leadSignals": 0.819,
+    "negativeSignals": -1.503,
+    "hasPathMatch": 2.553,
+    "isHeaderNav": -0.515,
+    "isFooter": -0.247,
+    "isCTA": 0.868,
+    "isButton": 0.868,
+    "mobileMenuSource": 0.308,
+    "urlPathDepth": -0.093,
+    "distanceFromTop": -0.296,
+    "headingAlignment": 0.528
+  },
+  "formIntercept": -1.03,
+  "metadata": {
+    "trainedAt": "2026-09-08T05:57:32.805Z",
+    "sampleCount": 12,
+    "accuracy": 1
+  }
+}

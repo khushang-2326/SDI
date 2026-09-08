@@ -412,7 +412,7 @@ export async function getBackgroundAutomationAction(jobId?: string) {
   }
 
   const dbJob = await prisma.submissionJob.findFirst({
-    where: { userId: user.id, status: "Running" },
+    where: { userId: user.id },
     orderBy: { createdAt: "desc" },
     include: {
       results: {
@@ -493,7 +493,8 @@ async function processLocalQueueResult(userId: string, resultId: string) {
     };
     const payloadFields = new Map(payload.fields);
 
-    if ((payloadFields.get("automationType") || "auto") === "auto") {
+    const currentAutoType = payloadFields.get("automationType") || "auto";
+    if (currentAutoType === "auto" || currentAutoType === "find_contact_fallback") {
       const website = await prisma.targetWebsite.findFirst({
         where: { id: record.targetWebsiteId, userId },
         include: { discoveredTargets: { orderBy: [{ executionOrder: "asc" }, { confidence: "desc" }] } }
@@ -1006,7 +1007,7 @@ export async function runSingleAutomationAction(
     startupTimeoutMs: Math.min(20_000, config.worker.websiteTimeoutMs)
   });
   try {
-  if (automationType === "auto") {
+  if (automationType === "auto" || automationType === "find_contact_fallback") {
     const savedNotes = selectedWebsite?.notes?.toLowerCase() ?? "";
     const cachedTargetIsHomepage = Boolean(
       selectedWebsite?.contactPageUrl &&

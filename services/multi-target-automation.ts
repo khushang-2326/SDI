@@ -41,6 +41,7 @@ export type MultiTargetCallbacks = {
 
 const MAX_TARGET_ATTEMPTS_PER_WEBSITE = 5;
 const MAX_CONSECUTIVE_FAILURES = 3;
+const MAX_ATTEMPT_TIMEOUT_MS = 40_000;
 
 function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
   if (target.targetType !== "calendly") return true;
@@ -136,7 +137,7 @@ async function executeTarget({
       timeoutMs
     });
   }
-  return submitGenericBookingWidget({
+  const bookingResult = await submitGenericBookingWidget({
     websiteUrl: target.url,
     leadData,
     bookingPreferences,
@@ -145,6 +146,31 @@ async function executeTarget({
     skipPersist: true,
     timeoutMs
   });
+
+  if (
+    bookingResult.status !== "success" &&
+    bookingResult.status !== "dry_run_ready_to_book" &&
+    (bookingResult.errorMessage?.includes("did not render") || bookingResult.status === "booking_widget_found")
+  ) {
+    try {
+      const contactFallback = await submitContactForm({
+        websiteUrl: target.url,
+        leadData,
+        submit: liveSubmit,
+        browserContext,
+        skipPersist: true,
+        userId,
+        timeoutMs
+      });
+      if (contactFallback.status === "success" || contactFallback.status === "dry_run_ready_to_book") {
+        return contactFallback;
+      }
+    } catch {
+      // Fallback failed, return original booking result
+    }
+  }
+
+  return bookingResult;
 }
 
 export async function runMultiTargetAutomation({
@@ -214,7 +240,8 @@ export async function runMultiTargetAutomation({
       }
       if (attemptedKeys.has(normalizedKey)) continue;
       const remainingMs = deadlineAt === undefined ? timeoutMs : deadlineAt - Date.now();
-      if (remainingMs <= 0) break;
+      if (remainingMs <= 1000) break;
+      const attemptBudgetMs = Math.max(5000, Math.min(MAX_ATTEMPT_TIMEOUT_MS, remainingMs));
       attemptedKeys.add(normalizedKey);
       const startedAt = new Date();
       await callbacks.onAttemptStarted?.(target);
@@ -227,7 +254,7 @@ export async function runMultiTargetAutomation({
           liveSubmit,
           browserContext,
           userId,
-          timeoutMs: Math.max(1000, Math.min(timeoutMs, remainingMs))
+          timeoutMs: attemptBudgetMs
         });
       } catch (error) {
         if (isProxyAuthenticationFailure(error)) {
@@ -259,9 +286,17 @@ export async function runMultiTargetAutomation({
     }
   }
 
-  // Helper to run the 1-shot direct retry when proxy 407 / gateway failure happens
   async function triggerDirectRetry(_reasonForRetry: string): Promise<MultiTargetRunResult> {
     stopDeadlineTimer();
+    const remainingDirectMs = deadlineAt !== undefined ? deadlineAt - Date.now() : timeoutMs;
+    if (remainingDirectMs <= 5000) {
+      return {
+        discoveryReason: "Proxy fallback skipped: insufficient remaining time budget.",
+        checkedUrls: [websiteUrl],
+        targets: [],
+        attempts
+      };
+    }
     let directContext: BrowserContext | null = null;
     try {
       directContext = await acquireContext({
@@ -269,7 +304,7 @@ export async function runMultiTargetAutomation({
         userId,
         disableProxy: true,
         bandwidthSaver: false,
-        startupTimeoutMs: Math.min(20_000, timeoutMs)
+        startupTimeoutMs: Math.min(10_000, remainingDirectMs)
       });
       const directRun = await runMultiTargetAutomation({
         websiteUrl,
@@ -277,11 +312,11 @@ export async function runMultiTargetAutomation({
         bookingPreferences,
         liveSubmit,
         browserContext: directContext,
-        timeoutMs,
+        timeoutMs: Math.min(MAX_ATTEMPT_TIMEOUT_MS, remainingDirectMs),
         cachedTargets,
         callbacks,
         userId,
-        deadlineAt: deadlineAt !== undefined ? Math.max(Date.now() + 15000, deadlineAt) : undefined,
+        deadlineAt: deadlineAt, // strictly adhere to the overall target deadline!
         headless,
         isDirectRetry: true
       });
@@ -335,11 +370,13 @@ export async function runMultiTargetAutomation({
     };
   }
 
+  const discoveryBudgetMs = Math.max(5000, Math.min(30_000, discoveryRemainingMs));
+
   let discovery: DiscoverSubmissionTargetsResult;
   try {
     discovery = await discoverSubmissionTargets({
       websiteUrl,
-      timeoutMs: Math.max(1000, Math.min(timeoutMs, discoveryRemainingMs)),
+      timeoutMs: discoveryBudgetMs,
       browserContext,
       maxNavigationLinks: 6,
       maxFallbackPaths: 3

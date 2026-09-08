@@ -118,7 +118,7 @@ const worker = new Worker(
       context = await acquireContext({ userId });
       await logger.info("Browser context acquired.");
 
-      if (automationType === "auto") {
+      if (automationType === "auto" || automationType === "find_contact_fallback") {
         const attemptIds = new Map<string, string>();
         const targetIds = new Map<string, string>();
         const targetKey = (target: { targetType: string; url: string }) => `${target.targetType}:${target.url}`;

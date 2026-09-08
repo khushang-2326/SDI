@@ -50,15 +50,16 @@ const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
     "your name",
     "name",
     "first name",
-    "last name"
+    "last name",
+    "contact name"
   ],
-  email: ["email", "e-mail", "mail"],
-  mobile: ["phone", "mobile", "telephone", "tel", "cell", "contact number"],
+  email: ["email", "e-mail", "mail", "email address", "work email", "email_address", "emailaddress"],
+  mobile: ["phone", "mobile", "telephone", "tel", "cell", "contact number", "phone number", "mobile number", "cell phone", "work phone", "phonenumber"],
   city: ["city", "town", "municipality"],
   address: ["address", "street", "state", "zip", "postal"],
-  message: ["message", "comment", "comments", "details", "description", "note", "enquiry"],
-  companyName: ["company", "business", "organization", "organisation", "brand"],
-  website: ["website", "web site", "url", "domain", "company website", "site url", "web page"],
+  message: ["message", "comment", "comments", "details", "description", "note", "enquiry", "inquiry", "how can we help", "project details", "brief", "tell us about"],
+  companyName: ["company", "business", "organization", "organisation", "brand", "company name", "business name", "firm"],
+  website: ["website", "web site", "url", "domain", "company website", "site url", "web page", "web address"],
   jobTitle: ["job title", "title", "role", "position", "occupation"]
 };
 
@@ -156,6 +157,28 @@ async function collectFieldCandidates(scope: FormScope): Promise<FieldCandidate[
       };
     })
   );
+}
+
+async function blockHeavyAssets(page: Page) {
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const resourceType = request.resourceType();
+    const url = request.url().toLowerCase();
+    const shouldBlock =
+      ["image", "font", "media"].includes(resourceType) ||
+      url.includes("google-analytics") ||
+      url.includes("googletagmanager") ||
+      url.includes("facebook") ||
+      url.includes("doubleclick") ||
+      url.includes("hotjar");
+
+    if (shouldBlock) {
+      await route.abort().catch(() => undefined);
+      return;
+    }
+
+    await route.continue().catch(() => undefined);
+  });
 }
 
 async function safelyFillField(locator: Locator, value: string) {
@@ -537,34 +560,67 @@ async function findPrimaryForm(page: Page) {
 async function fillAllVisibleForms(page: Page, leadData: LeadData) {
   const primaryForm = await findPrimaryForm(page);
   // A small number of sites use controls without a wrapping <form>.
-  return fillDetectedFields(primaryForm ?? page, leadData);
+  const result = await fillDetectedFields(primaryForm ?? page, leadData);
+  return { ...result, primaryForm };
 }
 
-async function findSubmitButton(page: Page, leadData?: LeadData) {
+export async function findSubmitButton(page: Page, leadData?: LeadData, targetForm?: Locator | null) {
   const selectors = [
     "button[type='submit']",
     "input[type='submit']",
+    ".elementor-button[type='submit']",
+    "button.elementor-button",
+    ".elementor-field-type-submit button",
     "button.hs-button",
     "input.hs-button",
+    "input[value*='Demo' i]",
+    "input[value*='SEND' i]",
+    "input[value='SEND']",
     ".wpcf7-submit",
     "form button:not([type='button'])",
     "form input[type='submit']",
+    "button[id*='submit' i]",
+    "button[class*='submit' i]",
+    "input[id*='submit' i]",
     "button:has-text('Submit')",
     "button:has-text('Send')",
+    "button:has-text('Send Message')",
+    "button:has-text('Send Enquiry')",
+    "button:has-text('Submit Message')",
+    "button:has-text('Get Started')",
+    "button:has-text('Get started')",
+    "button:has-text('Start Now')",
     "button:has-text('Contact')",
+    "button:has-text('Contact Us')",
     "button:has-text('Get in touch')",
-    "button:has-text('Request')",
+    "button:has-text('Free Strategy Session')",
+    "button:has-text('Book A Call')",
+    "button:has-text('Request Demo')",
+    "button:has-text('Request A Demo')",
+    "button:has-text('Request A Quote')",
+    "button:has-text('Get a Demo')",
+    "button:has-text('Get A Demo')",
+    "button:has-text('Subscribe')",
+    "button:has-text('SUBSCRIBE')",
+    "button:has-text('Schedule Consultation')",
+    "button:has-text('Schedule A Call')",
     "button:has-text('Nachricht')",
     "button:has-text('Enviar')",
     "button:has-text('Absenden')",
     "button:has-text('Envoyer')",
     "input[value*='Submit' i]",
     "input[value*='Send' i]",
+    "input[value*='Enquiry' i]",
     "input[value*='Contact' i]",
+    "input[value*='Get Started' i]",
+    "input[value*='Start' i]",
+    "input[value*='Subscribe' i]",
     "input[value*='Enviar' i]",
     "input[value*='Absenden' i]",
     "[role='button']:has-text('Submit')",
     "[role='button']:has-text('Send')",
+    "[role='button']:has-text('Send Message')",
+    "[role='button']:has-text('Get Started')",
     "[role='button']:has-text('Enviar')",
     "button:has-text('Let\'s get started')",
     "input[value*='started' i]",
@@ -578,7 +634,7 @@ async function findSubmitButton(page: Page, leadData?: LeadData) {
     "[class*='form' i] [role='button']"
   ];
 
-  const primaryForm = await findPrimaryForm(page);
+  const primaryForm = targetForm ?? (await findPrimaryForm(page));
   if (primaryForm) {
     for (const selector of selectors) {
       const locators = primaryForm.locator(selector);
@@ -865,7 +921,12 @@ async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
     ".gform_confirmation_message:visible",
     ".nf-response-msg:visible",
     ".fluentform-submission-success:visible",
-    ".wpforms-confirmation-container:visible"
+    ".wpforms-confirmation-container:visible",
+    ".frm_message:visible",
+    ".ff-message-success:visible",
+    "[data-form-status='success']:visible",
+    "[aria-live='polite']:has-text('thank')",
+    ".form-feedback:has-text('thank')"
   ];
 
   for (const selector of successSelectors) {
@@ -883,6 +944,11 @@ async function checkSuccessText(page: Page): Promise<boolean> {
     "thanks for your inquiry",
     "thank you for contacting",
     "thank you for reaching out",
+    "thank you for your message",
+    "thank you for getting in touch",
+    "we have received your message",
+    "your inquiry has been received",
+    "we will respond",
     "message has been sent",
     "successfully sent",
     "message sent successfully",
@@ -1060,28 +1126,40 @@ export async function submitContactForm({
     // resource prevents DOMContentLoaded/networkidle from completing. Continue
     // as soon as the server commits the document, then wait for form controls.
     const activePage = page;
+    await blockHeavyAssets(activePage).catch(() => undefined);
     let proxy407Hit = false;
+    let on407Reject: ((err: any) => void) | null = null;
+    const proxy407Promise = new Promise((_, reject) => {
+      on407Reject = reject;
+    });
     const responseHandler = (res: any) => {
-      if (res.status() === 407) proxy407Hit = true;
+      if (res.status() === 407) {
+        proxy407Hit = true;
+        if (on407Reject) on407Reject(new ProxyAuthenticationError(PROXY_407_MESSAGE));
+      }
     };
     activePage.on("response", responseHandler);
 
     let navResponse: any = null;
     try {
-      navResponse = await activePage.goto(websiteUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: timeoutMs
-      });
+      navResponse = await Promise.race([
+        activePage.goto(websiteUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: timeoutMs
+        }),
+        proxy407Promise
+      ]);
     } catch (gotoErr: any) {
       if (isProxyAuthenticationFailure(gotoErr) || proxy407Hit) {
-        screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
         throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
       }
       try {
-        navResponse = await activePage.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs });
+        navResponse = await Promise.race([
+          activePage.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs }),
+          proxy407Promise
+        ]);
       } catch (commitErr: any) {
         if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
-          screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
           throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
         }
       }
@@ -1090,9 +1168,15 @@ export async function submitContactForm({
     }
 
     if (navResponse?.status() === 407 || proxy407Hit) {
-      screenshotPath = await takeScreenshot(page, websiteUrl, "proxy-407-failure").catch(() => null);
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
     }
+
+    // Bounded wait for dynamic form or inputs to mount (HubSpot, LeadConnector, SPA embeds)
+    await activePage
+      .locator("form:not([action*='search']), input:not([type=hidden]):not([type=search]), textarea")
+      .first()
+      .waitFor({ state: "attached", timeout: 3500 })
+      .catch(() => undefined);
 
     const pageBodyText = await activePage.locator("body").innerText({ timeout: 1500 }).catch(() => "");
     if (isProxyAuthenticationFailure(null, navResponse?.status(), pageBodyText)) {
@@ -1150,7 +1234,7 @@ export async function submitContactForm({
       throw new Error(postFillVerification.reason);
     }
 
-    const submitButton = await findSubmitButton(page, leadData);
+    const submitButton = await findSubmitButton(page, leadData, fillResult.primaryForm);
 
     if (!submitButton) {
       const bookingWidget = await detectBookingWidget(page);
@@ -1178,10 +1262,22 @@ export async function submitContactForm({
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded().catch(() => undefined);
       // Wait for either navigation (redirect) or immediate DOM update/AJAX completion
-      await Promise.allSettled([
-        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 6000 }),
-        submitButton.click({ timeout: 8000 })
-      ]);
+      try {
+        await Promise.allSettled([
+          page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 6000 }),
+          submitButton.click({ timeout: 8000 })
+        ]);
+      } catch {
+        // Fallback: requestSubmit on form directly if click fails
+        await submitButton.evaluate((btn) => {
+          const form = btn.closest("form");
+          if (form && typeof form.requestSubmit === "function") {
+            form.requestSubmit(btn as HTMLButtonElement | HTMLInputElement);
+          } else if ("click" in btn && typeof (btn as HTMLElement).click === "function") {
+            (btn as HTMLElement).click();
+          }
+        }).catch(() => undefined);
+      }
     }
 
     const success = shouldSubmit ? await detectSuccess(page) : true;

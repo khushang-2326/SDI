@@ -173,6 +173,7 @@ function AutomationAnalysisModal({
       return (
         item.name.toLowerCase().includes(q) ||
         item.url.toLowerCase().includes(q) ||
+        item.status.toLowerCase().includes(q) ||
         item.detail.toLowerCase().includes(q)
       );
     }
@@ -629,7 +630,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
-  const [workerCount, setWorkerCount] = useState<number>(4);
+  const [workerCount, setWorkerCount] = useState<number>(6);
   const [activeWorkers, setActiveWorkers] = useState<any[]>([]);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
   const [clock, setClock] = useState(() => Date.now());
@@ -976,6 +977,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
               value={automationType}
             >
               <option value="auto">Auto discover if needed</option>
+              <option value="find_contact_fallback">Find contact form across website — fallback</option>
               <option value="direct_contact">Direct contact page only — fastest</option>
               <option value="booking">Use this exact URL as booking widget</option>
               <option value="hubspot">Use this exact URL as HubSpot</option>

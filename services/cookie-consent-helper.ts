@@ -159,24 +159,38 @@ const ACCEPT_TEXT_REGEX = new RegExp(
   "i"
 );
 
+const FAST_ACCEPT_CSS = SPECIALIZED_ACCEPT_SELECTORS.filter((s) => !s.includes(":has-text")).join(", ");
+
 async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> {
   let dismissed = false;
 
-  // 1. Try specialized selectors first
-  for (const selector of SPECIALIZED_ACCEPT_SELECTORS) {
-    try {
-      const locator = scope.locator(selector).first();
-      if ((await locator.count().catch(() => 0)) > 0 && (await locator.isVisible().catch(() => false))) {
-        await locator.click({ timeout: 1000, force: true }).catch(() => undefined);
-        dismissed = true;
-        break;
-      }
-    } catch {
-      // Continue to next selector
+  // 1. Try joined native CSS selector first (instant single query)
+  try {
+    const locator = scope.locator(FAST_ACCEPT_CSS).first();
+    const count = await locator.count().catch(() => 0);
+    if (count > 0 && (await locator.isVisible().catch(() => false))) {
+      await locator.click({ timeout: 500, force: true }).catch(() => undefined);
+      return true;
     }
+  } catch {
+    // Continue
   }
 
-  // 2. Multi-lingual matching, strictly inside a cookie/consent container.
+  // 2. Try text-based pseudo selectors
+  try {
+    const textSelectors = SPECIALIZED_ACCEPT_SELECTORS.filter((s) => s.includes(":has-text"));
+    for (const selector of textSelectors) {
+      const locator = scope.locator(selector).first();
+      if ((await locator.count().catch(() => 0)) > 0 && (await locator.isVisible().catch(() => false))) {
+        await locator.click({ timeout: 500, force: true }).catch(() => undefined);
+        return true;
+      }
+    }
+  } catch {
+    // Continue
+  }
+
+  // 3. Multi-lingual matching, strictly inside a cookie/consent container.
   if (!dismissed) {
     try {
       const cookieContainerButtons = scope
@@ -186,10 +200,10 @@ async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> 
         .filter({ hasText: ACCEPT_TEXT_REGEX });
 
       const count = await cookieContainerButtons.count().catch(() => 0);
-      for (let i = 0; i < Math.min(count, 3); i++) {
+      for (let i = 0; i < Math.min(count, 2); i++) {
         const btn = cookieContainerButtons.nth(i);
         if (await btn.isVisible().catch(() => false)) {
-          await btn.click({ timeout: 1000, force: true }).catch(() => undefined);
+          await btn.click({ timeout: 500, force: true }).catch(() => undefined);
           dismissed = true;
           break;
         }
@@ -199,14 +213,14 @@ async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> 
     }
   }
 
-  // 3. Check for cookie-specific close controls.
+  // 4. Check for cookie-specific close controls.
   if (!dismissed) {
     try {
       const closeButtons = scope.locator(
         "[role='dialog'][class*='cookie' i] button[aria-label*='close' i], [class*='cookie' i] button[aria-label*='close' i], [id*='cookie' i] button[aria-label*='close' i], .osano-cm-close"
       );
       if ((await closeButtons.count().catch(() => 0)) > 0 && (await closeButtons.first().isVisible().catch(() => false))) {
-        await closeButtons.first().click({ timeout: 1000, force: true }).catch(() => undefined);
+        await closeButtons.first().click({ timeout: 500, force: true }).catch(() => undefined);
         dismissed = true;
       }
     } catch {
@@ -217,7 +231,7 @@ async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> 
   return dismissed;
 }
 
-export async function dismissCookieBanners(page: Page): Promise<boolean> {
+async function dismissCookieBannersInternal(page: Page): Promise<boolean> {
   let dismissed = false;
 
   // 1. Process main page
@@ -228,18 +242,28 @@ export async function dismissCookieBanners(page: Page): Promise<boolean> {
     // Continue
   }
 
-  // 2. Process all child iframes
+  // 2. Process only explicit consent/CMP child iframes (max 2)
   try {
-    const frames = page.frames();
+    const frames = page.frames().filter((f) => {
+      if (f === page.mainFrame()) return false;
+      const fUrl = f.url().toLowerCase();
+      return /consent|cookie|osano|didomi|usercentrics|klaro|onetrust|quantcast|axeptio|iubenda/i.test(fUrl);
+    }).slice(0, 2);
+
     for (const frame of frames) {
-      if (frame !== page.mainFrame()) {
-        const frameDismissed = await dismissScopeCookieBanners(frame).catch(() => false);
-        if (frameDismissed) dismissed = true;
-      }
+      const frameDismissed = await dismissScopeCookieBanners(frame).catch(() => false);
+      if (frameDismissed) dismissed = true;
     }
   } catch {
     // Continue
   }
 
   return dismissed;
+}
+
+export async function dismissCookieBanners(page: Page): Promise<boolean> {
+  return await Promise.race([
+    dismissCookieBannersInternal(page),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500))
+  ]);
 }

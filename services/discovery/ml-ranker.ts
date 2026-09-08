@@ -7,6 +7,7 @@ export interface MLPrediction {
   pForm: number;
   mlScore: number;
   available: boolean;
+  sampleCount?: number;
 }
 
 let cachedWeights: ModelWeights | null = null;
@@ -71,6 +72,10 @@ export function predictCandidateScore(features: CandidateFeatureVector): MLPredi
     bookingKeywordSignals: features.bookingKeywordSignals,
     consultationSignals: features.consultationSignals,
     leadSignals: features.leadSignals,
+    conversationIntent: features.conversationIntent ?? 0.0,
+    projectIntent: features.projectIntent ?? 0.0,
+    advisoryIntent: features.advisoryIntent ?? 0.0,
+    informationIntent: features.informationIntent ?? 0.0,
     negativeSignals: features.negativeSignals,
     hasPathMatch,
     isHeaderNav: features.isHeader || features.isNav ? 1.0 : 0.0,
@@ -80,7 +85,9 @@ export function predictCandidateScore(features: CandidateFeatureVector): MLPredi
     mobileMenuSource: features.mobileMenuSource ? 1.0 : 0.0,
     urlPathDepth: Math.min(features.urlPathDepth, 5) / 5.0,
     distanceFromTop: features.distanceFromTop,
-    headingAlignment: features.pageHeadingKeywords.length > 0 ? 1.0 : 0.0
+    headingAlignment: features.pageHeadingKeywords.length > 0 ? 1.0 : 0.0,
+    headingContextScore: features.headingContextScore ?? 0.0,
+    pageTitleContextScore: features.pageTitleContextScore ?? 0.0
   };
 
   // 1. P(contact_destination)
@@ -105,6 +112,7 @@ export function predictCandidateScore(features: CandidateFeatureVector): MLPredi
     pContact: Number(pContact.toFixed(3)),
     pForm: Number(pForm.toFixed(3)),
     mlScore,
-    available: true
+    available: true,
+    sampleCount: weights.metadata?.sampleCount ?? 0
   };
 }

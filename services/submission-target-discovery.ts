@@ -19,10 +19,11 @@ import {
 import { detectUnsupportedVerification } from "@/services/verification-detector";
 import { analyzePageContext } from "./discovery/page-context-analyzer";
 import { extractRawCandidates } from "./discovery/candidate-extractor";
-import { extractFeatureVector } from "./discovery/feature-extractor";
+import { extractFeatureVector, extractUniversalFeatureVector } from "./discovery/feature-extractor";
 import { scoreAndRankCandidates } from "./discovery/hybrid-ranker";
 import { recordDiscoveryFeedback } from "./discovery/feedback-store";
-import type { CandidateFeatureVector } from "./discovery/types";
+import type { CandidateFeatureVector, CandidateLocation, CandidateType } from "./discovery/types";
+export type { CandidateLocation, CandidateType };
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEFAULT_MAX_NAVIGATION_LINKS = 10;
@@ -60,9 +61,6 @@ const COMMON_TARGET_PATHS = [
   "/talk-to-us"
 ];
 
-export type CandidateLocation = "header" | "nav" | "footer" | "main CTA" | "body";
-export type CandidateType = "anchor" | "button" | "CTA" | "URL pattern";
-
 export type Candidate = {
   url: string;
   score: number;
@@ -72,6 +70,8 @@ export type Candidate = {
   candidateHref?: string;
   candidateLocation?: CandidateLocation;
   candidateType?: CandidateType;
+  features?: CandidateFeatureVector;
+  depth?: number;
 };
 
 type HttpDocument = { url: string; body: string };
@@ -326,7 +326,7 @@ function extractHttpLinks(document: HttpDocument, includeCrawlLinks = false): Ca
   } catch {
     return [];
   }
-  const candidates: Candidate[] = [];
+  const rawLinks: Array<{ href: string; text: string; resolved: URL }> = [];
   const anchorPattern = /<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   for (const match of document.body.matchAll(anchorPattern)) {
     try {
@@ -339,18 +339,41 @@ function extractHttpLinks(document: HttpDocument, includeCrawlLinks = false): Ca
         SKIPPED_PATH_PATTERN.test(resolved.pathname) ||
         SKIPPED_EXTENSION_PATTERN.test(`${resolved.pathname}${resolved.search}`)
       ) continue;
-      const score = scoreTargetHint(text, resolved.toString());
-      const crawlWorthy = /\/(about|company|services?|solutions?)(\/|$)/i.test(resolved.pathname);
-      if (score <= 0 && (!includeCrawlLinks || !crawlWorthy)) continue;
-      candidates.push({
-        url: withoutHash(resolved.toString()),
-        score,
-        matchedTargetHint: score > 0,
-        reason: `HTTP homepage link "${normalizeText(text || resolved.pathname)}"${score > 0 ? " matched a contact/booking hint" : " selected for shallow crawl"}`
-      });
+      rawLinks.push({ href, text, resolved });
     } catch {
       continue;
     }
+  }
+
+  const featureVectors = rawLinks.map((link) =>
+    extractUniversalFeatureVector(
+      {
+        url: link.resolved.toString(),
+        text: link.text,
+        sourceType: "http_probe"
+      },
+      document.url
+    )
+  );
+
+  const scored = scoreAndRankCandidates(featureVectors, { maxCandidates: 50 });
+
+  const candidates: Candidate[] = [];
+  for (const s of scored) {
+    const crawlWorthy = /\/(about|company|services?|solutions?)(\/|$)/i.test(new URL(s.url).pathname);
+    if (s.finalScore <= 0 && (!includeCrawlLinks || !crawlWorthy)) continue;
+    candidates.push({
+      url: withoutHash(s.url),
+      score: s.finalScore,
+      matchedTargetHint: s.finalScore > 0,
+      candidateText: s.candidateText,
+      candidateHref: s.candidateHref,
+      candidateLocation: s.location,
+      candidateType: s.candidateType as CandidateType,
+      reason: `HTTP homepage link "${normalizeText(s.candidateText || new URL(s.url).pathname)}"${s.finalScore > 0 ? " matched a contact/booking hint" : " selected for shallow crawl"}`,
+      features: s.features,
+      depth: 1
+    });
   }
   return candidates;
 }
@@ -366,21 +389,44 @@ function documentSignalScore(body: string) {
 }
 
 function extractSitemapCandidates(document: HttpDocument): Candidate[] {
-  const candidates: Candidate[] = [];
+  const rawUrls: URL[] = [];
   for (const match of document.body.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi)) {
     try {
       const url = new URL(match[1].replace(/&amp;/gi, "&"));
-      const score = scoreTargetHint(url.pathname, url.toString());
-      if (score <= 0 || SKIPPED_PATH_PATTERN.test(url.pathname)) continue;
-      candidates.push({
-        url: withoutHash(url.toString()),
-        score: score + 8,
-        matchedTargetHint: true,
-        reason: `sitemap URL "${url.pathname}" matched a contact/booking hint`
-      });
+      if (SKIPPED_PATH_PATTERN.test(url.pathname)) continue;
+      rawUrls.push(url);
     } catch {
       continue;
     }
+  }
+
+  const featureVectors = rawUrls.map((url) =>
+    extractUniversalFeatureVector(
+      {
+        url: url.toString(),
+        text: url.pathname,
+        sourceType: "sitemap"
+      },
+      document.url
+    )
+  );
+
+  const scored = scoreAndRankCandidates(featureVectors, { maxCandidates: 50 });
+  const candidates: Candidate[] = [];
+  for (const s of scored) {
+    if (s.finalScore <= 0) continue;
+    candidates.push({
+      url: withoutHash(s.url),
+      score: Math.min(100, s.finalScore + 8),
+      matchedTargetHint: true,
+      candidateText: s.candidateText,
+      candidateHref: s.candidateHref,
+      candidateLocation: s.location,
+      candidateType: s.candidateType as CandidateType,
+      reason: `sitemap URL "${new URL(s.url).pathname}" matched a contact/booking hint`,
+      features: s.features,
+      depth: 1
+    });
   }
   return candidates;
 }
@@ -404,7 +450,7 @@ async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candi
     return {
       ...candidate,
       url: withoutHash(document.url),
-      score: candidate.score + signalScore,
+      score: Math.min(100, candidate.score + signalScore),
       reason: `${candidate.reason}; HTTP probe confirmed form or booking signals`
     };
   }));
@@ -475,13 +521,34 @@ async function getVisibleFormScore(container: Page | Frame) {
 }
 
 function commonPathCandidates(baseUrl: string): Candidate[] {
-  const base = new URL(baseUrl);
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return [];
+  }
 
-  return COMMON_TARGET_PATHS.map((targetPath) => ({
-    url: new URL(targetPath, base.origin).toString(),
-    score: scoreTargetHint(targetPath, targetPath),
-    reason: `common path ${targetPath}`,
-    matchedTargetHint: true
+  const featureVectors = COMMON_TARGET_PATHS.map((targetPath) => {
+    const resolvedUrl = new URL(targetPath, base.origin).toString();
+    return extractUniversalFeatureVector(
+      { url: resolvedUrl, text: targetPath, sourceType: "synthetic_fallback" },
+      baseUrl
+    );
+  });
+
+  const scored = scoreAndRankCandidates(featureVectors, { maxCandidates: COMMON_TARGET_PATHS.length });
+
+  return scored.map((s) => ({
+    url: withoutHash(s.url),
+    score: s.finalScore,
+    reason: `common path ${new URL(s.url).pathname}`,
+    matchedTargetHint: s.finalScore > 0,
+    candidateText: s.candidateText,
+    candidateHref: s.candidateHref,
+    candidateLocation: s.location,
+    candidateType: s.candidateType as CandidateType,
+    features: s.features,
+    depth: 1
   }));
 }
 
@@ -1354,24 +1421,66 @@ export async function discoverSubmissionTargets({
       ...(await collectNavigationCandidates(page, page.url()))
     ], maxNavigationLinks);
     const fallbackCandidates = mergeCandidates(commonPathCandidates(page.url()), maxFallbackPaths);
-    const candidates = mergeCandidates([...navigationCandidates, ...fallbackCandidates], maxNavigationLinks + maxFallbackPaths);
+    const maxPageVisits = 6;
+    const candidatesQueue: Candidate[] = mergeCandidates([...navigationCandidates, ...fallbackCandidates], maxNavigationLinks + maxFallbackPaths);
 
-    for (const candidate of candidates) {
+    let candidateIndex = 0;
+    while (candidateIndex < candidatesQueue.length) {
       if (Array.from(discovered.values()).some((target) => target.targetType === "contact_form")) break;
+      if (checkedUrls.length >= maxPageVisits) break;
+
+      const candidate = candidatesQueue[candidateIndex++];
       const candidateUrl = withoutHash(candidate.url);
       if (checkedUrls.includes(candidateUrl)) continue;
       checkedUrls.push(candidateUrl);
 
-      console.log(`[CONTACT-DISCOVERY] Trying candidate: ${candidate.url} (reason: ${candidate.reason})`);
+      const currentDepth = candidate.depth || 1;
+      console.log(`[CONTACT-DISCOVERY] Trying candidate (depth ${currentDepth}): ${candidate.url} (reason: ${candidate.reason})`);
+
+      const features = candidate.features || extractUniversalFeatureVector(
+        {
+          url: candidate.url,
+          text: candidate.candidateText || candidate.reason,
+          sourceType: candidate.candidateLocation === "body" ? "dom_anchor" : "dom_anchor"
+        },
+        normalizedWebsiteUrl
+      );
+      const mappedType = (candidate.candidateType?.toLowerCase() === "cta" ? "cta" : (candidate.candidateType || "anchor")) as any;
 
       const loaded = await page.goto(candidate.url, {
         waitUntil: "domcontentloaded",
         timeout: Math.min(timeoutMs, 7000)
       }).then(() => true).catch(() => false);
+
       if (!loaded) {
         console.log(`[CONTACT-DISCOVERY] Failed to load candidate: ${candidate.url}`);
+        recordDiscoveryFeedback(
+          normalizedWebsiteUrl,
+          {
+            url: candidate.url,
+            normalizedUrl: candidate.url,
+            candidateText: candidate.candidateText || "",
+            candidateHref: candidate.candidateHref || candidate.url,
+            location: candidate.candidateLocation || "body",
+            candidateType: mappedType,
+            features,
+            ruleScore: candidate.score,
+            mlScore: 0,
+            finalScore: candidate.score,
+            rank: checkedUrls.length,
+            reason: candidate.reason
+          },
+          false,
+          false,
+          false,
+          "none",
+          0,
+          "NAVIGATION_FAILED",
+          currentDepth
+        ).catch(() => undefined);
         continue;
       }
+
       await dismissCookieBanners(page).catch(() => undefined);
       // Bounded wait for dynamic client-side forms (HubSpot, Marketo, LeadConnector, SPA embeds)
       await page
@@ -1387,8 +1496,20 @@ export async function discoverSubmissionTargets({
       const formType = (formFound && candResult ? candResult.targetType : "none") as "contact_form" | "booking_widget" | "none";
       const fieldsDetected = formFound ? 1 : 0;
 
+      const pageTitle = await page.title().catch(() => "");
+      const isContactPage = formFound ||
+        /contact|get[- ]in[- ]touch|reach[- ]us|let'?s[- ]talk|book[- ]a[- ]call|schedule/i.test(page.url()) ||
+        /contact|get[- ]in[- ]touch|reach[- ]us|let'?s[- ]talk/i.test(pageTitle) ||
+        features.contactKeywordSignals > 0 ||
+        features.bookingKeywordSignals > 0;
+
+      const outcome = formFound
+        ? "FORM_FOUND"
+        : isContactPage
+          ? "CONTACT_PAGE_NO_FORM"
+          : "IRRELEVANT_PAGE";
+
       // Async record sanitized feedback for offline learning
-      const mappedType = (candidate.candidateType?.toLowerCase() === "cta" ? "cta" : (candidate.candidateType || "anchor")) as any;
       recordDiscoveryFeedback(
         normalizedWebsiteUrl,
         {
@@ -1398,7 +1519,7 @@ export async function discoverSubmissionTargets({
           candidateHref: candidate.candidateHref || candidate.url,
           location: candidate.candidateLocation || "body",
           candidateType: mappedType,
-          features: (candidate as any).features || ({} as any),
+          features,
           ruleScore: candidate.score,
           mlScore: 0,
           finalScore: candidate.score,
@@ -1406,10 +1527,12 @@ export async function discoverSubmissionTargets({
           reason: candidate.reason
         },
         true,
+        isContactPage,
         formFound,
         formType,
         fieldsDetected,
-        formFound ? "FORM_FOUND" : "NO_FORM"
+        outcome,
+        currentDepth
       ).catch(() => undefined);
 
       if (candResult && candResult.targetType !== "not_found") {
@@ -1417,6 +1540,28 @@ export async function discoverSubmissionTargets({
           `[CONTACT-DISCOVERY] FORM/WIDGET FOUND: targetType=${candResult.targetType} source=${candidate.candidateLocation || "other"} status=FOUND_ON_OTHER_PAGE url=${candResult.discoveredUrl}`
         );
         if (candResult.targetType === "contact_form") break;
+      } else if (
+        currentDepth < 2 &&
+        (features.consultationSignals > 0.7 || features.leadSignals > 0.7 || isContactPage) &&
+        checkedUrls.length < maxPageVisits
+      ) {
+        // Adaptive Depth-2 exploration: strong intent page without an inline form.
+        // Look for CTAs/links on this page that lead to the actual form or booking flow.
+        try {
+          const depth2Candidates = await collectNavigationCandidates(page, page.url(), 3);
+          for (const d2 of depth2Candidates) {
+            const d2Url = withoutHash(d2.url);
+            if (!checkedUrls.includes(d2Url) && !candidatesQueue.some((c) => withoutHash(c.url) === d2Url)) {
+              candidatesQueue.push({
+                ...d2,
+                depth: 2,
+                reason: `${d2.reason} (Depth-2 from ${candidate.url})`
+              });
+            }
+          }
+        } catch (err) {
+          console.warn("[CONTACT-DISCOVERY] Error during Depth-2 candidate collection:", err);
+        }
       }
     }
 

@@ -17,6 +17,20 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     score = Math.max(score, features.leadSignals * 85);
   }
 
+  // Broad Contextual Intent Categories
+  if (features.conversationIntent > 0) {
+    score = Math.max(score, features.conversationIntent * 80);
+  }
+  if (features.projectIntent > 0) {
+    score = Math.max(score, features.projectIntent * 80);
+  }
+  if (features.advisoryIntent > 0) {
+    score = Math.max(score, features.advisoryIntent * 80);
+  }
+  if (features.informationIntent > 0) {
+    score = Math.max(score, features.informationIntent * 70);
+  }
+
   // 2. URL Path Matches
   const hasPathMatch = features.urlTokens.some((token) =>
     [
@@ -32,11 +46,12 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
       "start",
       "started",
       "inquire",
-      "talk"
+      "talk",
+      "connect"
     ].includes(token)
   );
   if (hasPathMatch) {
-    score += 40;
+    score += 30;
   }
 
   const hasIntentOrPath =
@@ -44,6 +59,9 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     features.bookingKeywordSignals > 0 ||
     features.consultationSignals > 0 ||
     features.leadSignals > 0 ||
+    features.conversationIntent > 0 ||
+    features.projectIntent > 0 ||
+    features.advisoryIntent > 0 ||
     hasPathMatch;
 
   // 3. Location Boosts (only apply if the element has some intent or path signal)

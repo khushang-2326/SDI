@@ -6,18 +6,58 @@ function normalizeText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-export function extractFeatureVector(
-  raw: RawCandidate,
+// Contextual Semantic Patterns (Broad Intent Categories beyond exact keywords)
+const CONVERSATION_PATTERNS = [
+  /\b(start|begin|open)\s+(a\s+)?(conversation|dialogue|discussion)\b/i,
+  /\b(discuss|tell\s+us\s+about)\s+(your|a)\s+(project|goals?|needs?|vision|requirements?)\b/i,
+  /\b(speak|talk)\s+with\s+(our|a|an)\s+(team|specialist|expert|representative|advisor)\b/i,
+  /\b(connect\s+with\s+us|let's\s+connect)\b/i
+];
+
+const PROJECT_PATTERNS = [
+  /\b(build|create|launch|start|kickoff)\s+(something|together|your\s+project|with\s+us)\b/i,
+  /\b(start|begin)\s+your\s+(journey|transformation|growth)\b/i,
+  /\b(ready\s+to\s+grow|take\s+the\s+next\s+step|work\s+together)\b/i
+];
+
+const ADVISORY_PATTERNS = [
+  /\b(talk|speak|meet|consult)\s+(with\s+)?(an?\s+)?(advisor|consultant|strategist|attorney|lawyer|doctor|dentist|expert)\b/i,
+  /\b(complimentary|free)\s+(consultation|evaluation|assessment|review|audit)\b/i
+];
+
+const INFORMATION_PATTERNS = [
+  /\b(request|inquire|ask\s+for)\s+(more\s+)?(info|information|details|brochure|packet)\b/i,
+  /\b(find|discover)\s+the\s+right\s+solution\b/i,
+  /\b(how\s+can\s+we\s+help|get\s+help|need\s+assistance)\b/i
+];
+
+export function extractUniversalFeatureVector(
+  params: {
+    url: string;
+    text?: string;
+    ariaLabel?: string;
+    title?: string;
+    parentText?: string;
+    nearbyText?: string;
+    location?: RawCandidate["location"];
+    candidateType?: RawCandidate["candidateType"];
+    sourceType?: import("./types").CandidateSourceType;
+    hasOnClick?: boolean;
+    distanceFromTop?: number;
+    mobileMenuSource?: boolean;
+  },
   baseUrl: string,
-  pageContext: PageContext
+  pageContext?: PageContext
 ): CandidateFeatureVector {
   const base = new URL(baseUrl);
-  const targetUrl = new URL(raw.href, base);
+  const targetUrl = new URL(params.url, base);
 
-  const normalizedText = normalizeText(raw.text);
-  const normalizedAria = normalizeText(raw.ariaLabel);
-  const normalizedTitle = normalizeText(raw.title);
-  const normalizedParent = normalizeText(raw.parentText);
+  const rawText = params.text ?? "";
+  const normalizedText = normalizeText(rawText);
+  const normalizedAria = normalizeText(params.ariaLabel ?? "");
+  const normalizedTitle = normalizeText(params.title ?? "");
+  const normalizedParent = normalizeText(params.parentText ?? "");
+  const nearbyText = params.nearbyText ?? "";
 
   const pathSegments = targetUrl.pathname
     .split("/")
@@ -25,7 +65,7 @@ export function extractFeatureVector(
     .flatMap((s) => s.split(/[-_]/))
     .map((s) => s.toLowerCase());
 
-  const combinedSemantics = `${normalizedText} ${normalizedAria} ${normalizedTitle} ${pathSegments.join(" ")}`;
+  const combinedSemantics = `${normalizedText} ${normalizedAria} ${normalizedTitle} ${normalizedParent} ${pathSegments.join(" ")}`;
 
   // 1. Contact Intent Signal (0.0 to 1.0)
   let contactScore = 0.0;
@@ -101,31 +141,86 @@ export function extractFeatureVector(
     negativeScore = 0.4;
   }
 
-  const isHeader = raw.location === "header";
-  const isNav = raw.location === "nav";
-  const isFooter = raw.location === "footer";
-  const isMain = raw.location === "main CTA" || raw.location === "body";
-  const isHero = raw.location === "hero";
-  const isCTA = raw.candidateType === "cta" || raw.location === "main CTA" || raw.location === "hero";
-  const isButton = raw.candidateType === "button";
-  const isAnchor = raw.candidateType === "anchor";
+  // 6. Contextual Intent Categories (Normalized 0.0 to 1.0)
+  let conversationIntent = 0.0;
+  for (const pat of CONVERSATION_PATTERNS) {
+    if (pat.test(combinedSemantics)) {
+      conversationIntent = 0.85;
+      break;
+    }
+  }
+
+  let projectIntent = 0.0;
+  for (const pat of PROJECT_PATTERNS) {
+    if (pat.test(combinedSemantics)) {
+      projectIntent = 0.80;
+      break;
+    }
+  }
+
+  let advisoryIntent = 0.0;
+  for (const pat of ADVISORY_PATTERNS) {
+    if (pat.test(combinedSemantics)) {
+      advisoryIntent = 0.85;
+      break;
+    }
+  }
+
+  let informationIntent = 0.0;
+  for (const pat of INFORMATION_PATTERNS) {
+    if (pat.test(combinedSemantics)) {
+      informationIntent = 0.75;
+      break;
+    }
+  }
+
+  // 7. Structural Context Alignment
+  let headingContextScore = 0.0;
+  if (pageContext?.contactKeywordsInHeadings?.length) {
+    const headingText = pageContext.contactKeywordsInHeadings.join(" ").toLowerCase();
+    if (headingText.includes("contact") || headingText.includes("touch") || headingText.includes("help")) {
+      headingContextScore = 0.8;
+    }
+  }
+
+  let pageTitleContextScore = 0.0;
+  if (pageContext?.pageTitle) {
+    const titleLower = pageContext.pageTitle.toLowerCase();
+    if (titleLower.includes("contact") || titleLower.includes("consultation") || titleLower.includes("quote")) {
+      pageTitleContextScore = 0.8;
+    }
+  }
+
+  const location = params.location ?? "body";
+  const elementType = params.candidateType ?? "anchor";
+  const sourceType = params.sourceType ?? "dom_anchor";
+
+  const isHeader = location === "header";
+  const isNav = location === "nav";
+  const isFooter = location === "footer";
+  const isMain = location === "main CTA" || location === "body";
+  const isHero = location === "hero";
+  const isCTA = elementType === "cta" || location === "main CTA" || location === "hero";
+  const isButton = elementType === "button";
+  const isAnchor = elementType === "anchor";
 
   return {
-    url: raw.href,
+    url: params.url,
     normalizedUrl: targetUrl.origin + targetUrl.pathname,
     urlTokens: pathSegments,
     urlPathDepth: targetUrl.pathname.split("/").filter(Boolean).length,
     sameDomain: targetUrl.origin === base.origin,
+    sourceType,
 
-    rawText: raw.text,
+    rawText,
     normalizedText,
     ariaLabel: normalizedAria,
     titleAttr: normalizedTitle,
     parentText: normalizedParent,
-    nearbyText: raw.nearbyText,
+    nearbyText,
 
-    elementType: raw.candidateType,
-    location: raw.location,
+    elementType,
+    location,
     isHeader,
     isNav,
     isFooter,
@@ -134,11 +229,11 @@ export function extractFeatureVector(
     isCTA,
     isButton,
     isAnchor,
-    hasOnClick: raw.hasOnClick,
-    hasAriaLabel: Boolean(raw.ariaLabel),
-    hasTitle: Boolean(raw.title),
-    distanceFromTop: raw.distanceFromTop,
-    mobileMenuSource: raw.mobileMenuSource,
+    hasOnClick: Boolean(params.hasOnClick),
+    hasAriaLabel: Boolean(params.ariaLabel),
+    hasTitle: Boolean(params.title),
+    distanceFromTop: params.distanceFromTop ?? 0.5,
+    mobileMenuSource: Boolean(params.mobileMenuSource),
 
     contactKeywordSignals: contactScore,
     bookingKeywordSignals: bookingScore,
@@ -146,9 +241,41 @@ export function extractFeatureVector(
     leadSignals: leadScore,
     negativeSignals: negativeScore,
 
-    pageTitle: pageContext.pageTitle,
-    pageHasExistingForm: pageContext.hasExistingForm,
-    pageHasPhoneOrEmailOnly: pageContext.hasPhoneOrEmailOnly,
-    pageHeadingKeywords: pageContext.contactKeywordsInHeadings
+    conversationIntent,
+    projectIntent,
+    advisoryIntent,
+    informationIntent,
+
+    headingContextScore,
+    pageTitleContextScore,
+    pageTitle: pageContext?.pageTitle ?? "",
+    pageHasExistingForm: Boolean(pageContext?.hasExistingForm),
+    pageHasPhoneOrEmailOnly: Boolean(pageContext?.hasPhoneOrEmailOnly),
+    pageHeadingKeywords: pageContext?.contactKeywordsInHeadings ?? []
   };
+}
+
+export function extractFeatureVector(
+  raw: RawCandidate,
+  baseUrl: string,
+  pageContext: PageContext
+): CandidateFeatureVector {
+  return extractUniversalFeatureVector(
+    {
+      url: raw.href,
+      text: raw.text,
+      ariaLabel: raw.ariaLabel,
+      title: raw.title,
+      parentText: raw.parentText,
+      nearbyText: raw.nearbyText,
+      location: raw.location,
+      candidateType: raw.candidateType,
+      sourceType: raw.candidateType === "button" ? "dom_button" : "dom_anchor",
+      hasOnClick: raw.hasOnClick,
+      distanceFromTop: raw.distanceFromTop,
+      mobileMenuSource: raw.mobileMenuSource
+    },
+    baseUrl,
+    pageContext
+  );
 }

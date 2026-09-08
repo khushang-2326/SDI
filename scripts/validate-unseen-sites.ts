@@ -50,7 +50,7 @@ async function main() {
       const durationMs = Date.now() - start;
 
       const topTarget = res.targets[0] || null;
-      const contactPageFound = Boolean(topTarget && topTarget.targetType !== "not_found");
+      const contactPageFound = Boolean(topTarget);
 
       results.push({
         url: siteUrl,

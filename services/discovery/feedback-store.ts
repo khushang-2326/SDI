@@ -8,10 +8,12 @@ export async function recordDiscoveryFeedback(
   sourceUrl: string,
   candidate: ScoredCandidate,
   visited: boolean,
-  formFound: boolean,
+  isContactPage: boolean,
+  hasUsableForm: boolean,
   formType: "contact_form" | "booking_widget" | "none",
   fieldsDetectedCount: number,
-  outcome: "FORM_FOUND" | "NO_FORM" | "NAVIGATION_TIMEOUT" | "BLOCKED" | "NOT_VISITED"
+  outcome: "FORM_FOUND" | "CONTACT_PAGE_NO_FORM" | "IRRELEVANT_PAGE" | "NAVIGATION_FAILED" | "NOT_VISITED",
+  depth: number = 1
 ): Promise<void> {
   try {
     const record: DiscoveryFeedbackRecord = {
@@ -19,14 +21,18 @@ export async function recordDiscoveryFeedback(
       timestamp: new Date().toISOString(),
       sourceUrl,
       candidateUrl: candidate.url,
-      candidateText: candidate.candidateText.slice(0, 100),
+      candidateText: (candidate.candidateText || "").slice(0, 100),
+      sourceType: candidate.features?.sourceType || "dom_anchor",
+      location: candidate.location || "body",
       features: candidate.features,
       ruleScore: candidate.ruleScore,
       mlScore: candidate.mlScore,
       finalScore: candidate.finalScore,
       rank: candidate.rank,
       visited,
-      formFound,
+      depth,
+      isContactPage,
+      hasUsableForm,
       formType,
       fieldsDetectedCount,
       outcome

@@ -19,6 +19,15 @@ export type CandidateType =
   | "url_pattern"
   | "js_navigation";
 
+export type CandidateSourceType =
+  | "dom_anchor"
+  | "dom_button"
+  | "dom_onclick"
+  | "http_probe"
+  | "sitemap"
+  | "synthetic_fallback"
+  | "depth_2_cta";
+
 export interface CandidateFeatureVector {
   // Identity & URL Structure
   url: string;
@@ -26,6 +35,7 @@ export interface CandidateFeatureVector {
   urlTokens: string[];
   urlPathDepth: number;
   sameDomain: boolean;
+  sourceType: CandidateSourceType;
 
   // Text Content & Semantics
   rawText: string;
@@ -59,7 +69,15 @@ export interface CandidateFeatureVector {
   leadSignals: number;           // "get started", "start project", "work with us", "grow"
   negativeSignals: number;       // "privacy", "terms", "login", "blog", "careers", "mailto:"
 
-  // Page Context Signals
+  // Contextual Semantic Categories (Beyond explicit keywords)
+  conversationIntent: number;    // "start a conversation", "discuss your project", "tell us about", "speak with"
+  projectIntent: number;         // "build something", "start your project", "start your journey", "take the next step"
+  advisoryIntent: number;        // "talk with an advisor", "speak with an expert", "consult our team"
+  informationIntent: number;     // "request information", "inquire", "find the right solution"
+
+  // Structural & Surrounding Context
+  headingContextScore: number;   // Alignment with nearest H1/H2/H3 text
+  pageTitleContextScore: number; // Alignment with page title/meta description
   pageTitle: string;
   pageHasExistingForm: boolean;
   pageHasPhoneOrEmailOnly: boolean;
@@ -81,6 +99,20 @@ export interface ScoredCandidate {
   reason: string;
 }
 
+export interface ModelMetrics {
+  sampleCount: number;
+  trainAccuracy: number;
+  valAccuracy: number;
+  precisionContact: number;
+  recallContact: number;
+  f1Contact: number;
+  precisionForm: number;
+  recallForm: number;
+  f1Form: number;
+  confusionMatrixContact: { tp: number; fp: number; tn: number; fn: number };
+  confusionMatrixForm: { tp: number; fp: number; tn: number; fn: number };
+}
+
 export interface ModelWeights {
   version: string;
   featureNames: string[];
@@ -93,7 +125,7 @@ export interface ModelWeights {
   metadata?: {
     trainedAt: string;
     sampleCount: number;
-    accuracy: number;
+    metrics?: ModelMetrics;
   };
 }
 
@@ -103,16 +135,26 @@ export interface DiscoveryFeedbackRecord {
   sourceUrl: string;
   candidateUrl: string;
   candidateText: string;
+  sourceType: CandidateSourceType;
+  location: CandidateLocation;
+  
+  // 100% complete feature vector - NEVER empty
   features: CandidateFeatureVector;
+  
+  // Scoring metadata at decision time
   ruleScore: number;
   mlScore: number;
   finalScore: number;
   rank: number;
   visited: boolean;
-  formFound: boolean;
+  depth: number; // 1 or 2
+  
+  // Ground-Truth Labels (Observed Reality)
+  isContactPage: boolean;     // Semantic destination evidence
+  hasUsableForm: boolean;     // Confirmed by existing form/widget detector
   formType: "contact_form" | "booking_widget" | "none";
   fieldsDetectedCount: number;
-  outcome: "FORM_FOUND" | "NO_FORM" | "NAVIGATION_TIMEOUT" | "BLOCKED" | "NOT_VISITED";
+  outcome: "FORM_FOUND" | "CONTACT_PAGE_NO_FORM" | "IRRELEVANT_PAGE" | "NAVIGATION_FAILED" | "NOT_VISITED";
 }
 
 export interface DiscoveryConfig {
@@ -121,4 +163,6 @@ export interface DiscoveryConfig {
   maxCandidates: number;      // default: 6
   timeoutMs: number;          // default: 30000
   minConfidence: number;      // default: 30
+  maxDepth: number;           // default: 2
+  maxPageVisits: number;      // default: 6
 }

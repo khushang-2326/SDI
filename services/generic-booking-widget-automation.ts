@@ -610,17 +610,16 @@ export async function submitGenericBookingWidget({
     await dismissCookieBanners(page).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => undefined);
     await dismissCookieBanners(page).catch(() => undefined);
-    // Third-party schedulers frequently hydrate after the document has loaded.
-    // Wait up to 25 seconds for a usable calendar rather than treating a slow
-    // widget as missing after a fixed four-second delay.
-    const widgetDeadline = Date.now() + Math.min(timeoutMs, 25000);
+    // Third-party schedulers hydrate after document load.
+    // Use a bounded polling window (8 seconds) rather than stalling the worker.
+    const widgetDeadline = Date.now() + Math.min(timeoutMs, 8000);
     let widgetFound = false;
     while (Date.now() < widgetDeadline) {
       if (await scrollToBookingWidget(page)) {
         widgetFound = true;
         break;
       }
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(600);
     }
 
     if (!widgetFound) {

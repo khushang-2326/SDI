@@ -44,7 +44,14 @@ export function extractUniversalFeatureVector(
     sourceType?: import("./types").CandidateSourceType;
     hasOnClick?: boolean;
     distanceFromTop?: number;
+    domDepth?: number;
+    isRightmostNav?: boolean;
+    isProminentButton?: boolean;
+    isModalTrigger?: boolean;
+    modalTargetSelector?: string;
     mobileMenuSource?: boolean;
+    recognizedProvider?: string;
+    navigationDepth?: number;
   },
   baseUrl: string,
   pageContext?: PageContext
@@ -67,77 +74,62 @@ export function extractUniversalFeatureVector(
 
   const combinedSemantics = `${normalizedText} ${normalizedAria} ${normalizedTitle} ${normalizedParent} ${pathSegments.join(" ")}`;
 
-  // 1. Contact Intent Signal (0.0 to 1.0)
+  // 1. Multi-Lingual Contact Intent Signal (0.0 to 1.0)
   let contactScore = 0.0;
-  if (normalizedText === "contact" || /\bcontact\b/i.test(normalizedText)) contactScore = 1.0;
-  else if (combinedSemantics.includes("contact us") || combinedSemantics.includes("contact-us")) contactScore = 0.95;
-  else if (combinedSemantics.includes("get in touch") || combinedSemantics.includes("reach us")) contactScore = 0.90;
-  else if (combinedSemantics.includes("let's talk") || combinedSemantics.includes("lets talk") || combinedSemantics.includes("talk to us")) contactScore = 0.85;
-  else if (combinedSemantics.includes("connect") || combinedSemantics.includes("inquire")) contactScore = 0.70;
-  else if (pathSegments.includes("contact") || pathSegments.includes("reach")) contactScore = 0.80;
+  const contactStems = /\b(contact|kontakt|contacto|contatt|contat|touch|reach|fale|anfrage|nachricht|devis|presupuesto|preventivo|offerte|parlons|hablemos|inquir|inquiry)\b/i;
+  if (normalizedText === "contact" || contactStems.test(normalizedText)) {
+    contactScore = 1.0;
+  } else if (contactStems.test(combinedSemantics)) {
+    contactScore = 0.92;
+  } else if (pathSegments.some((p) => contactStems.test(p))) {
+    contactScore = 0.88;
+  }
 
-  // 2. Booking Intent Signal (0.0 to 1.0)
+  // 2. Multi-Lingual Booking Intent Signal (0.0 to 1.0)
   let bookingScore = 0.0;
+  const bookingStems = /\b(book|schedule|appointment|calendar|meeting|termin|rendez-vous|cita|appuntamento|agenda|prenota|reserva|boeken)\b/i;
   if (
     targetUrl.hostname.includes("calendly.com") ||
     targetUrl.hostname.includes("meetings.hubspot.com") ||
     targetUrl.hostname.includes("pipedrive.com")
   ) {
     bookingScore = 1.0;
-  } else if (combinedSemantics.includes("book a call") || combinedSemantics.includes("schedule a call")) {
-    bookingScore = 1.0;
-  } else if (combinedSemantics.includes("book call") || combinedSemantics.includes("schedule call")) {
+  } else if (bookingStems.test(normalizedText)) {
     bookingScore = 0.95;
-  } else if (combinedSemantics.includes("book a meeting") || combinedSemantics.includes("schedule a meeting")) {
+  } else if (bookingStems.test(combinedSemantics)) {
     bookingScore = 0.90;
-  } else if (combinedSemantics.includes("book now") || combinedSemantics.includes("schedule now")) {
+  } else if (pathSegments.some((p) => bookingStems.test(p))) {
     bookingScore = 0.85;
-  } else if (/\b(schedule|book|calendar|appointment|meeting)\b/i.test(combinedSemantics)) {
-    bookingScore = 0.85;
-  } else if (pathSegments.includes("schedule") || pathSegments.includes("book") || pathSegments.includes("appointment")) {
-    bookingScore = 0.80;
   }
 
-  // 3. Consultation / Quote Intent Signal (0.0 to 1.0)
+  // 3. Multi-Lingual Consultation & Quote Signal (0.0 to 1.0)
   let consultationScore = 0.0;
-  if (combinedSemantics.includes("request a quote") || combinedSemantics.includes("get a quote")) consultationScore = 0.95;
-  else if (combinedSemantics.includes("free consultation") || combinedSemantics.includes("request consultation")) consultationScore = 0.90;
-  else if (combinedSemantics.includes("consultation") || combinedSemantics.includes("quote")) consultationScore = 0.85;
-  else if (combinedSemantics.includes("estimate") || combinedSemantics.includes("request demo") || combinedSemantics.includes("book demo")) consultationScore = 0.80;
-  else if (pathSegments.includes("quote") || pathSegments.includes("consultation")) consultationScore = 0.80;
+  const quoteStems = /\b(consultation|consult|quote|estimate|proposal|budget|tarif|kostenvoranschlag|devis|presupuesto|preventivo|orçamento|evaluation|audit)\b/i;
+  if (quoteStems.test(normalizedText)) {
+    consultationScore = 0.95;
+  } else if (quoteStems.test(combinedSemantics)) {
+    consultationScore = 0.88;
+  } else if (pathSegments.some((p) => quoteStems.test(p))) {
+    consultationScore = 0.85;
+  }
 
-  // 4. Lead Intent Signal (0.0 to 1.0)
+  // 4. Multi-Lingual Lead & Project Start Signal (0.0 to 1.0)
   let leadScore = 0.0;
-  if (combinedSemantics.includes("get started") || combinedSemantics.includes("start a project") || combinedSemantics.includes("start something")) leadScore = 0.85;
-  else if (combinedSemantics.includes("work with us") || combinedSemantics.includes("let's work together") || combinedSemantics.includes("let's start something")) leadScore = 0.85;
-  else if (combinedSemantics.includes("talk to sales") || combinedSemantics.includes("speak with an expert") || combinedSemantics.includes("talk to an expert")) leadScore = 0.80;
-  else if (combinedSemantics.includes("ready to grow") || combinedSemantics.includes("tell us about your project") || combinedSemantics.includes("start a conversation")) leadScore = 0.75;
-  else if (pathSegments.includes("start") || pathSegments.includes("inquire")) leadScore = 0.70;
+  const startStems = /\b(start|begin|get started|work with|let'?s talk|start project|demarrer|iniciar|progetto|vamos|grow|scale|launch)\b/i;
+  if (startStems.test(normalizedText)) {
+    leadScore = 0.90;
+  } else if (startStems.test(combinedSemantics)) {
+    leadScore = 0.80;
+  }
 
-  // 5. Negative Signal (0.0 to 1.0)
+  // 5. Negative Intent Signals
   let negativeScore = 0.0;
-  if (
-    combinedSemantics.includes("privacy") ||
-    combinedSemantics.includes("terms") ||
-    combinedSemantics.includes("cookie") ||
-    combinedSemantics.includes("login") ||
-    combinedSemantics.includes("cart") ||
-    combinedSemantics.includes("checkout")
-  ) {
+  const negativeStems = /\b(privacy|terms|cookie|cookies|login|signin|sign-in|cart|checkout|panier|warenkorb|carrello|anmelden|connexion|acceder|careers|jobs|blog|articles?)\b/i;
+  if (negativeStems.test(normalizedText)) {
     negativeScore = 1.0;
-  } else if (
-    combinedSemantics.includes("blog") ||
-    combinedSemantics.includes("news") ||
-    combinedSemantics.includes("article") ||
-    combinedSemantics.includes("career") ||
-    combinedSemantics.includes("job")
-  ) {
-    negativeScore = 0.7;
-  } else if (
-    combinedSemantics.includes("about") ||
-    combinedSemantics.includes("team") ||
-    combinedSemantics.includes("pricing")
-  ) {
+  } else if (pathSegments.some((p) => negativeStems.test(p))) {
+    negativeScore = 0.85;
+  } else if (negativeStems.test(combinedSemantics)) {
     negativeScore = 0.4;
   }
 
@@ -178,16 +170,16 @@ export function extractUniversalFeatureVector(
   let headingContextScore = 0.0;
   if (pageContext?.contactKeywordsInHeadings?.length) {
     const headingText = pageContext.contactKeywordsInHeadings.join(" ").toLowerCase();
-    if (headingText.includes("contact") || headingText.includes("touch") || headingText.includes("help")) {
-      headingContextScore = 0.8;
+    if (contactStems.test(headingText) || bookingStems.test(headingText) || quoteStems.test(headingText)) {
+      headingContextScore = 0.85;
     }
   }
 
   let pageTitleContextScore = 0.0;
   if (pageContext?.pageTitle) {
     const titleLower = pageContext.pageTitle.toLowerCase();
-    if (titleLower.includes("contact") || titleLower.includes("consultation") || titleLower.includes("quote")) {
-      pageTitleContextScore = 0.8;
+    if (contactStems.test(titleLower) || bookingStems.test(titleLower) || quoteStems.test(titleLower)) {
+      pageTitleContextScore = 0.85;
     }
   }
 
@@ -201,7 +193,7 @@ export function extractUniversalFeatureVector(
   const isMain = location === "main CTA" || location === "body";
   const isHero = location === "hero";
   const isCTA = elementType === "cta" || location === "main CTA" || location === "hero";
-  const isButton = elementType === "button";
+  const isButton = elementType === "button" || elementType === "modal_trigger";
   const isAnchor = elementType === "anchor";
 
   return {
@@ -211,6 +203,8 @@ export function extractUniversalFeatureVector(
     urlPathDepth: targetUrl.pathname.split("/").filter(Boolean).length,
     sameDomain: targetUrl.origin === base.origin,
     sourceType,
+
+    detectedLanguage: pageContext?.detectedLanguage ?? "unknown",
 
     rawText,
     normalizedText,
@@ -229,11 +223,16 @@ export function extractUniversalFeatureVector(
     isCTA,
     isButton,
     isAnchor,
+    isRightmostNav: Boolean(params.isRightmostNav),
+    isProminentButton: Boolean(params.isProminentButton),
     hasOnClick: Boolean(params.hasOnClick),
     hasAriaLabel: Boolean(params.ariaLabel),
     hasTitle: Boolean(params.title),
     distanceFromTop: params.distanceFromTop ?? 0.5,
+    domDepth: params.domDepth ?? 3,
     mobileMenuSource: Boolean(params.mobileMenuSource),
+    isModalTrigger: Boolean(params.isModalTrigger),
+    modalTargetSelector: params.modalTargetSelector,
 
     contactKeywordSignals: contactScore,
     bookingKeywordSignals: bookingScore,
@@ -251,7 +250,10 @@ export function extractUniversalFeatureVector(
     pageTitle: pageContext?.pageTitle ?? "",
     pageHasExistingForm: Boolean(pageContext?.hasExistingForm),
     pageHasPhoneOrEmailOnly: Boolean(pageContext?.hasPhoneOrEmailOnly),
-    pageHeadingKeywords: pageContext?.contactKeywordsInHeadings ?? []
+    pageHeadingKeywords: pageContext?.contactKeywordsInHeadings ?? [],
+
+    recognizedProvider: params.recognizedProvider,
+    navigationDepth: params.navigationDepth ?? 1
   };
 }
 
@@ -270,9 +272,18 @@ export function extractFeatureVector(
       nearbyText: raw.nearbyText,
       location: raw.location,
       candidateType: raw.candidateType,
-      sourceType: raw.candidateType === "button" ? "dom_button" : "dom_anchor",
+      sourceType: raw.isModalTrigger
+        ? "modal_trigger"
+        : raw.candidateType === "button"
+          ? "dom_button"
+          : "dom_anchor",
       hasOnClick: raw.hasOnClick,
       distanceFromTop: raw.distanceFromTop,
+      domDepth: raw.domDepth,
+      isRightmostNav: raw.isRightmostNav,
+      isProminentButton: raw.isProminentButton,
+      isModalTrigger: raw.isModalTrigger,
+      modalTargetSelector: raw.modalTargetSelector,
       mobileMenuSource: raw.mobileMenuSource
     },
     baseUrl,

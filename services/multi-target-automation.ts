@@ -53,6 +53,16 @@ function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
   }
 }
 
+function withAttemptTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} exceeded attempt budget limit of ${Math.round(timeoutMs / 1000)}s.`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+
 function failedResult(target: DiscoveredSubmissionTarget, error: unknown): SubmitContactFormResult {
   const isProxy = isProxyAuthenticationFailure(error);
   const rawMessage = isProxy
@@ -121,7 +131,7 @@ async function executeTarget({
         liveSubmit,
         browserContext,
         skipPersist: true,
-        timeoutMs
+        timeoutMs: Math.min(timeoutMs, 10_000)
       });
     }
     return contactResult;
@@ -160,7 +170,7 @@ async function executeTarget({
         browserContext,
         skipPersist: true,
         userId,
-        timeoutMs
+        timeoutMs: Math.min(timeoutMs, 10000)
       });
       if (contactFallback.status === "success" || contactFallback.status === "dry_run_ready_to_book") {
         return contactFallback;
@@ -246,23 +256,74 @@ export async function runMultiTargetAutomation({
       const startedAt = new Date();
       await callbacks.onAttemptStarted?.(target);
       let result: SubmitContactFormResult;
+      let recoveryContext: BrowserContext | null = null;
+      let activeContext = browserContext;
+
       try {
-        result = await executeTarget({
-          target,
-          leadData,
-          bookingPreferences,
-          liveSubmit,
-          browserContext,
-          userId,
-          timeoutMs: attemptBudgetMs
-        });
+        result = await withAttemptTimeout(
+          executeTarget({
+            target,
+            leadData,
+            bookingPreferences,
+            liveSubmit,
+            browserContext: activeContext,
+            userId,
+            timeoutMs: attemptBudgetMs
+          }),
+          attemptBudgetMs + 1000,
+          `Target ${target.url}`
+        );
       } catch (error) {
-        if (isProxyAuthenticationFailure(error)) {
-          encounteredProxyFailure = true;
+        const errStr = error instanceof Error ? error.message : String(error);
+        const isClosedError = /target page, context or browser has been closed|target closed|browser has been closed/i.test(errStr);
+        const remainingForRecovery = deadlineAt !== undefined ? deadlineAt - Date.now() : timeoutMs;
+
+        if (isClosedError && !recoveryContext && remainingForRecovery > 10000) {
+          console.warn(`[BROWSER-RECOVERY] Browser context closed unexpectedly on ${target.url}. Re-acquiring context and retrying stage once...`);
+          try {
+            recoveryContext = await acquireContext({
+              headless: headless ?? true,
+              userId,
+              disableProxy: isDirectRetry,
+              startupTimeoutMs: 10000
+            });
+            activeContext = recoveryContext;
+            result = await withAttemptTimeout(
+              executeTarget({
+                target,
+                leadData,
+                bookingPreferences,
+                liveSubmit,
+                browserContext: activeContext,
+                userId,
+                timeoutMs: Math.min(attemptBudgetMs, remainingForRecovery - 3000)
+              }),
+              attemptBudgetMs + 1000,
+              `Recovered Target ${target.url}`
+            );
+            console.log(`[BROWSER-RECOVERY] Successfully recovered ${target.url} after browser context crash.`);
+          } catch (recoveryErr) {
+            console.warn(`[BROWSER-RECOVERY] Recovery attempt failed on ${target.url}:`, recoveryErr);
+            result = failedResult(target, recoveryErr);
+          }
+        } else {
+          if (isProxyAuthenticationFailure(error)) {
+            encounteredProxyFailure = true;
+          }
+          result = failedResult(target, error);
         }
-        result = failedResult(target, error);
+      } finally {
+        if (recoveryContext) {
+          await releaseContext(recoveryContext).catch(() => undefined);
+        }
       }
+
+      const errLower = (result.errorMessage || "").toLowerCase();
       if (isProxyAuthenticationFailure(result.errorMessage)) {
+        encounteredProxyFailure = true;
+      } else if (!isDirectRetry && (errLower.includes("403") || errLower.includes("forbidden")) && !errLower.includes("turnstile") && !errLower.includes("challenge") && !errLower.includes("robot challenge")) {
+        // Legitimate datacenter proxy IP block: server rejected proxy, allow direct connection retry
+        console.log(`[PROXY-FALLBACK] Legitimate HTTP 403 detected on ${target.url}. Triggering direct connection fallback...`);
         encounteredProxyFailure = true;
       }
       if (result.websiteUrl) {

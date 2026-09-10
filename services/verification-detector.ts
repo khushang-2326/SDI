@@ -128,7 +128,7 @@ export async function detectUnsupportedVerification(
     }
   }
 
-  // 4. Other interactive challenges: Arkose Labs, GeeTest, Friendly Captcha, MTCaptcha
+  // 4. Other interactive challenges: Arkose Labs, GeeTest, Friendly Captcha, MTCaptcha, AWS WAF, DataDome, PerimeterX
   const otherChallenges = [
     {
       name: "Arkose Labs FunCaptcha",
@@ -145,6 +145,18 @@ export async function detectUnsupportedVerification(
     {
       name: "MTCaptcha",
       selector: "iframe[src*='mtcaptcha']:visible, [class*='mtcaptcha' i]:visible"
+    },
+    {
+      name: "AWS WAF Captcha",
+      selector: "iframe[src*='awswaf'], [class*='aws-waf' i], #aws-waf-captcha"
+    },
+    {
+      name: "DataDome",
+      selector: "iframe[src*='datadome'], [class*='datadome' i]"
+    },
+    {
+      name: "PerimeterX / HUMAN",
+      selector: "iframe[src*='perimeterx'], iframe[src*='px-cdn'], #px-captcha"
     }
   ];
 
@@ -179,9 +191,9 @@ export async function detectUnsupportedVerification(
 
   // Generic human-verification or bot-detection challenge screens
   const humanVerificationChallenge =
-    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|robot challenge|checking (?:your browser|the site connection security)|automated traffic|unusual traffic|bot (?:detection|verification|protection)|access denied.*bot|security check to proceed/i.test(
+    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|robot challenge|checking (?:your browser|the site connection security)|automated traffic|unusual traffic|bot (?:detection|verification|protection)|access denied.*bot|security check to proceed|datadome|perimeterx|aws waf/i.test(
       pageText
-    ) || /robot challenge screen/i.test(title);
+    ) || /robot challenge screen|just a moment|attention required|security check/i.test(title);
 
   if (humanVerificationChallenge) {
     const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, "Human Verification Challenge");

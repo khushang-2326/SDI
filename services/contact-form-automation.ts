@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type Locator, type Page, type BrowserContext } from "playwright";
+import { chromium, type Browser, type Locator, type Page, type Frame, type BrowserContext } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
 import { prisma } from "@/lib/prisma";
 import {
@@ -185,7 +185,7 @@ async function safelyFillField(locator: Locator, value: string) {
   if (!(await locator.isVisible().catch(() => false))) return false;
   if (!(await locator.isEnabled().catch(() => false))) return false;
 
-  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
 
   if (tagName === "select") {
     await locator.selectOption({ label: value }).catch(async () => {
@@ -196,8 +196,17 @@ async function safelyFillField(locator: Locator, value: string) {
 
   await locator.scrollIntoViewIfNeeded().catch(() => undefined);
   await locator.click({ timeout: 2000 }).catch(() => undefined);
-  await locator.fill("", { timeout: 3000 }).catch(() => undefined);
-  await locator.pressSequentially(value, { delay: 45, timeout: 10000 });
+  await locator.fill("", { timeout: 2000 }).catch(() => undefined);
+
+  if (value.length > 80 || tagName === "textarea") {
+    await locator.fill(value, { timeout: 4000 }).catch(async () => {
+      await locator.pressSequentially(value.slice(0, 120), { delay: 10, timeout: 3000 }).catch(() => undefined);
+    });
+  } else {
+    await locator.pressSequentially(value, { delay: 15, timeout: 4000 }).catch(async () => {
+      await locator.fill(value, { timeout: 2000 }).catch(() => undefined);
+    });
+  }
   return true;
 }
 
@@ -533,7 +542,20 @@ async function scorePrimaryForm(form: Locator) {
   }).catch(() => Number.NEGATIVE_INFINITY);
 }
 
+export async function unhideHiddenFormContainers(page: Page | Frame) {
+  await page.evaluate(() => {
+    const selector = "form, [class*='gform_wrapper'], [class*='forminator'], [id*='gform_wrapper'], [class*='wpcf7'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form']";
+    document.querySelectorAll(selector).forEach((el) => {
+      const htmlEl = el as HTMLElement;
+      if (htmlEl && (htmlEl.style?.display === "none" || window.getComputedStyle(htmlEl).display === "none")) {
+        htmlEl.style.display = "block";
+      }
+    });
+  }).catch(() => undefined);
+}
+
 async function findPrimaryForm(page: Page) {
+  await unhideHiddenFormContainers(page);
   const candidates: Locator[] = [];
   const addVisibleForms = async (forms: Locator) => {
     const count = await forms.count().catch(() => 0);
@@ -565,49 +587,76 @@ async function fillAllVisibleForms(page: Page, leadData: LeadData) {
 }
 
 export async function findSubmitButton(page: Page, leadData?: LeadData, targetForm?: Locator | null) {
+  await unhideHiddenFormContainers(page);
   const selectors = [
+    // Standard submit elements
     "button[type='submit']",
     "input[type='submit']",
+    "input[type='image']",
+    // Framework-specific submit controls
     ".elementor-button[type='submit']",
     "button.elementor-button",
     ".elementor-field-type-submit button",
     "button.hs-button",
     "input.hs-button",
-    "input[value*='Demo' i]",
-    "input[value*='SEND' i]",
-    "input[value='SEND']",
     ".wpcf7-submit",
+    "input.wpcf7-submit",
+    "button.wpcf7-submit",
+    ".gform_button",
+    "input.gform_button",
+    "button.gform_button",
+    "input[id*='gform_submit' i]",
+    "button[id*='gform_submit' i]",
+    ".gform_footer input[type='submit']",
+    ".gform_footer button",
+    ".forminator-button-submit",
+    "button.forminator-button",
+    ".forminator-custom-form button",
+    "button.wpforms-submit",
+    "input.wpforms-submit",
+    ".wpforms-submit-container button",
+    "button.ff-btn-submit",
+    "button.fluentform-submit-btn",
+    "input.ninja-forms-field[type='submit']",
+    ".nf-field-element input[type='button']",
+    ".nf-field-element input[type='submit']",
+    "a[href*='submit-form' i]",
+    ".elButton",
     "form button:not([type='button'])",
     "form input[type='submit']",
     "button[id*='submit' i]",
     "button[class*='submit' i]",
     "input[id*='submit' i]",
+    // Semantic signal texts on button
     "button:has-text('Submit')",
+    "button:has-text('Submit Form')",
     "button:has-text('Send')",
     "button:has-text('Send Message')",
     "button:has-text('Send Enquiry')",
     "button:has-text('Submit Message')",
     "button:has-text('Get Started')",
-    "button:has-text('Get started')",
     "button:has-text('Start Now')",
+    "button:has-text('Request Quote')",
+    "button:has-text('Request Consultation')",
+    "button:has-text('Request A Quote')",
+    "button:has-text('Request Demo')",
+    "button:has-text('Request A Demo')",
+    "button:has-text('Book A Call')",
+    "button:has-text('Book Now')",
+    "button:has-text('Schedule')",
+    "button:has-text('Schedule Consultation')",
+    "button:has-text('Schedule A Call')",
     "button:has-text('Contact')",
     "button:has-text('Contact Us')",
     "button:has-text('Get in touch')",
     "button:has-text('Free Strategy Session')",
-    "button:has-text('Book A Call')",
-    "button:has-text('Request Demo')",
-    "button:has-text('Request A Demo')",
-    "button:has-text('Request A Quote')",
-    "button:has-text('Get a Demo')",
-    "button:has-text('Get A Demo')",
     "button:has-text('Subscribe')",
     "button:has-text('SUBSCRIBE')",
-    "button:has-text('Schedule Consultation')",
-    "button:has-text('Schedule A Call')",
     "button:has-text('Nachricht')",
     "button:has-text('Enviar')",
     "button:has-text('Absenden')",
     "button:has-text('Envoyer')",
+    // Semantic input values
     "input[value*='Submit' i]",
     "input[value*='Send' i]",
     "input[value*='Enquiry' i]",
@@ -617,20 +666,35 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "input[value*='Subscribe' i]",
     "input[value*='Enviar' i]",
     "input[value*='Absenden' i]",
+    "input[value*='Demo' i]",
+    // Semantic role=button
     "[role='button']:has-text('Submit')",
+    "[role='button']:has-text('Submit Form')",
     "[role='button']:has-text('Send')",
     "[role='button']:has-text('Send Message')",
     "[role='button']:has-text('Get Started')",
+    "[role='button']:has-text('Request Quote')",
+    "[role='button']:has-text('Request Consultation')",
+    "[role='button']:has-text('Book Now')",
+    "[role='button']:has-text('Schedule')",
     "[role='button']:has-text('Enviar')",
-    "button:has-text('Let\'s get started')",
-    "input[value*='started' i]",
+    // Button-like div / span / a associated with form
     "a:has-text('Submit')",
+    "a:has-text('Submit Form')",
     "a:has-text('Send')",
     "a:has-text('Send Message')",
     "a:has-text('Get in touch')",
+    "a:has-text('Request Quote')",
     "div[role='button']:has-text('Submit')",
     "div[role='button']:has-text('Send')",
-    "[class*='form' i] a",
+    "div[class*='btn']:has-text('Submit')",
+    "div[class*='btn']:has-text('Send')",
+    "div[class*='button']:has-text('Submit')",
+    "div[class*='button']:has-text('Send')",
+    "span[class*='btn']:has-text('Submit')",
+    "span[class*='button']:has-text('Submit')",
+    "[class*='form' i] a[class*='btn']",
+    "[class*='form' i] a[class*='button']",
     "[class*='form' i] [role='button']"
   ];
 
@@ -642,6 +706,37 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
       for (let index = 0; index < count; index++) {
         const locator = locators.nth(index);
         if (await locator.isVisible().catch(() => false)) return locator;
+
+        // If not immediately visible, scroll into view and re-check
+        await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+        if (await locator.isVisible().catch(() => false)) return locator;
+
+        // Zero-height / Theme-styled Gravity / Forminator recovery:
+        // If attached, enabled, and matches designated submit traits inside form
+        const isAttachedSubmit = await locator.evaluate((el) => {
+          const tag = el.tagName.toLowerCase();
+          const type = (el as HTMLInputElement).type?.toLowerCase();
+          const cls = (el.className || "").toLowerCase();
+          const id = (el.id || "").toLowerCase();
+          const isSubmitType = type === "submit" || type === "image";
+          const isSubmitClass = cls.includes("submit") || cls.includes("gform_button") || cls.includes("forminator-button") || cls.includes("wpforms-submit");
+          const isSubmitId = id.includes("submit") || id.includes("gform_submit");
+          const isBtn = tag === "button" || tag === "input";
+          const isDisabled = (el as HTMLButtonElement).disabled === true || el.getAttribute("aria-disabled") === "true";
+          return isBtn && (isSubmitType || isSubmitClass || isSubmitId) && !isDisabled;
+        }).catch(() => false);
+        if (isAttachedSubmit) return locator;
+      }
+    }
+
+    // Check if primaryForm has an id, look for external submit button associated via HTML5 form="id"
+    const formId = await primaryForm.getAttribute("id").catch(() => null);
+    if (formId) {
+      const externalLocators = page.locator(`button[form='${formId}'], input[form='${formId}'][type='submit']`);
+      const extCount = await externalLocators.count().catch(() => 0);
+      for (let i = 0; i < extCount; i++) {
+        const extLoc = externalLocators.nth(i);
+        if (await extLoc.isVisible().catch(() => false)) return extLoc;
       }
     }
   }
@@ -672,6 +767,23 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
       if (await loc.isVisible().catch(() => false)) {
         return loc;
       }
+      // If not immediately visible, scroll into view and re-check
+      await loc.scrollIntoViewIfNeeded().catch(() => undefined);
+      if (await loc.isVisible().catch(() => false)) return loc;
+
+      const isAttachedSubmit = await loc.evaluate((el) => {
+        const tag = el.tagName.toLowerCase();
+        const type = (el as HTMLInputElement).type?.toLowerCase();
+        const cls = (el.className || "").toLowerCase();
+        const id = (el.id || "").toLowerCase();
+        const isSubmitType = type === "submit" || type === "image";
+        const isSubmitClass = cls.includes("submit") || cls.includes("gform_button") || cls.includes("forminator-button") || cls.includes("wpforms-submit");
+        const isSubmitId = id.includes("submit") || id.includes("gform_submit");
+        const isBtn = tag === "button" || tag === "input";
+        const isDisabled = (el as HTMLButtonElement).disabled === true || el.getAttribute("aria-disabled") === "true";
+        return isBtn && (isSubmitType || isSubmitClass || isSubmitId) && !isDisabled;
+      }).catch(() => false);
+      if (isAttachedSubmit) return loc;
     }
   }
 
@@ -1234,7 +1346,16 @@ export async function submitContactForm({
       throw new Error(postFillVerification.reason);
     }
 
-    const submitButton = await findSubmitButton(page, leadData, fillResult.primaryForm);
+    let submitButton = await findSubmitButton(page, leadData, fillResult.primaryForm);
+
+    // Bounded hydration polling window (up to 2.5s) for asynchronously mounted/enabled submit buttons
+    if (!submitButton) {
+      for (let poll = 0; poll < 5; poll++) {
+        await page.waitForTimeout(500);
+        submitButton = await findSubmitButton(page, leadData, fillResult.primaryForm);
+        if (submitButton) break;
+      }
+    }
 
     if (!submitButton) {
       const bookingWidget = await detectBookingWidget(page);

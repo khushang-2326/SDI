@@ -3,7 +3,7 @@ import { CandidateFeatureVector } from "./types";
 export function calculateRuleScore(features: CandidateFeatureVector): number {
   let score = 0;
 
-  // 1. Semantic Intent Signals
+  // 1. Semantic Intent Signals (Multi-Lingual Stems)
   if (features.contactKeywordSignals > 0) {
     score = Math.max(score, features.contactKeywordSignals * 100);
   }
@@ -11,7 +11,7 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     score = Math.max(score, features.bookingKeywordSignals * 95);
   }
   if (features.consultationSignals > 0) {
-    score = Math.max(score, features.consultationSignals * 85);
+    score = Math.max(score, features.consultationSignals * 88);
   }
   if (features.leadSignals > 0) {
     score = Math.max(score, features.leadSignals * 85);
@@ -31,24 +31,16 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     score = Math.max(score, features.informationIntent * 70);
   }
 
-  // 2. URL Path Matches
+  // 2. Universal Multi-Lingual URL Path Matches
+  const universalPathTokens = [
+    "contact", "contactus", "touch", "reach", "book", "schedule", "meeting",
+    "consultation", "quote", "start", "started", "inquire", "talk", "connect",
+    "kontakt", "contacto", "contatt", "contat", "fale", "devis", "anfrage",
+    "presupuesto", "preventivo", "termin", "cita", "rendez", "boeken", "offerte"
+  ];
+
   const hasPathMatch = features.urlTokens.some((token) =>
-    [
-      "contact",
-      "contactus",
-      "touch",
-      "reach",
-      "book",
-      "schedule",
-      "meeting",
-      "consultation",
-      "quote",
-      "start",
-      "started",
-      "inquire",
-      "talk",
-      "connect"
-    ].includes(token)
+    universalPathTokens.some((target) => token.includes(target))
   );
   if (hasPathMatch) {
     score += 30;
@@ -64,22 +56,35 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     features.advisoryIntent > 0 ||
     hasPathMatch;
 
-  // 3. Location Boosts (only apply if the element has some intent or path signal)
+  // 3. Structural Topology Boosts (Language-Agnostic)
   if (hasIntentOrPath) {
     if (features.isHeader || features.isNav) {
-      score += 25;
+      score += 30;
+      // Rightmost item in nav/header is predominantly the contact/lead CTA
+      if (features.isRightmostNav) {
+        score += 15;
+      }
     } else if (features.isFooter) {
-      score += 25;
-    } else if (features.isHero || features.isCTA) {
       score += 20;
+    } else if (features.isHero || features.isCTA) {
+      score += 25;
     } else if (features.mobileMenuSource) {
+      score += 20;
+    } else {
+      score += 10;
+    }
+
+    if (features.isProminentButton) {
+      score += 10;
+    }
+
+    if (features.isModalTrigger) {
       score += 20;
     }
   }
 
   // 4. Element Type Boosts
   if (features.isButton || features.hasOnClick) {
-    // If button has strong intent, give it confidence
     if (score >= 60) score += 10;
   }
 
@@ -88,12 +93,17 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     score += 10;
   }
 
-  // 6. Penalties
-  if (features.negativeSignals > 0) {
-    score -= features.negativeSignals * 60;
+  // 6. Provider Signature Boost (Direct Hubspot, Calendly, Typeform links)
+  if (features.recognizedProvider && score >= 40) {
+    score += 25;
   }
 
-  // If in body and no intent signals, penalize heavily
+  // 7. Penalties
+  if (features.negativeSignals > 0) {
+    score -= features.negativeSignals * 65;
+  }
+
+  // If in body without intent signals or path match, heavily penalize
   if (
     features.location === "body" &&
     features.contactKeywordSignals === 0 &&

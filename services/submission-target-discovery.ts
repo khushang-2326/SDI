@@ -22,6 +22,7 @@ import { extractRawCandidates } from "./discovery/candidate-extractor";
 import { extractFeatureVector, extractUniversalFeatureVector } from "./discovery/feature-extractor";
 import { scoreAndRankCandidates } from "./discovery/hybrid-ranker";
 import { recordDiscoveryFeedback } from "./discovery/feedback-store";
+import { unhideHiddenFormContainers } from "./contact-form-automation";
 import type { CandidateFeatureVector, CandidateLocation, CandidateType } from "./discovery/types";
 export type { CandidateLocation, CandidateType };
 
@@ -106,8 +107,38 @@ const NAVIGATION_LINK_SELECTOR = [
   "a[href*='inquire']"
 ].join(", ");
 
-const INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR = "button, [role='button'], summary";
-const MAX_INTERACTIVE_DISCOVERY_CLICKS = 3;
+const INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR = [
+  "button",
+  "[role='button']",
+  "[role='tab']",
+  "summary",
+  ".accordion-header",
+  ".tab-header",
+  ".nav-tabs button",
+  "[data-toggle='tab']",
+  "[data-bs-toggle='tab']",
+  "[data-modal-target]",
+  "[data-target*='modal']",
+  "[data-bs-toggle='modal']",
+  "[aria-haspopup='dialog']",
+  "[data-drawer]",
+  "[data-drawer-trigger]",
+  "[data-toggle='drawer']",
+  "[data-toggle='offcanvas']",
+  "[data-bs-toggle='offcanvas']",
+  "[data-target*='drawer']",
+  "[data-target*='offcanvas']",
+  "[data-bs-target*='drawer']",
+  "[data-bs-target*='offcanvas']",
+  "[aria-controls*='drawer']",
+  "[aria-controls*='offcanvas']",
+  "[aria-controls*='modal']",
+  ".menu-toggle",
+  ".mobile-menu-btn",
+  "button.navbar-toggler",
+  ".hamburger"
+].join(", ");
+const MAX_INTERACTIVE_DISCOVERY_CLICKS = 2;
 
 const SKIPPED_PATH_PATTERN =
   /\/(privacy|terms|cookies?|blog|news|articles?|category|tags?|login|sign-?in|sign-?up|cart|checkout)(\/|$)/i;
@@ -133,9 +164,14 @@ function ensureUrl(value: string) {
 }
 
 function withoutHash(value: string) {
-  const url = new URL(value);
-  url.hash = "";
-  return url.toString();
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    const hashIdx = value.indexOf("#");
+    return hashIdx >= 0 ? value.slice(0, hashIdx) : value;
+  }
 }
 
 function isCalendlyEventUrl(url: URL) {
@@ -187,15 +223,42 @@ async function blockHeavyAssets(page: Page) {
     const request = route.request();
     const resourceType = request.resourceType();
     const url = request.url().toLowerCase();
-    const shouldBlock =
-      ["image", "font", "media"].includes(resourceType) ||
+
+    // Preserve necessary CRM, form, and widget resources
+    if (
+      url.includes("hubspot") ||
+      url.includes("hsforms") ||
+      url.includes("calendly") ||
+      url.includes("leadconnector") ||
+      url.includes("typeform") ||
+      url.includes("pardot") ||
+      url.includes("marketo") ||
+      url.includes("wp-json") ||
+      url.includes("admin-ajax")
+    ) {
+      await route.continue().catch(() => undefined);
+      return;
+    }
+
+    const isHeavyMedia = ["image", "font", "media"].includes(resourceType);
+    const isTrackerOrAd =
       url.includes("google-analytics") ||
       url.includes("googletagmanager") ||
-      url.includes("facebook") ||
+      url.includes("googleadservices") ||
       url.includes("doubleclick") ||
-      url.includes("hotjar");
+      url.includes("facebook.net") ||
+      url.includes("connect.facebook") ||
+      url.includes("hotjar") ||
+      url.includes("clarity.ms") ||
+      url.includes("crazyegg") ||
+      url.includes("linkedin.com/tag") ||
+      url.includes("snapchat.com") ||
+      url.includes("tiktok.com") ||
+      url.includes("intercom.io") ||
+      url.includes("drift.com") ||
+      url.includes("fullstory");
 
-    if (shouldBlock) {
+    if (isHeavyMedia || isTrackerOrAd) {
       await route.abort().catch(() => undefined);
       return;
     }
@@ -431,7 +494,7 @@ function extractSitemapCandidates(document: HttpDocument): Candidate[] {
   return candidates;
 }
 
-async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candidate[]> {
+export async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candidate[]> {
   const deadline = Date.now() + HTTP_DISCOVERY_BUDGET_MS;
   const homepage = await fetchHttpDocument(websiteUrl, deadline);
   if (!homepage) return [];
@@ -490,54 +553,238 @@ async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candi
 
 async function getVisibleFormScore(container: Page | Frame) {
   try {
-    const inputCount = await container.locator("input, textarea").count().catch(() => 0);
+    const inputCount = await container.locator("input, textarea, select").count().catch(() => 0);
     if (inputCount === 0) return 0;
 
     return await container
-      .locator("form, input:not([type=hidden]), textarea, button[type='submit'], input[type='submit'], button")
+      .locator("form, [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], input:not([type=hidden]), textarea, select, button[type='submit'], input[type='submit'], button")
       .evaluateAll((elements) => {
-        const sliced = elements.slice(0, 50);
+        const sliced = elements.slice(0, 100);
         let hasEmail = false;
+        let hasPhone = false;
         let hasMessage = false;
         let hasName = false;
         let hasSubmit = false;
         let hasFormSubmit = false;
+        let hasProgression = false;
+        let hasLeadIntentCta = false;
+        let hasExplicitNewsletterCta = false;
+        let isMultiStepStructure = false;
+        let knownContainerMatched = false;
+        let isNegativeForm = false;
+        let interactiveInputsCount = 0;
 
-        for (const element of sliced) {
-          const style = window.getComputedStyle(element);
-          if (style.display === "none" || style.visibility === "hidden") continue;
-          const rect = element.getBoundingClientRect();
-          if (rect.height <= 0) continue;
-
+        // 1. Check form elements and framework containers
+        for (const element of elements) {
           const tag = element.tagName.toLowerCase();
-          if (tag === "textarea") {
-            hasMessage = true;
-          } else if (tag === "input") {
-            const input = element as HTMLInputElement;
+          const formId = (element.id || "").toLowerCase();
+          const formClass = (element.className || "").toString().toLowerCase();
+          const formAction = ((element as any).action || "").toString().toLowerCase();
+          const role = (element.getAttribute("role") || "").toLowerCase();
+
+          // Multi-step container detection
+          if (
+            formClass.includes("multistep") ||
+            formClass.includes("multi-step") ||
+            formClass.includes("step-form") ||
+            formId.includes("multistep") ||
+            formId.includes("step-") ||
+            element.querySelector("[class*='step'], [data-step], [class*='progress']") !== null
+          ) {
+            isMultiStepStructure = true;
+          }
+
+          // Detect negative forms: pure search, newsletter-only, login, comment
+          if (
+            formId.includes("search") ||
+            formClass.includes("search-form") ||
+            formClass.includes("is-search-form") ||
+            formAction.includes("/search") ||
+            role === "search" ||
+            formId.includes("newsletter") ||
+            formClass.includes("newsletter") ||
+            formId.includes("login") ||
+            formClass.includes("login") ||
+            formAction.includes("login") ||
+            formId.includes("store-locator") ||
+            formClass.includes("store-locator")
+          ) {
+            // Only mark negative if there is no textarea or message field
+            const hasTextarea = element.querySelector("textarea") !== null;
+            if (!hasTextarea) {
+              const allInputs = element.querySelectorAll("input:not([type=hidden]):not([type=search])");
+              if (allInputs.length <= 1) {
+                isNegativeForm = true;
+              }
+            }
+          }
+
+          if (
+            tag === "form" ||
+            formClass.includes("form") ||
+            formId.includes("form") ||
+            formClass.includes("w-form") ||
+            element.hasAttribute("data-wf-page") ||
+            element.hasAttribute("data-netlify")
+          ) {
+            const isMarketo = formId.includes("mktoform") || formClass.includes("mktoform");
+            const isWpcf7 = formClass.includes("wpcf7") || formAction.includes("wpcf7");
+            const isHubspot = formClass.includes("hs-form") || formAction.includes("hubspot") || formId.includes("hs-form");
+            const isGravity = formClass.includes("gform") || formId.includes("gform");
+            const isWpforms = formClass.includes("wpforms") || formId.includes("wpforms");
+            const isNinja = formClass.includes("ninja-form") || formId.includes("ninja-form") || formClass.includes("nf-form");
+            const isFluent = formClass.includes("fluentform") || formId.includes("fluentform");
+            const isFormidable = formClass.includes("frm_form") || formId.includes("frm_form");
+            const isElementor = formClass.includes("elementor-form");
+            const isWebflow = formClass.includes("w-form") || element.hasAttribute("data-name");
+            const isWix = formClass.includes("wix-form") || element.getAttribute("data-testid") === "form-root";
+            const isSquarespace = formClass.includes("sqs-block-form") || formClass.includes("form-wrapper");
+            const isActiveCampaign = formClass.includes("_form") || formId.includes("_form_");
+            const isFormspreeNetlify = formAction.includes("formspree.io") || element.hasAttribute("data-netlify") || formAction.includes("formkeep");
+            const isZoho = formAction.includes("zoho") || formClass.includes("zohofrm");
+
             if (
-              input.type === "email" ||
-              /email/i.test(input.name ?? "") ||
-              /email/i.test(input.placeholder ?? "") ||
-              /email/i.test(input.getAttribute("aria-label") ?? "")
+              isMarketo || isWpcf7 || isHubspot || isGravity || isWpforms || isNinja ||
+              isFluent || isFormidable || isElementor || isWebflow || isWix ||
+              isSquarespace || isActiveCampaign || isFormspreeNetlify || isZoho
             ) {
-              hasEmail = true;
-            }
-            if (/name/i.test(`${input.name ?? ""} ${input.placeholder ?? ""}`)) {
-              hasName = true;
-            }
-            if (input.type === "submit" || /submit|send|contact|request|quote/i.test(input.value ?? "")) {
-              hasSubmit = true;
-              hasFormSubmit = true;
-            }
-          } else if (tag === "button") {
-            if (element.getAttribute("type") === "submit") hasFormSubmit = true;
-            if (/submit|send|contact|request|quote/i.test(element.textContent ?? "")) {
-              hasSubmit = true;
+              const childInputs = element.querySelectorAll("input:not([type=hidden]):not([type=search]), textarea, select");
+              if (childInputs.length >= 2 || (childInputs.length >= 1 && isMultiStepStructure)) {
+                knownContainerMatched = true;
+                break;
+              }
             }
           }
         }
 
-        return Number(hasEmail) * 35 + Number(hasMessage) * 25 + Number(hasName) * 15 + Number(hasSubmit || hasFormSubmit) * 25;
+        // 2. Evaluate individual inputs and controls
+        for (const element of sliced) {
+          const tag = element.tagName.toLowerCase();
+          if (tag === "form") continue;
+
+          const style = window.getComputedStyle(element);
+          const isVisible = style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+          const rect = element.getBoundingClientRect();
+          const hasDimensions = rect.height > 0 || rect.width > 0;
+
+          // Allow inputs in known framework containers or forms even if initially zero-height due to accordion/animation
+          if (!knownContainerMatched && (!isVisible && !hasDimensions)) continue;
+
+          if (tag === "textarea") {
+            hasMessage = true;
+            interactiveInputsCount++;
+          } else if (tag === "select") {
+            interactiveInputsCount++;
+          } else if (tag === "input") {
+            const input = element as HTMLInputElement;
+            const inputType = (input.type || "text").toLowerCase();
+            // Strictly exclude hidden and search inputs
+            if (["hidden", "search"].includes(inputType)) continue;
+
+            const name = (input.name || "").toLowerCase();
+            const id = (input.id || "").toLowerCase();
+            const placeholder = (input.placeholder || "").toLowerCase();
+            const aria = (input.getAttribute("aria-label") || "").toLowerCase();
+            const attrDescriptor = `${name} ${id} ${placeholder} ${aria}`;
+
+            // Exclude standalone store/location selectors or internal search
+            if (attrDescriptor.includes("search") || id.includes("search") || name === "s" || name === "q") {
+              continue;
+            }
+
+            interactiveInputsCount++;
+
+            if (inputType === "email" || /email|courriel|correo|e-mail/i.test(attrDescriptor)) {
+              hasEmail = true;
+            }
+            if (inputType === "tel" || /phone|tel|mobile|cell|téléphone|telefono|telefon/i.test(attrDescriptor)) {
+              hasPhone = true;
+            }
+            if (/name|first|last|fname|lname|nom|prenom|nombre|apellidos|nachname|vorname|cognome/i.test(attrDescriptor)) {
+              hasName = true;
+            }
+            if (/message|nachricht|mensaje|comment|inquiry|demande|consulta|messaggio/i.test(attrDescriptor)) {
+              hasMessage = true;
+            }
+            if (
+              inputType === "submit" ||
+              /submit|send|contact|request|quote|get in touch|let'?s talk|enviar|envoyer|soumettre|absenden|senden|invia|demander|pedir|solicitar|devis|anfrage/i.test(input.value ?? "")
+            ) {
+              hasSubmit = true;
+              hasFormSubmit = true;
+            }
+          } else if (tag === "button") {
+            const btnType = (element.getAttribute("type") || "").toLowerCase();
+            const btnText = (element.textContent || "").toLowerCase().trim();
+            if (btnType === "submit") hasFormSubmit = true;
+            if (
+              /submit|send|contact|request|quote|get in touch|let'?s talk|book|enviar|envoyer|soumettre|absenden|senden|invia|demander|pedir|solicitar|devis|anfrage/i.test(btnText)
+            ) {
+              hasSubmit = true;
+            }
+
+            // High-precision lead context vs explicit newsletter
+            if (/get in touch|request a quote|request quote|request demo|book consultation|start project|work with us|contact sales|talk to us|contact us|let'?s talk/i.test(btnText)) {
+              hasLeadIntentCta = true;
+            }
+            if (/subscribe|newsletter|boletín|abonnieren/i.test(btnText)) {
+              hasExplicitNewsletterCta = true;
+            }
+
+            // Multi-step progression recognition
+            if (
+              /^(next|continue|proceed|volgende|siguiente|suivant|weiter|continua|próximo|forward)(\s|$|>|→)/i.test(btnText) ||
+              element.hasAttribute("data-next-step") ||
+              element.getAttribute("aria-label")?.toLowerCase().includes("next step")
+            ) {
+              hasProgression = true;
+            }
+          }
+        }
+
+        // Rule 2 & 5: Negative form filtering with lead intent preservation
+        // If a form is marked negative (e.g. newsletter) BUT has explicit lead intent CTA or textarea/phone, do not penalize
+        if (isNegativeForm && !hasMessage && !hasPhone && !hasLeadIntentCta) {
+          return 10; // Penalize pure standalone search/newsletter form
+        }
+
+        // Multi-signal weighted scoring
+        let score = 0;
+        if (hasEmail) score += 35;
+        if (hasMessage) score += 25;
+        if (hasName) score += 15;
+        if (hasPhone) score += 15;
+        if (hasSubmit || hasFormSubmit) score += 20;
+
+        // Rule 1: Multi-Step Lead Forms (e.g. 1 visible text/name/email input + progression button + form container/CTA)
+        if (hasProgression && interactiveInputsCount >= 1 && (hasName || hasEmail || hasMessage || knownContainerMatched || isMultiStepStructure)) {
+          score = Math.max(score, 65);
+        }
+
+        // Rule 2: Lightweight lead capture forms with verified lead intent (e.g. Email + Lead CTA, not pure newsletter)
+        if (hasEmail && (hasLeadIntentCta || (hasSubmit && !hasExplicitNewsletterCta && !isNegativeForm))) {
+          score = Math.max(score, 70);
+        }
+        if (hasPhone && (hasSubmit || hasFormSubmit) && interactiveInputsCount >= 2) {
+          score = Math.max(score, 70);
+        }
+
+        // Rule 3 & 4: General structural lead forms (at least 3 interactive inputs or at least 2 with email/name)
+        if (interactiveInputsCount >= 3 && (hasSubmit || hasFormSubmit || hasEmail)) {
+          score = Math.max(score, 65);
+        }
+        if (interactiveInputsCount >= 2 && hasEmail) {
+          score = Math.max(score, 60);
+        }
+        if (interactiveInputsCount >= 2 && hasName && (hasSubmit || hasFormSubmit) && (hasPhone || hasMessage)) {
+          score = Math.max(score, 65);
+        }
+
+        if (knownContainerMatched && (interactiveInputsCount >= 2 || (interactiveInputsCount >= 1 && hasProgression))) {
+          return Math.max(score, 75);
+        }
+
+        return score;
       })
       .catch(() => 0);
   } catch {
@@ -612,8 +859,9 @@ async function detectContactTarget(
   websiteUrl: string,
   candidateReason: string
 ): Promise<DiscoverSubmissionTargetResult | null> {
+  await unhideHiddenFormContainers(page).catch(() => {});
   const formScore = await getVisibleFormScore(page);
-  if (formScore >= 60) {
+  if (formScore >= 55) {
     return {
       websiteUrl,
       discoveredUrl: page.url(),
@@ -633,11 +881,12 @@ async function detectContactTarget(
   }).slice(0, 5);
 
   for (const frame of relevantFrames) {
+    await unhideHiddenFormContainers(frame).catch(() => {});
     const frameFormScore = await Promise.race([
       getVisibleFormScore(frame),
       new Promise<number>((r) => setTimeout(() => r(0), 1000))
     ]);
-    if (frameFormScore < 60) continue;
+    if (frameFormScore < 55) continue;
     return {
       websiteUrl,
       discoveredUrl: frame.url(),
@@ -753,16 +1002,19 @@ async function detectTargetOnPage(
     };
   }
 
-  // 1. Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito)
+  // 1. Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito, Pardot, ActiveCampaign, Zoho, Formspree)
   const iframeTarget = await page
     .locator("iframe")
     .evaluateAll((iframes) => {
       for (const iframe of iframes) {
-        const src = iframe.getAttribute("src") ?? "";
-        if (/hsforms\.com|hubspot|dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed/i.test(src)) {
+        const src = (iframe.getAttribute("src") ?? "").toLowerCase();
+        if (
+          /hsforms\.com|hubspot|dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed|activehosted\.com|forms\.zohopublic\.com|zoho\.com\/forms|formkeep\.com|formspree\.io|123formbuilder\.com|wufoo\.com|docs\.google\.com\/forms|getform\.io|formsite\.com|paperform\.co|tally\.so|formsubmit\.co/i.test(src) ||
+          /pardot\.com|\/go\.[^/]+\/l\/|\/l\/\d+\/\d+/i.test(src)
+        ) {
           return { url: src, type: "contact_form" as const };
         }
-        if (/leadconnectorhq\.com\/widget\/booking|calendly\.com|calendar\.google\.com\/calendar\/appointments|tidycal\.com|acuityscheduling\.com/i.test(src)) {
+        if (/leadconnectorhq\.com\/widget\/booking|calendly\.com|calendar\.google\.com\/calendar\/appointments|tidycal\.com|acuityscheduling\.com|simplybook\.me|youcanbook\.me|calendarhero\.com|appointlet\.com|setmore\.com|cal\.com/i.test(src)) {
           return { url: src, type: "booking_widget" as const };
         }
         if (/leadconnectorhq\.com\/widget\/form/i.test(src)) {
@@ -903,15 +1155,48 @@ async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
   const triggers = await page
     .locator(INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR)
     .evaluateAll((elements) => {
-      const candidates: { index: number }[] = [];
+      const candidates: { index: number; score: number }[] = [];
+      const INTENT_REGEX = /\b(menu|navigation|contact|contact us|get in touch|let'?s talk|start a project|book a tour|free estimate|get a quote|request quote|estimate|talk to sales|start here|next step|next|get started|request a quote|inquire|inquiry|consultation|kontakt|contacto|contatt|devis|anfrage|presupuesto|rendez-vous)\b|☰/i;
+      const NON_LEAD_REGEX = /\b(cart|bag|basket|mini-cart|checkout|search|suche|buscar|recherche|filter|sort|cookie|privacy|gdpr|consent|wishlist|account|login|sign-?in|password|currency|language|newsletter)\b/i;
+
       for (let i = 0; i < elements.length; i++) {
         const control = elements[i] as HTMLElement;
         const text = [
           control.textContent,
           control.getAttribute("aria-label"),
-          control.getAttribute("title")
+          control.getAttribute("title"),
+          control.getAttribute("data-modal-target"),
+          control.getAttribute("data-target"),
+          control.getAttribute("data-bs-target"),
+          control.getAttribute("aria-controls"),
+          control.getAttribute("data-drawer"),
+          control.getAttribute("data-drawer-trigger"),
+          control.getAttribute("id"),
+          control.className
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-        if (!/\b(menu|navigation|contact|contact us|get in touch|let'?s talk|start a project)\b|☰/i.test(text)) {
+
+        // Critical Safety: Exclude non-lead utility triggers (cart, search, cookie dialogs, etc.)
+        if (NON_LEAD_REGEX.test(text)) {
+          continue;
+        }
+
+        const isModalOrDrawer =
+          control.hasAttribute("data-modal-target") ||
+          control.hasAttribute("data-drawer") ||
+          control.hasAttribute("data-drawer-trigger") ||
+          control.getAttribute("data-bs-toggle") === "modal" ||
+          control.getAttribute("data-toggle") === "modal" ||
+          control.getAttribute("data-bs-toggle") === "offcanvas" ||
+          control.getAttribute("data-toggle") === "offcanvas" ||
+          control.getAttribute("data-toggle") === "drawer" ||
+          /drawer|offcanvas|modal/i.test(control.getAttribute("aria-controls") || "") ||
+          /drawer|offcanvas|modal/i.test(control.getAttribute("data-target") || "") ||
+          /drawer|offcanvas|modal/i.test(control.getAttribute("data-bs-target") || "") ||
+          control.getAttribute("aria-haspopup") === "dialog";
+
+        const hasContactIntent = INTENT_REGEX.test(text);
+
+        if (!hasContactIntent && !isModalOrDrawer) {
           continue;
         }
         if (control.matches("button[type='submit'], input[type='submit']")) continue;
@@ -920,10 +1205,19 @@ async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
         if (style.display === "none" || style.visibility === "hidden") continue;
         const rect = control.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) continue;
-        candidates.push({ index: i });
-        if (candidates.length >= MAX_INTERACTIVE_DISCOVERY_CLICKS) break;
+
+        let score = 0;
+        if (hasContactIntent) score += 50;
+        if (/\b(contact|talk|touch|quote|book|devis|kontakt|contacto)\b/i.test(text)) score += 30;
+        if (/\b(menu|navigation|hamburger)\b/i.test(text) || control.className.includes("menu") || control.className.includes("nav")) score += 20;
+        if (isModalOrDrawer) score += 10;
+
+        candidates.push({ index: i, score });
       }
-      return candidates;
+
+      // Sort by trigger relevance score descending and take up to MAX_INTERACTIVE_DISCOVERY_CLICKS (2)
+      candidates.sort((a, b) => b.score - a.score);
+      return candidates.slice(0, MAX_INTERACTIVE_DISCOVERY_CLICKS);
     })
     .catch(() => []);
 
@@ -931,11 +1225,14 @@ async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
   for (const trigger of triggers) {
     await page.locator(INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR)
       .nth(trigger.index)
-      .click({ timeout: 1_500 })
+      .click({ timeout: 1_200 })
       .then(() => { clicked += 1; })
       .catch(() => undefined);
   }
-  if (clicked > 0) await page.waitForTimeout(250);
+  if (clicked > 0) {
+    await page.waitForTimeout(400);
+    await unhideHiddenFormContainers(page).catch(() => {});
+  }
   return clicked;
 }
 
@@ -944,9 +1241,24 @@ async function detectTargetWithLazyScroll(
   url: string,
   candidateReason: string
 ): Promise<DiscoverSubmissionTargetResult | null> {
+  // STEP 1: Inspect DOM immediately
   const initialResult = await detectTargetOnPage(page, url, candidateReason);
   if (initialResult) return initialResult;
 
+  // STEP 2: Wait a short bounded period for dynamic client-side form rendering (HubSpot, Marketo, React, Vue, CF7, Webflow, Acuity, LeadConnector)
+  const dynamicFormAttached = await page
+    .locator("form, [class*='wpcf7'], [class*='wpforms'], [class*='hs-form'], [class*='gform'], [class*='ninja-form'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form'], iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='pardot'], iframe[src*='acuity'], iframe[src*='leadconnector']")
+    .first()
+    .waitFor({ state: "attached", timeout: 2000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (dynamicFormAttached) {
+    const postAttachResult = await detectTargetOnPage(page, url, `${candidateReason}; dynamic form attached`);
+    if (postAttachResult) return postAttachResult;
+  }
+
+  // STEP 3: Reveal explicit interactive contact/menu triggers (accordions, tabs, contact buttons)
   const revealedControls = await revealInteractiveDiscoveryTargets(page);
   if (revealedControls > 0) {
     const revealedResult = await detectTargetOnPage(
@@ -957,14 +1269,51 @@ async function detectTargetWithLazyScroll(
     if (revealedResult) return revealedResult;
   }
 
-  // Progressive 3-pass scan down the page to trigger lazy-loaded forms
-  for (let pass = 1; pass <= 3; pass++) {
-    await page.mouse.wheel(0, 1200).catch(() => undefined);
-    await page.waitForTimeout(300);
-    const scrolledResult = await detectTargetOnPage(page, url, `${candidateReason}; detected during lazy-page scan ${pass}/3`);
-    if (scrolledResult) return scrolledResult;
+  // STEP 4: Controlled scroll trigger (scroll down to trigger IntersectionObserver / lazy-loaded widgets)
+  await page.evaluate(() => {
+    window.scrollBy({ top: 800, behavior: "instant" });
+  }).catch(() => undefined);
+  await page.waitForTimeout(350);
+
+  // Allow lower-fold dynamic scripts to attach after scroll
+  await page
+    .locator("form, iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='acuity'], iframe[src*='leadconnector'], iframe[src*='calendly'], [id*='mktoForm'], [class*='hs-form']")
+    .first()
+    .waitFor({ state: "attached", timeout: 1500 })
+    .catch(() => undefined);
+
+  const scrolledResult = await detectTargetOnPage(page, url, `${candidateReason}; detected after viewport scroll`);
+  if (scrolledResult) return scrolledResult;
+
+  // STEP 5: If a form container exists but has zero height or collapsed animation, wait briefly and re-evaluate
+  const hasZeroHeightContainer = await page.evaluate(() => {
+    const forms = Array.from(document.querySelectorAll("form, [class*='form']"));
+    return forms.some(f => {
+      const inputs = f.querySelectorAll("input, textarea, select");
+      const rect = f.getBoundingClientRect();
+      return inputs.length >= 2 && (rect.height <= 0 || rect.width <= 0);
+    });
+  }).catch(() => false);
+
+  if (hasZeroHeightContainer) {
+    await page.waitForTimeout(600);
+    const postAnimationResult = await detectTargetOnPage(page, url, `${candidateReason}; animated container unfolded`);
+    if (postAnimationResult) return postAnimationResult;
   }
-  return null;
+
+  // STEP 6: Final pass down the page (lower fold / footer lead forms)
+  await page.evaluate(() => {
+    window.scrollBy({ top: 1400, behavior: "instant" });
+  }).catch(() => undefined);
+  await page.waitForTimeout(250);
+
+  await page
+    .locator("form, iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='acuity'], iframe[src*='leadconnector'], iframe[src*='calendly']")
+    .first()
+    .waitFor({ state: "attached", timeout: 1000 })
+    .catch(() => undefined);
+
+  return detectTargetOnPage(page, url, `${candidateReason}; lower page scan`);
 }
 
 export async function discoverSubmissionTarget({
@@ -1167,7 +1516,10 @@ export async function discoverSubmissionTarget({
       commonPathCandidates(homepageLoaded ? page.url() : normalizedWebsiteUrl),
       maxFallbackPaths
     );
-    const candidates = [...navigationCandidates, ...fallbackCandidates];
+    const candidates = [
+      ...navigationCandidates,
+      ...fallbackCandidates.filter(fb => !navigationCandidates.some(nc => withoutHash(nc.url) === withoutHash(fb.url)))
+    ];
     const discoveryDeadline = Date.now() + timeoutMs;
 
     for (const candidate of candidates) {
@@ -1461,8 +1813,15 @@ async function discoverSubmissionTargetsInternal({
       ...(await collectNavigationCandidates(page, page.url()))
     ], maxNavigationLinks);
     const fallbackCandidates = mergeCandidates(commonPathCandidates(page.url()), maxFallbackPaths);
-    const maxPageVisits = 6;
-    const candidatesQueue: Candidate[] = mergeCandidates([...navigationCandidates, ...fallbackCandidates], maxNavigationLinks + maxFallbackPaths);
+    const maxPageVisits = 4;
+    let consecutiveSyntheticFailures = 0;
+    let lastDetectedVerification: import("@/services/verification-detector").UnsupportedVerificationResult | null = null;
+
+    // Strict Real-Link Priority: all real DOM/HTTP/external links MUST be evaluated before synthetic common paths
+    const candidatesQueue: Candidate[] = [
+      ...navigationCandidates,
+      ...fallbackCandidates.filter(fb => !navigationCandidates.some(nc => withoutHash(nc.url) === withoutHash(fb.url)))
+    ];
 
     let candidateIndex = 0;
     while (candidateIndex < candidatesQueue.length) {
@@ -1487,13 +1846,20 @@ async function discoverSubmissionTargetsInternal({
       );
       const mappedType = (candidate.candidateType?.toLowerCase() === "cta" ? "cta" : (candidate.candidateType || "anchor")) as any;
 
-      const loaded = await page.goto(candidate.url, {
+      const candResponse = await page.goto(candidate.url, {
         waitUntil: "domcontentloaded",
         timeout: Math.min(timeoutMs, 7000)
-      }).then(() => true).catch(() => false);
+      }).catch(() => null);
 
-      if (!loaded) {
+      if (!candResponse) {
         console.log(`[CONTACT-DISCOVERY] Failed to load candidate: ${candidate.url}`);
+        if (candidate.reason.startsWith("common path")) {
+          consecutiveSyntheticFailures++;
+          if (consecutiveSyntheticFailures >= 2 && navigationCandidates.length === 0) {
+            console.log(`[CONTACT-DISCOVERY] Fast exit: synthetic fallback paths failed and no navigation links found.`);
+            break;
+          }
+        }
         recordDiscoveryFeedback(
           normalizedWebsiteUrl,
           {
@@ -1521,14 +1887,36 @@ async function discoverSubmissionTargetsInternal({
         continue;
       }
 
+      const candStatus = candResponse.status();
+      const currentCandidateUrl = withoutHash(page.url());
+      const redirectedToRoot = currentCandidateUrl === normalizedWebsiteUrl || currentCandidateUrl === `${normalizedWebsiteUrl}/`;
+      if (candStatus === 404 || (candidate.reason.startsWith("common path") && redirectedToRoot)) {
+        if (candidate.reason.startsWith("common path")) {
+          consecutiveSyntheticFailures++;
+          if (consecutiveSyntheticFailures >= 2 && navigationCandidates.length === 0) {
+            console.log(`[CONTACT-DISCOVERY] Fast exit: common fallback paths returned 404/redirected to root.`);
+            break;
+          }
+        }
+        continue;
+      }
+
+      // Check anti-bot on candidate URL (e.g., Cloudflare Turnstile / Challenge on /contact)
+      const candidateVerification = await detectUnsupportedVerification(page, candidate.url);
+      if (candidateVerification) {
+        lastDetectedVerification = candidateVerification;
+        console.log(`[CONTACT-DISCOVERY] Unsupported verification encountered on candidate ${candidate.url}: ${candidateVerification.reason}`);
+        break;
+      }
+
       await dismissCookieBanners(page).catch(() => undefined);
       // Bounded wait for dynamic client-side forms (HubSpot, Marketo, LeadConnector, SPA embeds)
       await page
         .locator("form:not([action*='search']), input:not([type=hidden]):not([type=search]), textarea, iframe[src*='hsforms'], iframe[src*='marketo']")
         .first()
-        .waitFor({ state: "attached", timeout: 2500 })
+        .waitFor({ state: "attached", timeout: 2000 })
         .catch(() => undefined);
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(300);
       const candResult = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
       addResult(candResult);
 
@@ -1592,11 +1980,18 @@ async function discoverSubmissionTargetsInternal({
           for (const d2 of depth2Candidates) {
             const d2Url = withoutHash(d2.url);
             if (!checkedUrls.includes(d2Url) && !candidatesQueue.some((c) => withoutHash(c.url) === d2Url)) {
-              candidatesQueue.push({
+              // Insert Depth-2 candidate before any synthetic fallbacks so real links are tried first
+              const firstSyntheticIdx = candidatesQueue.findIndex(c => c.reason.startsWith("common path"));
+              const d2Candidate = {
                 ...d2,
                 depth: 2,
                 reason: `${d2.reason} (Depth-2 from ${candidate.url})`
-              });
+              };
+              if (firstSyntheticIdx !== -1 && firstSyntheticIdx >= candidateIndex) {
+                candidatesQueue.splice(firstSyntheticIdx, 0, d2Candidate);
+              } else {
+                candidatesQueue.push(d2Candidate);
+              }
             }
           }
         } catch (err) {
@@ -1608,6 +2003,29 @@ async function discoverSubmissionTargetsInternal({
     const targets = Array.from(discovered.values()).sort(
       (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
     );
+
+    if (targets.length === 0 && lastDetectedVerification) {
+      console.log(`[CONTACT-DISCOVERY-DIAGNOSTIC] ${normalizedWebsiteUrl} status=HUMAN_VERIFICATION reason="${lastDetectedVerification.reason}"`);
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets: [],
+        checkedUrls,
+        reason: lastDetectedVerification.reason,
+        screenshotPath: lastDetectedVerification.screenshotPath
+      };
+    }
+
+    const discoveryDiagnostic = {
+      url: normalizedWebsiteUrl,
+      status: targets.length > 0 ? "TARGET_FOUND" : "NO_TARGET_FOUND",
+      targetCount: targets.length,
+      primaryTargetType: targets[0]?.targetType || "none",
+      primaryTargetUrl: targets[0]?.url || null,
+      checkedPagesCount: checkedUrls.length,
+      checkedUrls
+    };
+    console.log(`[CONTACT-DISCOVERY-DIAGNOSTIC] ${JSON.stringify(discoveryDiagnostic)}`);
+
     return {
       websiteUrl: normalizedWebsiteUrl,
       targets,
@@ -1638,7 +2056,7 @@ export async function discoverSubmissionTargets(
   input: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }
 ): Promise<DiscoverSubmissionTargetsResult> {
   const timeoutMs = input.timeoutMs ?? 8000;
-  const overallBudgetMs = Math.max(timeoutMs * 4, 60000);
+  const overallBudgetMs = Math.min(Math.max(timeoutMs * 4, 30000), 38000);
   let timer: NodeJS.Timeout | null = null;
   const timeoutPromise = new Promise<DiscoverSubmissionTargetsResult>((resolve) => {
     timer = setTimeout(() => {

@@ -10,23 +10,68 @@ export type CandidateLocation =
   | "hero"
   | "body"
   | "sidebar"
-  | "mobile menu";
+  | "mobile menu"
+  | "modal"
+  | "dropdown";
 
 export type CandidateType =
   | "anchor"
   | "button"
   | "cta"
   | "url_pattern"
-  | "js_navigation";
+  | "js_navigation"
+  | "modal_trigger"
+  | "dropdown_item";
 
 export type CandidateSourceType =
   | "dom_anchor"
   | "dom_button"
   | "dom_onclick"
+  | "modal_trigger"
+  | "dropdown"
   | "http_probe"
   | "sitemap"
   | "synthetic_fallback"
   | "depth_2_cta";
+
+export type FormTypeClassification =
+  | "NATIVE_HTML"
+  | "WORDPRESS"
+  | "AJAX"
+  | "SPA"
+  | "CRM"
+  | "IFRAME"
+  | "BOOKING"
+  | "MULTI_STEP"
+  | "MODAL"
+  | "OTHER";
+
+export type DetectedCmsFramework =
+  | "wordpress"
+  | "webflow"
+  | "wix"
+  | "squarespace"
+  | "shopify"
+  | "drupal"
+  | "joomla"
+  | "ghost"
+  | "framer"
+  | "duda"
+  | "hubspot"
+  | "nextjs"
+  | "react"
+  | "vue"
+  | "angular"
+  | "svelte"
+  | "custom";
+
+export interface ProviderSignature {
+  name: string;
+  type: "crm_form" | "booking_widget" | "conversational_lead" | "cms_form";
+  iframePatterns?: RegExp[];
+  scriptPatterns?: RegExp[];
+  domSelectors?: string[];
+}
 
 export interface CandidateFeatureVector {
   // Identity & URL Structure
@@ -37,6 +82,9 @@ export interface CandidateFeatureVector {
   sameDomain: boolean;
   sourceType: CandidateSourceType;
 
+  // Language Context
+  detectedLanguage: string; // ISO 639-1: "en", "fr", "es", "de", "it", "pt", "nl", or "unknown"
+
   // Text Content & Semantics
   rawText: string;
   normalizedText: string;
@@ -45,7 +93,7 @@ export interface CandidateFeatureVector {
   parentText: string;
   nearbyText: string;
 
-  // DOM Location & Element Semantics
+  // DOM Location & Element Semantics (Language-Agnostic)
   elementType: CandidateType;
   location: CandidateLocation;
   isHeader: boolean;
@@ -56,24 +104,29 @@ export interface CandidateFeatureVector {
   isCTA: boolean;
   isButton: boolean;
   isAnchor: boolean;
+  isRightmostNav: boolean;
+  isProminentButton: boolean;
   hasOnClick: boolean;
   hasAriaLabel: boolean;
   hasTitle: boolean;
   distanceFromTop: number; // 0.0 (top) to 1.0 (bottom)
+  domDepth: number;
   mobileMenuSource: boolean;
+  isModalTrigger: boolean;
+  modalTargetSelector?: string;
 
-  // Semantic Intent Signals (Normalized 0.0 to 1.0)
-  contactKeywordSignals: number; // "contact", "get in touch", "let's talk", "reach us"
-  bookingKeywordSignals: number; // "book a call", "schedule", "calendar", "appointment"
-  consultationSignals: number;   // "consultation", "free consultation", "quote", "estimate"
-  leadSignals: number;           // "get started", "start project", "work with us", "grow"
-  negativeSignals: number;       // "privacy", "terms", "login", "blog", "careers", "mailto:"
+  // Semantic Intent Signals (Normalized 0.0 to 1.0 across languages)
+  contactKeywordSignals: number; // contact, kontakt, contacto, touch, reach, connect, fale
+  bookingKeywordSignals: number; // book, schedule, appointment, meeting, termin, cita
+  consultationSignals: number;   // consultation, quote, estimate, devis, anfrage, presupuesto
+  leadSignals: number;           // get started, start project, work with us, demarrer
+  negativeSignals: number;       // privacy, terms, login, cart, checkout, cookies
 
   // Contextual Semantic Categories (Beyond explicit keywords)
-  conversationIntent: number;    // "start a conversation", "discuss your project", "tell us about", "speak with"
-  projectIntent: number;         // "build something", "start your project", "start your journey", "take the next step"
-  advisoryIntent: number;        // "talk with an advisor", "speak with an expert", "consult our team"
-  informationIntent: number;     // "request information", "inquire", "find the right solution"
+  conversationIntent: number;    // start a conversation, discuss your project, parlons
+  projectIntent: number;         // build something, start your project, launch
+  advisoryIntent: number;        // talk with an advisor, speak with an expert
+  informationIntent: number;     // request information, inquire, demande d'info
 
   // Structural & Surrounding Context
   headingContextScore: number;   // Alignment with nearest H1/H2/H3 text
@@ -82,6 +135,10 @@ export interface CandidateFeatureVector {
   pageHasExistingForm: boolean;
   pageHasPhoneOrEmailOnly: boolean;
   pageHeadingKeywords: string[];
+
+  // Provider & Traversal Metadata
+  recognizedProvider?: string;
+  navigationDepth: number;
 }
 
 export interface ScoredCandidate {

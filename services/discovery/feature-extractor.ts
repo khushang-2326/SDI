@@ -90,7 +90,7 @@ export function extractUniversalFeatureVector(
   const bookingStems = /\b(book|schedule|appointment|calendar|meeting|termin|rendez-vous|cita|appuntamento|agenda|prenota|reserva|boeken)\b/i;
   if (
     targetUrl.hostname.includes("calendly.com") ||
-    targetUrl.hostname.includes("meetings.hubspot.com") ||
+    /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(targetUrl.hostname) ||
     targetUrl.hostname.includes("pipedrive.com")
   ) {
     bookingScore = 1.0;

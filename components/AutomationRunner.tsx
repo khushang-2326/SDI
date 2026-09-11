@@ -107,6 +107,7 @@ function AutomationAnalysisModal({
   const [filter, setFilter] = useState<"all" | "success" | "failed" | "pending">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [copied, setCopied] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -218,6 +219,53 @@ ${items
     }
   };
 
+  const downloadPdf = async () => {
+    try {
+      setIsGeneratingPdf(true);
+      const { generatePerformanceReportPdf } = await import("@/services/pdf-report-generator");
+      const { filename, blob } = generatePerformanceReportPdf({
+        jobId,
+        batchStatus,
+        totalWebsites,
+        successWebsitesCount: successWebsites.length,
+        failedWebsitesCount: failedWebsites.length,
+        pendingWebsitesCount: pendingWebsites.length,
+        successRate,
+        failureRate,
+        totalTrialsExecuted,
+        totalTrialsSuccessful,
+        runtime,
+        categoryCounts,
+        items: items.map((item, idx) => ({
+          index: idx + 1,
+          name: item.name,
+          url: item.url,
+          status: item.status,
+          isSuccess: item.isSuccess,
+          targetType: item.attempts?.[0]?.targetType,
+          trialsCount: item.trialsCount,
+          successfulTrialsCount: item.successfulTrialsCount,
+          detail: item.detail,
+          durationSec: undefined
+        }))
+      });
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to generate PDF report:", err);
+      alert("Unable to generate PDF. Please try again.");
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
   const modalContent = (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-3 sm:p-6 backdrop-blur-md"
@@ -255,6 +303,15 @@ ${items
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={downloadPdf}
+              disabled={isGeneratingPdf}
+              className="flex items-center gap-1.5 rounded-xl border border-indigo-700 bg-indigo-600/90 px-3.5 py-2 text-xs font-bold text-white transition hover:bg-indigo-600 active:scale-95 disabled:opacity-50"
+              title="Download analysis report as PDF"
+            >
+              <span>{isGeneratingPdf ? "⏳ Generating..." : "📥 Download PDF"}</span>
+            </button>
             <button
               type="button"
               onClick={copySummary}

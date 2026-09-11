@@ -27,6 +27,7 @@ export type SubmitContactFormResult = {
     | "iframe_not_accessible"
     | "confirmation_not_found";
   errorMessage: string | null;
+  message?: string | null;
   screenshotPath: string | null;
   submittedAt: Date;
   filledFields: string[];
@@ -35,6 +36,20 @@ export type SubmitContactFormResult = {
   screenshotPaths?: string[];
   selectedDate?: string | null;
   selectedTime?: string | null;
+  filledFieldsCount?: number;
+  verifiedFieldsCount?: number;
+  unmappedRequiredFields?: string[];
+  unmappedOptionalFields?: string[];
+  fieldVerificationItems?: Array<{
+    fieldIndex: number;
+    fieldType: string;
+    mappedSource: string;
+    confidence: number;
+    evidence: string[];
+    filled: boolean;
+    verified: boolean;
+    finalValue?: string;
+  }>;
 };
 
 export type BookingPreferences = {

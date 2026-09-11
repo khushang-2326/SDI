@@ -155,6 +155,13 @@ async function visibleEnabled(locator: Locator) {
 }
 
 async function chooseDate(page: Page, preferredDate?: string) {
+  // Check if there is an initial "Start booking" or "Book a meeting" CTA button that must be clicked to reveal the calendar
+  const startBtn = page.locator("button:has-text('Start booking'), button:has-text('Book a meeting'), button:has-text('Schedule a meeting')").first();
+  if (await startBtn.isVisible({ timeout: 2500 }).catch(() => false)) {
+    await startBtn.click().catch(() => undefined);
+    await page.waitForTimeout(1000);
+  }
+
   const preferredDay = parseDayFromPreference(preferredDate);
   const dateButtons = page.locator("button").filter({ hasText: /^\s*\d{1,2}\s*$/ });
   const candidates = await dateButtons.evaluateAll((buttons) =>

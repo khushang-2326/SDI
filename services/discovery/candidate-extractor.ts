@@ -41,7 +41,7 @@ function isPipedriveSchedulerUrl(url: URL): boolean {
 
 export function isSupportedExternalTarget(url: URL): boolean {
   const hostname = url.hostname.toLowerCase();
-  return isCalendlyEventUrl(url) || isPipedriveSchedulerUrl(url) || hostname === "meetings.hubspot.com";
+  return isCalendlyEventUrl(url) || isPipedriveSchedulerUrl(url) || /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(hostname);
 }
 
 export async function extractRawCandidates(page: Page, baseUrl: string): Promise<RawCandidate[]> {

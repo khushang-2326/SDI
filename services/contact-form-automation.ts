@@ -16,6 +16,18 @@ import {
   SubmitContactFormResult
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import {
+  type FieldSignals,
+  type SemanticFieldType,
+  type FieldClassification,
+  type FieldVerificationItem,
+  type FormFillMetrics,
+  extractFieldSignals,
+  classifyField,
+  classifyAllFormFields,
+  splitFullName,
+  COMMON_INPUT_SELECTOR
+} from "./field-classifier";
 
 type FieldKey = "fullName" | "email" | "mobile" | "city" | "address" | "message" | "companyName" | "website" | "jobTitle";
 
@@ -37,11 +49,6 @@ const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
 const REQUIRED_TEXT_FALLBACK = "Seo management";
 const NAME_FIELD_PATTERN = /(?:full[ _-]?name|first[ _-]?name|firstname|fname|given[ _-]?name|middle[ _-]?name|middlename|mname|last[ _-]?name|lastname|lname|surname|family[ _-]?name)/i;
-const COMMON_INPUT_SELECTOR = [
-  "input:not([type='hidden']):not([type='submit']):not([type='button']):not([type='reset']):not([type='checkbox']):not([type='radio'])",
-  "textarea",
-  "select"
-].join(",");
 
 const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
   fullName: [
@@ -181,17 +188,22 @@ async function blockHeavyAssets(page: Page) {
   });
 }
 
-async function safelyFillField(locator: Locator, value: string) {
-  if (!(await locator.isVisible().catch(() => false))) return false;
-  if (!(await locator.isEnabled().catch(() => false))) return false;
+async function safelyFillField(
+  locator: Locator,
+  value: string
+): Promise<{ success: boolean; verified: boolean; actualValue?: string }> {
+  if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
+  if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
 
   const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
 
   if (tagName === "select") {
-    await locator.selectOption({ label: value }).catch(async () => {
-      await locator.selectOption({ value }).catch(() => undefined);
+    let selected = false;
+    await locator.selectOption({ label: value }).then(() => { selected = true; }).catch(async () => {
+      await locator.selectOption({ value }).then(() => { selected = true; }).catch(() => undefined);
     });
-    return true;
+    const selectVal = await locator.inputValue().catch(() => "");
+    return { success: true, verified: Boolean(selectVal) || selected, actualValue: selectVal };
   }
 
   await locator.scrollIntoViewIfNeeded().catch(() => undefined);
@@ -207,12 +219,45 @@ async function safelyFillField(locator: Locator, value: string) {
       await locator.fill(value, { timeout: 2000 }).catch(() => undefined);
     });
   }
-  return true;
+
+  // Verify DOM value and perform controlled-input synchronization if needed (React, Vue, Webflow, etc.)
+  let currentValue = await locator.inputValue().catch(() => "");
+  if (!currentValue && value) {
+    await locator.evaluate((el, val) => {
+      const input = el as HTMLInputElement;
+      const nativeInputSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value"
+      )?.set;
+      const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value"
+      )?.set;
+      if (input.tagName.toLowerCase() === "textarea" && nativeTextareaSetter) {
+        nativeTextareaSetter.call(input, val);
+      } else if (nativeInputSetter) {
+        nativeInputSetter.call(input, val);
+      } else {
+        input.value = val;
+      }
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, value).catch(() => undefined);
+    currentValue = await locator.inputValue().catch(() => "");
+  }
+
+  const verified = Boolean(
+    currentValue &&
+    (currentValue.toLowerCase().includes(value.slice(0, 8).toLowerCase()) ||
+     value.toLowerCase().includes(currentValue.slice(0, 8).toLowerCase()))
+  );
+
+  return { success: true, verified, actualValue: currentValue };
 }
 
-async function safelyFillCityField(locator: Locator) {
-  if (!(await locator.isVisible().catch(() => false))) return false;
-  if (!(await locator.isEnabled().catch(() => false))) return false;
+async function safelyFillCityField(locator: Locator): Promise<{ success: boolean; verified: boolean }> {
+  if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
+  if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
 
   const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
   if (tagName !== "select") return safelyFillField(locator, "New York");
@@ -226,9 +271,9 @@ async function safelyFillCityField(locator: Locator) {
     });
   }).catch(() => -1);
 
-  if (matchingOptionIndex < 0) return false;
+  if (matchingOptionIndex < 0) return { success: false, verified: false };
   await locator.selectOption({ index: matchingOptionIndex }).catch(() => undefined);
-  return true;
+  return { success: true, verified: true };
 }
 
 async function selectFirstRealOption(locator: Locator) {
@@ -245,12 +290,13 @@ async function selectFirstRealOption(locator: Locator) {
       };
 
       const selected = select.options[select.selectedIndex];
-      if (selected && isRealOption(selected)) return -1;
+      if (selected && isRealOption(selected)) return -2;
 
       return Array.from(select.options).findIndex(isRealOption);
     })
     .catch(() => -1);
 
+  if (optionIndex === -2) return true;
   if (optionIndex < 0) return false;
   await locator.selectOption({ index: optionIndex });
   return true;
@@ -374,115 +420,275 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
   return filled;
 }
 
-async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
-  const candidates = await collectFieldCandidates(scope);
+async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise<{
+  filledFields: string[];
+  skippedFields: string[];
+  metrics: FormFillMetrics;
+}> {
+  const signals = await extractFieldSignals(scope);
+  const classifications = classifyAllFormFields(signals);
+  const fields = scope.locator(COMMON_INPUT_SELECTOR);
+
   const usedIndexes = new Set<number>();
   const filledFields: string[] = [];
   const skippedFields: string[] = [];
-  const fields = scope.locator(COMMON_INPUT_SELECTOR);
+  const verificationItems: FieldVerificationItem[] = [];
 
-  // Fill true email controls before broad keyword scoring. Some page builders
-  // place all labels in one container, making a nearby name label otherwise
-  // look like a match for the email field.
-  for (const candidate of candidates) {
-    const isEmailField = candidate.type === "email" || /\b(e-?mail|email address)\b/i.test(candidate.descriptor);
-    if (!isEmailField) continue;
-    const didFill = await safelyFillField(fields.nth(candidate.index), leadData.email).catch(() => false);
-    if (didFill) {
-      usedIndexes.add(candidate.index);
-      filledFields.push("email");
+  const fillSignal = async (
+    signal: FieldSignals,
+    fieldType: SemanticFieldType,
+    sourceKey: string,
+    value: string,
+    confidence: number,
+    evidence: string[]
+  ): Promise<boolean> => {
+    if (usedIndexes.has(signal.index)) return false;
+    const locator = fields.nth(signal.index);
+    const result = await safelyFillField(locator, value).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+    if (result.success) {
+      usedIndexes.add(signal.index);
+      filledFields.push(sourceKey);
+      verificationItems.push({
+        fieldIndex: signal.index,
+        fieldType,
+        mappedSource: sourceKey,
+        confidence,
+        evidence,
+        filled: true,
+        verified: result.verified,
+        finalValue: result.actualValue
+      });
+      return true;
     }
+    return false;
+  };
+
+  // 1. Email (prioritize type=email / autocomplete=email / highest confidence)
+  const emailCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "email")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (emailCandidates.length > 0) {
+    const best = emailCandidates[0];
+    await fillSignal(best.signal, "email", "email", leadData.email, best.cls.confidence, best.cls.evidence);
+  } else {
+    skippedFields.push("email");
   }
 
-  const nameParts = leadData.fullName.trim().split(/\s+/).filter(Boolean);
-  const firstName = nameParts[0] ?? "";
-  const lastName = nameParts.at(-1) ?? "";
-  const middleName = nameParts.slice(1, -1).join(" ");
-  const firstNameCandidate = candidates.find((candidate) => /first[ _-]?name|firstname|fname|given[ _-]?name/i.test(candidate.descriptor));
-  const middleNameCandidate = candidates.find((candidate) => candidate.index !== firstNameCandidate?.index && /middle[ _-]?name|middlename|mname/i.test(candidate.descriptor));
-  const lastNameCandidate = candidates.find((candidate) => candidate.index !== firstNameCandidate?.index && /last[ _-]?name|lastname|lname|surname|family[ _-]?name/i.test(candidate.descriptor));
+  // 2. Name Handling (Split name vs full name)
+  const nameParts = splitFullName(leadData.fullName);
+  const firstNameCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "first_name")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (firstNameCandidate) {
-    const firstFilled = await safelyFillField(fields.nth(firstNameCandidate.index), firstName).catch(() => false);
-    if (firstFilled) usedIndexes.add(firstNameCandidate.index);
-    if (firstFilled) filledFields.push("firstName");
+  const lastNameCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "last_name")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  const fullNameCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "full_name")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (firstNameCandidates.length > 0) {
+    const bestFirst = firstNameCandidates[0];
+    await fillSignal(bestFirst.signal, "first_name", "firstName", nameParts.firstName, bestFirst.cls.confidence, bestFirst.cls.evidence);
   }
 
-  if (middleNameCandidate) {
-    // For a two-part (or single-part) lead name, repeat the supplied full
-    // name in a required middle-name field rather than leaving it blank.
-    const middleValue = middleName || leadData.fullName;
-    const middleFilled = await safelyFillField(fields.nth(middleNameCandidate.index), middleValue).catch(() => false);
-    if (middleFilled) usedIndexes.add(middleNameCandidate.index);
-    if (middleFilled) filledFields.push("middleName");
+  if (lastNameCandidates.length > 0) {
+    const bestLast = lastNameCandidates[0];
+    await fillSignal(bestLast.signal, "last_name", "lastName", nameParts.lastName, bestLast.cls.confidence, bestLast.cls.evidence);
   }
 
-  if (lastNameCandidate) {
-    // A one-word lead name is valid: reuse it for a required surname field.
-    const lastValue = nameParts.length > 1 ? lastName : leadData.fullName;
-    const lastFilled = await safelyFillField(fields.nth(lastNameCandidate.index), lastValue).catch(() => false);
-    if (lastFilled) usedIndexes.add(lastNameCandidate.index);
-    if (lastFilled) filledFields.push("lastName");
-  }
-
-  for (const fieldKey of Object.keys(FIELD_VALUES) as FieldKey[]) {
-    if (fieldKey === "email" && filledFields.includes("email")) continue;
-    if (fieldKey === "fullName" && (filledFields.includes("firstName") || filledFields.includes("lastName"))) continue;
-    const value = FIELD_VALUES[fieldKey](leadData);
-
-    if (!value) {
-      skippedFields.push(fieldKey);
-      continue;
-    }
-
-    const ranked = candidates
-      .filter((candidate) => !usedIndexes.has(candidate.index))
-      .map((candidate) => ({
-        candidate,
-        score: scoreCandidate(candidate, fieldKey)
-      }))
-      .sort((a, b) => b.score - a.score);
-    const best = ranked[0];
-
-    if (!best || best.score <= 0) {
-      skippedFields.push(fieldKey);
-      continue;
-    }
-
-    const didFill = await (fieldKey === "city"
-      ? safelyFillCityField(fields.nth(best.candidate.index))
-      : safelyFillField(fields.nth(best.candidate.index), value)
-    ).catch(() => false);
-
-    if (didFill) {
-      usedIndexes.add(best.candidate.index);
-      filledFields.push(fieldKey);
+  // If first and last name were NOT both present/filled, and a full_name candidate exists:
+  if (!filledFields.includes("firstName") && !filledFields.includes("lastName")) {
+    if (fullNameCandidates.length > 0) {
+      const bestFull = fullNameCandidates[0];
+      await fillSignal(bestFull.signal, "full_name", "fullName", leadData.fullName, bestFull.cls.confidence, bestFull.cls.evidence);
     } else {
-      skippedFields.push(fieldKey);
+      skippedFields.push("fullName");
     }
   }
 
-  // Dropdowns such as "Service you need" do not map to lead data. Select the
-  // first genuine option so required selects are not left on their placeholder.
-  for (const candidate of candidates) {
-    if (candidate.tagName !== "select" || usedIndexes.has(candidate.index)) continue;
-    const didSelect = await selectFirstRealOption(fields.nth(candidate.index)).catch(() => false);
+  // 3. Phone / Mobile
+  const phoneValue = leadData.mobile ?? leadData.mobileNumber;
+  if (phoneValue) {
+    const phoneCandidates = signals
+      .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+      .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+      .filter((item) => !item.cls.isNegative && item.cls.fieldType === "phone")
+      .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+    if (phoneCandidates.length > 0) {
+      const best = phoneCandidates[0];
+      await fillSignal(best.signal, "phone", "mobile", phoneValue, best.cls.confidence, best.cls.evidence);
+    } else {
+      skippedFields.push("mobile");
+    }
+  }
+
+  // 4. Message / Inquiry
+  const messageCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && (item.cls.fieldType === "message" || item.cls.fieldType === "inquiry"))
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  const messageValue = leadData.message || "Hello, I would like to inquire about your services. Thank you.";
+  if (messageCandidates.length > 0) {
+    const best = messageCandidates[0];
+    await fillSignal(best.signal, "message", "message", messageValue, best.cls.confidence, best.cls.evidence);
+  } else {
+    skippedFields.push("message");
+  }
+
+  // 5. Company Name
+  if (leadData.companyName) {
+    const companyCandidates = signals
+      .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+      .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+      .filter((item) => !item.cls.isNegative && item.cls.fieldType === "company")
+      .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+    if (companyCandidates.length > 0) {
+      const best = companyCandidates[0];
+      await fillSignal(best.signal, "company", "companyName", leadData.companyName, best.cls.confidence, best.cls.evidence);
+    } else {
+      skippedFields.push("companyName");
+    }
+  }
+
+  // 6. Website
+  const rawCo = leadData.companyName?.toLowerCase().replace(/[^a-z0-9]/g, "") || "example";
+  const websiteValue = `https://${rawCo}.com`;
+  const websiteCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "website")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (websiteCandidates.length > 0) {
+    const best = websiteCandidates[0];
+    await fillSignal(best.signal, "website", "website", websiteValue, best.cls.confidence, best.cls.evidence);
+  }
+
+  // 7. Subject
+  const subjectCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "subject")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (subjectCandidates.length > 0) {
+    const best = subjectCandidates[0];
+    await fillSignal(best.signal, "subject", "subject", "Partnership / Inquiry", best.cls.confidence, best.cls.evidence);
+  }
+
+  // 8. City / Address
+  const cityCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "city")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (cityCandidates.length > 0) {
+    const best = cityCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      await safelyFillCityField(loc);
+      usedIndexes.add(best.signal.index);
+      filledFields.push("city");
+      verificationItems.push({
+        fieldIndex: best.signal.index,
+        fieldType: "city",
+        mappedSource: "city",
+        confidence: best.cls.confidence,
+        evidence: best.cls.evidence,
+        filled: true,
+        verified: true
+      });
+    } else {
+      await fillSignal(best.signal, "city", "city", "New York", best.cls.confidence, best.cls.evidence);
+    }
+  }
+
+  if (leadData.address) {
+    const addrCandidates = signals
+      .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+      .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+      .filter((item) => !item.cls.isNegative && item.cls.fieldType === "address")
+      .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+    if (addrCandidates.length > 0) {
+      const best = addrCandidates[0];
+      await fillSignal(best.signal, "address", "address", leadData.address, best.cls.confidence, best.cls.evidence);
+    }
+  }
+
+  // 9. Dropdowns: Select first real option for unmapped selects
+  for (const signal of signals) {
+    if (signal.tagName !== "select" || usedIndexes.has(signal.index)) continue;
+    const didSelect = await selectFirstRealOption(fields.nth(signal.index)).catch(() => false);
     if (didSelect) {
-      usedIndexes.add(candidate.index);
-      filledFields.push(`dropdown:${candidate.index}`);
+      usedIndexes.add(signal.index);
+      filledFields.push(`dropdown:${signal.index}`);
+      verificationItems.push({
+        fieldIndex: signal.index,
+        fieldType: "unknown",
+        mappedSource: `dropdown:${signal.index}`,
+        confidence: 0.8,
+        evidence: ["select first real option"],
+        filled: true,
+        verified: true
+      });
     }
   }
 
-  // Forms frequently include an unnamed required text field such as
-  // "What service do you need?". It has no reliable semantic mapping, so
-  // supply the requested service value after all known lead fields are done.
-  filledFields.push(...await fillRemainingRequiredTextFields(fields, candidates, usedIndexes));
+  // 10. Remaining required text fields fallback (e.g. "What service do you need?")
+  for (const signal of signals) {
+    if (usedIndexes.has(signal.index)) continue;
+    if (signal.tagName !== "textarea" && signal.tagName !== "input") continue;
+    if (!signal.isRequired) continue;
+    if (["email", "tel", "number", "date", "time", "url", "file", "password"].includes(signal.type)) continue;
 
-  filledFields.push(...await selectCustomDropdownDefaults(scope));
-  filledFields.push(...await selectRequiredRadioDefaults(scope));
+    const loc = fields.nth(signal.index);
+    const existingVal = await loc.inputValue().catch(() => "");
+    if (existingVal.trim()) {
+      usedIndexes.add(signal.index);
+      continue;
+    }
 
-  // Check only controls the form explicitly marks as required. Optional
-  // consent and marketing opt-ins must remain untouched.
+    const fillRes = await safelyFillField(loc, REQUIRED_TEXT_FALLBACK).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+    if (fillRes.success) {
+      usedIndexes.add(signal.index);
+      filledFields.push(`required:${signal.index}`);
+      verificationItems.push({
+        fieldIndex: signal.index,
+        fieldType: "unknown",
+        mappedSource: `required:${signal.index}`,
+        confidence: 0.7,
+        evidence: ["fallback required text"],
+        filled: true,
+        verified: fillRes.verified,
+        finalValue: fillRes.actualValue
+      });
+    }
+  }
+
+  // 11. Custom dropdowns & radios
+  const customFilled = await selectCustomDropdownDefaults(scope);
+  filledFields.push(...customFilled);
+  const radioFilled = await selectRequiredRadioDefaults(scope);
+  filledFields.push(...radioFilled);
+
+  // 12. Required Checkboxes (Consent / Terms only)
   try {
     const checkboxes = scope.locator("input[type='checkbox']");
     const checkboxCount = await checkboxes.count().catch(() => 0);
@@ -504,7 +710,44 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData) {
     // Continue
   }
 
-  return { filledFields, skippedFields };
+  // 13. Audit Required vs Unmapped Fields
+  const unmappedRequiredFields: string[] = [];
+  const unmappedOptionalFields: string[] = [];
+
+  for (const signal of signals) {
+    if (usedIndexes.has(signal.index)) continue;
+    // Check if element already has a value
+    const loc = fields.nth(signal.index);
+    const existingVal = await loc.evaluate((el) => {
+      if (el.tagName.toLowerCase() === "select") {
+        const sel = el as HTMLSelectElement;
+        const opt = sel.options[sel.selectedIndex];
+        return opt ? opt.value || opt.textContent || "" : sel.value || "";
+      }
+      return (el as HTMLInputElement).value || "";
+    }).catch(() => "");
+    if (existingVal.trim()) {
+      usedIndexes.add(signal.index);
+      continue;
+    }
+
+    const identifier = signal.name || signal.id || signal.placeholder || signal.explicitLabel || `field_${signal.index}`;
+    if (signal.isRequired && signal.isVisible && !signal.isDisabled) {
+      unmappedRequiredFields.push(identifier);
+    } else {
+      unmappedOptionalFields.push(identifier);
+    }
+  }
+
+  const metrics: FormFillMetrics = {
+    filledFieldsCount: filledFields.length,
+    verifiedFieldsCount: verificationItems.filter((v) => v.verified).length,
+    unmappedRequiredFields,
+    unmappedOptionalFields,
+    items: verificationItems
+  };
+
+  return { filledFields, skippedFields, metrics };
 }
 
 async function scorePrimaryForm(form: Locator) {
@@ -636,6 +879,10 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "button:has-text('Submit Message')",
     "button:has-text('Get Started')",
     "button:has-text('Start Now')",
+    "button:has-text('Start booking')",
+    "button:has-text('Get My Custom Quote')",
+    "button:has-text('Get a Quote')",
+    "button:has-text('Quote')",
     "button:has-text('Request Quote')",
     "button:has-text('Request Consultation')",
     "button:has-text('Request A Quote')",
@@ -643,9 +890,13 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "button:has-text('Request A Demo')",
     "button:has-text('Book A Call')",
     "button:has-text('Book Now')",
+    "button:has-text('Book')",
     "button:has-text('Schedule')",
     "button:has-text('Schedule Consultation')",
     "button:has-text('Schedule A Call')",
+    "button:has-text('Let\\'s Talk')",
+    "button:has-text('Connect')",
+    "button:has-text('Inquire')",
     "button:has-text('Contact')",
     "button:has-text('Contact Us')",
     "button:has-text('Get in touch')",
@@ -663,6 +914,8 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "input[value*='Contact' i]",
     "input[value*='Get Started' i]",
     "input[value*='Start' i]",
+    "input[value*='Quote' i]",
+    "input[value*='Book' i]",
     "input[value*='Subscribe' i]",
     "input[value*='Enviar' i]",
     "input[value*='Absenden' i]",
@@ -673,10 +926,15 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "[role='button']:has-text('Send')",
     "[role='button']:has-text('Send Message')",
     "[role='button']:has-text('Get Started')",
+    "[role='button']:has-text('Start booking')",
+    "[role='button']:has-text('Quote')",
+    "[role='button']:has-text('Get My Custom Quote')",
     "[role='button']:has-text('Request Quote')",
     "[role='button']:has-text('Request Consultation')",
     "[role='button']:has-text('Book Now')",
+    "[role='button']:has-text('Book')",
     "[role='button']:has-text('Schedule')",
+    "[role='button']:has-text('Let\\'s Talk')",
     "[role='button']:has-text('Enviar')",
     // Button-like div / span / a associated with form
     "a:has-text('Submit')",
@@ -684,7 +942,10 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "a:has-text('Send')",
     "a:has-text('Send Message')",
     "a:has-text('Get in touch')",
+    "a:has-text('Quote')",
     "a:has-text('Request Quote')",
+    "a:has-text('Start booking')",
+    "a:has-text('Book')",
     "div[role='button']:has-text('Submit')",
     "div[role='button']:has-text('Send')",
     "div[class*='btn']:has-text('Submit')",
@@ -842,7 +1103,7 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     }
   }
 
-  // Also check inside child frames (e.g. Dubsado on zachtoth.com)
+  // Also check inside child frames (e.g. Dubsado on zachtoth.com, embedded forms)
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
     for (const selector of selectors) {
@@ -850,6 +1111,10 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
       const count = await locators.count().catch(() => 0);
       for (let i = 0; i < count; i++) {
         const loc = locators.nth(i);
+        if (await loc.isVisible().catch(() => false)) {
+          return loc;
+        }
+        await loc.scrollIntoViewIfNeeded().catch(() => undefined);
         if (await loc.isVisible().catch(() => false)) {
           return loc;
         }
@@ -878,8 +1143,12 @@ async function detectBookingWidget(page: Page): Promise<BookingWidgetDetection> 
           return "iframe contains LeadConnector / HighLevel booking widget";
         }
 
-        if (lowerSrc.includes("meetings.hubspot.com")) {
+        if (/(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com/i.test(lowerSrc) || lowerSrc.includes("meetings.hubspot.com")) {
           return "iframe contains HubSpot Meetings";
+        }
+
+        if (/acuityscheduling\.com|tidycal\.com|simplybook\.me|youcanbook\.me|calendarhero\.com|appointlet\.com|setmore\.com|cal\.com/i.test(lowerSrc)) {
+          return "iframe contains booking calendar widget";
         }
       }
 
@@ -1208,6 +1477,7 @@ export async function submitContactForm({
   let screenshotPath: string | null = null;
   let filledFields: string[] = [];
   let skippedFields: string[] = [];
+  let fillMetrics: FormFillMetrics | null = null;
 
   try {
     if (browserContext) {
@@ -1333,7 +1603,14 @@ export async function submitContactForm({
     const fillResult = await fillAllVisibleForms(page, leadData);
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
+    fillMetrics = fillResult.metrics;
     screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit");
+
+    if (fillMetrics && fillMetrics.unmappedRequiredFields.length > 0) {
+      const unmappedSummary = fillMetrics.unmappedRequiredFields.join(", ");
+      console.warn(`[contact-form-automation] Unmapped required fields on ${websiteUrl}: ${unmappedSummary}`);
+      throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}`);
+    }
 
     // Dismiss any newly popped cookie consent banners
     await dismissCookieBanners(activePage).catch(() => undefined);
@@ -1416,7 +1693,12 @@ export async function submitContactForm({
       submittedAt,
       filledFields,
       skippedFields,
-      bookingWidgetReason: null
+      bookingWidgetReason: null,
+      filledFieldsCount: fillMetrics?.filledFieldsCount ?? filledFields.length,
+      verifiedFieldsCount: fillMetrics?.verifiedFieldsCount ?? filledFields.length,
+      unmappedRequiredFields: fillMetrics?.unmappedRequiredFields ?? [],
+      unmappedOptionalFields: fillMetrics?.unmappedOptionalFields ?? [],
+      fieldVerificationItems: fillMetrics?.items ?? []
     };
 
     if (!skipPersist) {
@@ -1446,7 +1728,12 @@ export async function submitContactForm({
       submittedAt,
       filledFields,
       skippedFields,
-      bookingWidgetReason: null
+      bookingWidgetReason: null,
+      filledFieldsCount: fillMetrics?.filledFieldsCount ?? filledFields.length,
+      verifiedFieldsCount: fillMetrics?.verifiedFieldsCount ?? 0,
+      unmappedRequiredFields: fillMetrics?.unmappedRequiredFields ?? [],
+      unmappedOptionalFields: fillMetrics?.unmappedOptionalFields ?? [],
+      fieldVerificationItems: fillMetrics?.items ?? []
     };
 
     if (!skipPersist) {

@@ -202,7 +202,7 @@ function isPrivatePipedriveContactUrl(url: URL) {
 
 function isSupportedExternalTarget(url: URL) {
   const hostname = url.hostname.toLowerCase();
-  return isCalendlyEventUrl(url) || isPipedriveSchedulerUrl(url) || hostname === "meetings.hubspot.com";
+  return isCalendlyEventUrl(url) || isPipedriveSchedulerUrl(url) || /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(hostname);
 }
 
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
@@ -557,7 +557,7 @@ async function getVisibleFormScore(container: Page | Frame) {
     if (inputCount === 0) return 0;
 
     return await container
-      .locator("form, [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], input:not([type=hidden]), textarea, select, button[type='submit'], input[type='submit'], button")
+      .locator("form, [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], input:not([type=hidden]), textarea, select, button[type='submit'], input[type='submit'], button, [role='button'], a[class*='btn'], a[class*='button'], a[class*='submit'], a[href*='submit']")
       .evaluateAll((elements) => {
         const sliced = elements.slice(0, 100);
         let hasEmail = false;
@@ -671,8 +671,24 @@ async function getVisibleFormScore(container: Page | Frame) {
           if (!knownContainerMatched && (!isVisible && !hasDimensions)) continue;
 
           if (tag === "textarea") {
-            hasMessage = true;
+            const ta = element as HTMLTextAreaElement;
+            const name = (ta.name || "").toLowerCase();
+            const id = (ta.id || "").toLowerCase();
+            const placeholder = (ta.placeholder || "").toLowerCase();
+            const aria = (ta.getAttribute("aria-label") || "").toLowerCase();
+            const attrDescriptor = `${name} ${id} ${placeholder} ${aria}`;
+
             interactiveInputsCount++;
+
+            if (/email|courriel|correo|e-mail/i.test(attrDescriptor)) {
+              hasEmail = true;
+            } else if (/name|first|last|fname|lname|nom|prenom|nombre|apellidos|nachname|vorname|cognome/i.test(attrDescriptor)) {
+              hasName = true;
+            } else if (/phone|tel|mobile|cell/i.test(attrDescriptor)) {
+              hasPhone = true;
+            } else {
+              hasMessage = true;
+            }
           } else if (tag === "select") {
             interactiveInputsCount++;
           } else if (tag === "input") {
@@ -713,7 +729,7 @@ async function getVisibleFormScore(container: Page | Frame) {
               hasSubmit = true;
               hasFormSubmit = true;
             }
-          } else if (tag === "button") {
+          } else if (tag === "button" || tag === "a" || (element.getAttribute("role") || "").toLowerCase() === "button") {
             const btnType = (element.getAttribute("type") || "").toLowerCase();
             const btnText = (element.textContent || "").toLowerCase().trim();
             if (btnType === "submit") hasFormSubmit = true;
@@ -889,7 +905,7 @@ async function detectContactTarget(
     if (frameFormScore < 55) continue;
     return {
       websiteUrl,
-      discoveredUrl: frame.url(),
+      discoveredUrl: page.url(),
       targetType: "contact_form",
       confidence: Math.min(88, frameFormScore),
       reason: `contact form fields detected inside an embedded frame; ${candidateReason}`,
@@ -910,7 +926,7 @@ async function collectSupportedExternalCandidates(page: Page, baseUrl: string): 
     try {
       const resolved = new URL(link.href, baseUrl);
       const hostname = resolved.hostname.toLowerCase();
-      if (!isCalendlyEventUrl(resolved) && hostname !== "meetings.hubspot.com") {
+      if (!isCalendlyEventUrl(resolved) && !/(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(hostname)) {
         return [];
       }
       return [{
@@ -931,7 +947,7 @@ function resultFromSupportedExternalCandidate(
 ): DiscoverSubmissionTargetResult | null {
   const resolved = new URL(candidate.url);
   const hostname = resolved.hostname.toLowerCase();
-  const targetType = hostname === "meetings.hubspot.com"
+  const targetType = /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(hostname)
     ? "hubspot_booking"
     : isCalendlyEventUrl(resolved)
       ? "calendly"
@@ -966,7 +982,7 @@ async function detectTargetOnPage(
 
   if (notFound) return null;
 
-  if (currentHostname.includes("meetings.hubspot.com")) {
+  if (/(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(currentHostname)) {
     return {
       websiteUrl: url,
       discoveredUrl: currentUrl,
@@ -1002,14 +1018,22 @@ async function detectTargetOnPage(
     };
   }
 
-  // 1. Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito, Pardot, ActiveCampaign, Zoho, Formspree)
+  // 1. Prioritize an actual visible form on the host page or relevant frames over unverified iframes/chat widgets
+  const contactTarget = await detectContactTarget(page, url, candidateReason);
+  if (contactTarget) return contactTarget;
+
+  // 2. Check for embedded forms or booking widgets inside iframes (e.g. Dubsado, LeadConnector, Typeform, Cognito, Pardot, ActiveCampaign, Zoho, Formspree)
   const iframeTarget = await page
     .locator("iframe")
     .evaluateAll((iframes) => {
       for (const iframe of iframes) {
         const src = (iframe.getAttribute("src") ?? "").toLowerCase();
+        // Strictly exclude customer support and chat widgets from being detected as contact form targets
+        if (/conversations-visitor|widget\.intercom\.io|drift\.com|tidio\.co|zopim\.com|crisp\.chat|chat-widget|livechatinc|tawk\.to|helpbench/i.test(src)) {
+          continue;
+        }
         if (
-          /hsforms\.com|hubspot|dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed|activehosted\.com|forms\.zohopublic\.com|zoho\.com\/forms|formkeep\.com|formspree\.io|123formbuilder\.com|wufoo\.com|docs\.google\.com\/forms|getform\.io|formsite\.com|paperform\.co|tally\.so|formsubmit\.co/i.test(src) ||
+          /hsforms\.com|forms\.hubspot\.com|\/forms\/embed\/|share\.hsforms\.com|dubsado\.com|typeform\.com|cognitoforms\.com|jotform\.com|marketingautomation\.services|formstack\.com|forms\.office\.com|fillout\.com|airtable\.com\/embed|activehosted\.com|forms\.zohopublic\.com|zoho\.com\/forms|formkeep\.com|formspree\.io|123formbuilder\.com|wufoo\.com|docs\.google\.com\/forms|getform\.io|formsite\.com|paperform\.co|tally\.so|formsubmit\.co/i.test(src) ||
           /pardot\.com|\/go\.[^/]+\/l\/|\/l\/\d+\/\d+/i.test(src)
         ) {
           return { url: src, type: "contact_form" as const };
@@ -1028,7 +1052,7 @@ async function detectTargetOnPage(
   if (iframeTarget) {
     return {
       websiteUrl: url,
-      discoveredUrl: iframeTarget.url,
+      discoveredUrl: iframeTarget.type === "booking_widget" ? iframeTarget.url : page.url(),
       targetType: iframeTarget.type,
       confidence: 94,
       reason: `Embedded ${iframeTarget.type === "booking_widget" ? "booking widget" : "form"} iframe found; ${candidateReason}`,
@@ -1036,10 +1060,6 @@ async function detectTargetOnPage(
       screenshotPath: await takeScreenshot(page, url, "embedded-form-discovered").catch(() => null)
     };
   }
-
-  // 2. Prioritize an actual visible form over generic booking-related page copy or URL words.
-  const contactTarget = await detectContactTarget(page, url, candidateReason);
-  if (contactTarget) return contactTarget;
 
   // 3. If no actual contact form was found, only check for booking-style URL paths if candidate was an explicit link/CTA or page has calendar/form cues
   const isSyntheticCommonPath = candidateReason.includes("common path");
@@ -1363,6 +1383,18 @@ export async function discoverSubmissionTarget({
       targetType: "booking_widget",
       confidence: 100,
       reason: "Direct public Pipedrive scheduler URL provided.",
+      checkedUrls: [normalizedWebsiteUrl],
+      screenshotPath: null
+    };
+  }
+
+  if (/(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(normalizedUrl.hostname)) {
+    return {
+      websiteUrl: normalizedWebsiteUrl,
+      discoveredUrl: normalizedWebsiteUrl,
+      targetType: "hubspot_booking",
+      confidence: 100,
+      reason: "Direct HubSpot meetings URL provided.",
       checkedUrls: [normalizedWebsiteUrl],
       screenshotPath: null
     };

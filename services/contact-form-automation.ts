@@ -13,9 +13,12 @@ import { detectUnsupportedVerification } from "@/services/verification-detector"
 import {
   LeadData,
   SubmitContactFormInput,
-  SubmitContactFormResult
+  SubmitContactFormResult,
+  StageTimingMetrics
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import { waitForUniversalPageReadiness } from "./page-readiness";
+import { evaluateFinalAutomationSuccess } from "./success-invariants";
 import {
   type FieldSignals,
   type SemanticFieldType,
@@ -38,9 +41,23 @@ type FieldCandidate = {
   type: string;
 };
 
-type BookingWidgetDetection = {
+export type BookingLifecycleState =
+  | "BOOKING_NOT_FOUND"
+  | "BOOKING_CONTAINER_FOUND"
+  | "BOOKING_LOADING"
+  | "BOOKING_FRAME_FOUND"
+  | "BOOKING_READY"
+  | "BOOKING_NO_INVENTORY"
+  | "BOOKING_BLOCKED"
+  | "BOOKING_FAILED";
+
+export type BookingWidgetDetection = {
   found: boolean;
+  state: BookingLifecycleState;
   reason: string | null;
+  frameCount?: number;
+  frameURLs?: string[];
+  widgetType?: string | null;
 };
 
 type FormScope = Page | Locator;
@@ -196,6 +213,11 @@ async function safelyFillField(
   if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
 
   const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
+  const inputType = await locator.evaluate((element) => (element.getAttribute("type") || "").toLowerCase()).catch(() => "text");
+
+  if (inputType === "checkbox" || inputType === "radio") {
+    return { success: false, verified: false };
+  }
 
   if (tagName === "select") {
     let selected = false;
@@ -206,7 +228,7 @@ async function safelyFillField(
     return { success: true, verified: Boolean(selectVal) || selected, actualValue: selectVal };
   }
 
-  await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+  await locator.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => undefined);
   await locator.click({ timeout: 2000 }).catch(() => undefined);
   await locator.fill("", { timeout: 2000 }).catch(() => undefined);
 
@@ -242,6 +264,7 @@ async function safelyFillField(
       }
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true }));
     }, value).catch(() => undefined);
     currentValue = await locator.inputValue().catch(() => "");
   }
@@ -277,29 +300,42 @@ async function safelyFillCityField(locator: Locator): Promise<{ success: boolean
 }
 
 async function selectFirstRealOption(locator: Locator) {
-  if (!(await locator.isVisible().catch(() => false))) return false;
-  if (!(await locator.isEnabled().catch(() => false))) return false;
-
-  const optionIndex = await locator
+  const result = await locator
     .evaluate((element) => {
       const select = element as HTMLSelectElement;
+      if (!select || select.tagName.toLowerCase() !== "select") return false;
       const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i;
       const isRealOption = (option: HTMLOptionElement) => {
-        const label = option.textContent?.replace(/\s+/g, " ").trim() ?? "";
+        const label = (option.textContent ?? "").replace(/\s+/g, " ").trim();
         return !option.disabled && Boolean(option.value.trim()) && !placeholderPattern.test(label);
       };
 
       const selected = select.options[select.selectedIndex];
-      if (selected && isRealOption(selected)) return -2;
+      if (selected && isRealOption(selected)) return true;
 
-      return Array.from(select.options).findIndex(isRealOption);
+      const idx = Array.from(select.options).findIndex(isRealOption);
+      if (idx >= 0) {
+        select.selectedIndex = idx;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        select.dispatchEvent(new Event("input", { bubbles: true }));
+        return true;
+      }
+      return false;
     })
-    .catch(() => -1);
+    .catch(() => false);
 
-  if (optionIndex === -2) return true;
-  if (optionIndex < 0) return false;
-  await locator.selectOption({ index: optionIndex });
-  return true;
+  if (result) return true;
+
+  try {
+    const isVis = await locator.isVisible().catch(() => false);
+    if (isVis) {
+      await locator.selectOption({ index: 1 }, { timeout: 1500 });
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
 }
 
 async function selectRequiredRadioDefaults(scope: FormScope) {
@@ -377,35 +413,36 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
     "[aria-haspopup='menu'][role='button']"
   ].join(", "));
   const filled: string[] = [];
-  const count = await dropdowns.count();
+  try {
+    const count = await dropdowns.count().catch(() => 0);
 
-  for (let index = 0; index < count; index++) {
-    const dropdown = dropdowns.nth(index);
-    if (!(await dropdown.isVisible().catch(() => false))) continue;
-    if (!(await dropdown.isEnabled().catch(() => false))) continue;
+    for (let index = 0; index < count; index++) {
+      const dropdown = dropdowns.nth(index);
+      if (!(await dropdown.isVisible().catch(() => false))) continue;
+      if (!(await dropdown.isEnabled().catch(() => false))) continue;
 
-    await dropdown.scrollIntoViewIfNeeded().catch(() => undefined);
-    const opened = await dropdown.click({ timeout: 2000 }).then(() => true).catch(() => false);
-    if (!opened) continue;
+      await dropdown.scrollIntoViewIfNeeded().catch(() => undefined);
+      const opened = await dropdown.click({ timeout: 1500 }).then(() => true).catch(() => false);
+      if (!opened) continue;
 
-    const options = dropdown.page().locator([
-      "[role='listbox']:visible [role='option']:visible",
-      "[role='menu']:visible [role='menuitem']:visible",
-      "[role='option']:visible"
-    ].join(", "));
-    const optionCount = await options.count();
-    let selected = false;
+      const options = dropdown.page().locator([
+        "[role='listbox']:visible [role='option']:visible",
+        "[role='menu']:visible [role='menuitem']:visible",
+        "[role='option']:visible"
+      ].join(", "));
+      const optionCount = await options.count().catch(() => 0);
+      let selected = false;
 
-    for (let optionIndex = 0; optionIndex < optionCount; optionIndex++) {
-      const option = options.nth(optionIndex);
-      const optionState = await option.evaluate((element) => ({
-        text: (element.textContent ?? "").replace(/\s+/g, " ").trim(),
-        disabled:
-          element.getAttribute("aria-disabled") === "true" ||
-          (element as HTMLButtonElement).disabled === true
-      })).catch(() => ({ text: "", disabled: true }));
-      const isPlaceholder = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i.test(optionState.text);
-      if (optionState.disabled || !optionState.text || isPlaceholder) continue;
+      for (let optionIndex = 0; optionIndex < optionCount; optionIndex++) {
+        const option = options.nth(optionIndex);
+        const optionState = await option.evaluate((element) => ({
+          text: (element.textContent ?? "").replace(/\s+/g, " ").trim(),
+          disabled:
+            element.getAttribute("aria-disabled") === "true" ||
+            (element as HTMLButtonElement).disabled === true
+        })).catch(() => ({ text: "", disabled: true }));
+        const isPlaceholder = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i.test(optionState.text);
+        if (optionState.disabled || !optionState.text || isPlaceholder) continue;
 
       selected = await option.click({ timeout: 2000 }).then(() => true).catch(() => false);
       if (selected) {
@@ -415,6 +452,9 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
     }
 
     if (!selected) await dropdown.press("Escape").catch(() => undefined);
+    }
+  } catch {
+    // Ignore dropdown evaluation interruptions
   }
 
   return filled;
@@ -739,7 +779,16 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
   }
 
+  let classifiedCount = 0;
+  for (const [_, cls] of classifications) {
+    if (!cls.isNegative && cls.fieldType !== "unknown") {
+      classifiedCount++;
+    }
+  }
+
   const metrics: FormFillMetrics = {
+    fieldsDetected: signals.length,
+    fieldsClassified: classifiedCount,
     filledFieldsCount: filledFields.length,
     verifiedFieldsCount: verificationItems.filter((v) => v.verified).length,
     unmappedRequiredFields,
@@ -787,14 +836,35 @@ async function scorePrimaryForm(form: Locator) {
 
 export async function unhideHiddenFormContainers(page: Page | Frame) {
   await page.evaluate(() => {
-    const selector = "form, [class*='gform_wrapper'], [class*='forminator'], [id*='gform_wrapper'], [class*='wpcf7'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form']";
+    const selector = "form, [class*='gform_wrapper'], [class*='forminator'], [id*='gform_wrapper'], [class*='wpcf7'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form'], iframe[src*='form'], iframe[src*='prospector'], iframe[src*='hubspot'], iframe[src*='lead']";
     document.querySelectorAll(selector).forEach((el) => {
       const htmlEl = el as HTMLElement;
       if (htmlEl && (htmlEl.style?.display === "none" || window.getComputedStyle(htmlEl).display === "none")) {
         htmlEl.style.display = "block";
       }
+      if (htmlEl && (htmlEl.style?.visibility === "hidden" || window.getComputedStyle(htmlEl).visibility === "hidden")) {
+        htmlEl.style.visibility = "visible";
+      }
     });
   }).catch(() => undefined);
+}
+
+export async function waitForDynamicPageReadiness(
+  page: Page,
+  maxWaitMs = 8000
+): Promise<{ ready: boolean; state: string; durationMs: number }> {
+  await unhideHiddenFormContainers(page).catch(() => undefined);
+  const result = await waitForUniversalPageReadiness(page, {
+    maxWaitMs,
+    pollIntervalMs: 200,
+    targetPurpose: "form"
+  });
+  await unhideHiddenFormContainers(page).catch(() => undefined);
+  return {
+    ready: result.ready,
+    state: result.state,
+    durationMs: result.durationMs
+  };
 }
 
 async function findPrimaryForm(page: Page) {
@@ -823,232 +893,261 @@ async function findPrimaryForm(page: Page) {
 }
 
 async function fillAllVisibleForms(page: Page, leadData: LeadData) {
-  const primaryForm = await findPrimaryForm(page);
+  let primaryForm = await findPrimaryForm(page);
   // A small number of sites use controls without a wrapping <form>.
-  const result = await fillDetectedFields(primaryForm ?? page, leadData);
+  let result = await fillDetectedFields(primaryForm ?? page, leadData);
+
+  // Progressive hydration retry for client-side rendered dynamic forms (HubSpot, Squarespace, React, Vue, Next.js)
+  // If zero fields were filled and unmapped required fields are present or zero were detected,
+  // allow up to 1.6s for asynchronous form containers to finish hydrating.
+  if (result.filledFields.length === 0) {
+    for (let poll = 0; poll < 3; poll++) {
+      await page.waitForTimeout(400);
+      primaryForm = await findPrimaryForm(page);
+      result = await fillDetectedFields(primaryForm ?? page, leadData);
+      if (result.filledFields.length > 0) {
+        break;
+      }
+    }
+  }
+
   return { ...result, primaryForm };
 }
 
-export async function findSubmitButton(page: Page, leadData?: LeadData, targetForm?: Locator | null) {
-  await unhideHiddenFormContainers(page);
-  const selectors = [
-    // Standard submit elements
-    "button[type='submit']",
-    "input[type='submit']",
-    "input[type='image']",
-    // Framework-specific submit controls
-    ".elementor-button[type='submit']",
-    "button.elementor-button",
-    ".elementor-field-type-submit button",
-    "button.hs-button",
-    "input.hs-button",
-    ".wpcf7-submit",
-    "input.wpcf7-submit",
-    "button.wpcf7-submit",
-    ".gform_button",
-    "input.gform_button",
-    "button.gform_button",
-    "input[id*='gform_submit' i]",
-    "button[id*='gform_submit' i]",
-    ".gform_footer input[type='submit']",
-    ".gform_footer button",
-    ".forminator-button-submit",
-    "button.forminator-button",
-    ".forminator-custom-form button",
-    "button.wpforms-submit",
-    "input.wpforms-submit",
-    ".wpforms-submit-container button",
-    "button.ff-btn-submit",
-    "button.fluentform-submit-btn",
-    "input.ninja-forms-field[type='submit']",
-    ".nf-field-element input[type='button']",
-    ".nf-field-element input[type='submit']",
-    "a[href*='submit-form' i]",
-    ".elButton",
-    "form button:not([type='button'])",
-    "form input[type='submit']",
-    "button[id*='submit' i]",
-    "button[class*='submit' i]",
-    "input[id*='submit' i]",
-    // Semantic signal texts on button
-    "button:has-text('Submit')",
-    "button:has-text('Submit Form')",
-    "button:has-text('Send')",
-    "button:has-text('Send Message')",
-    "button:has-text('Send Enquiry')",
-    "button:has-text('Submit Message')",
-    "button:has-text('Get Started')",
-    "button:has-text('Start Now')",
-    "button:has-text('Start booking')",
-    "button:has-text('Get My Custom Quote')",
-    "button:has-text('Get a Quote')",
-    "button:has-text('Quote')",
-    "button:has-text('Request Quote')",
-    "button:has-text('Request Consultation')",
-    "button:has-text('Request A Quote')",
-    "button:has-text('Request Demo')",
-    "button:has-text('Request A Demo')",
-    "button:has-text('Book A Call')",
-    "button:has-text('Book Now')",
-    "button:has-text('Book')",
-    "button:has-text('Schedule')",
-    "button:has-text('Schedule Consultation')",
-    "button:has-text('Schedule A Call')",
-    "button:has-text('Let\\'s Talk')",
-    "button:has-text('Connect')",
-    "button:has-text('Inquire')",
-    "button:has-text('Contact')",
-    "button:has-text('Contact Us')",
-    "button:has-text('Get in touch')",
-    "button:has-text('Free Strategy Session')",
-    "button:has-text('Subscribe')",
-    "button:has-text('SUBSCRIBE')",
-    "button:has-text('Nachricht')",
-    "button:has-text('Enviar')",
-    "button:has-text('Absenden')",
-    "button:has-text('Envoyer')",
-    // Semantic input values
-    "input[value*='Submit' i]",
-    "input[value*='Send' i]",
-    "input[value*='Enquiry' i]",
-    "input[value*='Contact' i]",
-    "input[value*='Get Started' i]",
-    "input[value*='Start' i]",
-    "input[value*='Quote' i]",
-    "input[value*='Book' i]",
-    "input[value*='Subscribe' i]",
-    "input[value*='Enviar' i]",
-    "input[value*='Absenden' i]",
-    "input[value*='Demo' i]",
-    // Semantic role=button
-    "[role='button']:has-text('Submit')",
-    "[role='button']:has-text('Submit Form')",
-    "[role='button']:has-text('Send')",
-    "[role='button']:has-text('Send Message')",
-    "[role='button']:has-text('Get Started')",
-    "[role='button']:has-text('Start booking')",
-    "[role='button']:has-text('Quote')",
-    "[role='button']:has-text('Get My Custom Quote')",
-    "[role='button']:has-text('Request Quote')",
-    "[role='button']:has-text('Request Consultation')",
-    "[role='button']:has-text('Book Now')",
-    "[role='button']:has-text('Book')",
-    "[role='button']:has-text('Schedule')",
-    "[role='button']:has-text('Let\\'s Talk')",
-    "[role='button']:has-text('Enviar')",
-    // Button-like div / span / a associated with form
-    "a:has-text('Submit')",
-    "a:has-text('Submit Form')",
-    "a:has-text('Send')",
-    "a:has-text('Send Message')",
-    "a:has-text('Get in touch')",
-    "a:has-text('Quote')",
-    "a:has-text('Request Quote')",
-    "a:has-text('Start booking')",
-    "a:has-text('Book')",
-    "div[role='button']:has-text('Submit')",
-    "div[role='button']:has-text('Send')",
-    "div[class*='btn']:has-text('Submit')",
-    "div[class*='btn']:has-text('Send')",
-    "div[class*='button']:has-text('Submit')",
-    "div[class*='button']:has-text('Send')",
-    "span[class*='btn']:has-text('Submit')",
-    "span[class*='button']:has-text('Submit')",
-    "[class*='form' i] a[class*='btn']",
-    "[class*='form' i] a[class*='button']",
-    "[class*='form' i] [role='button']"
-  ];
+export type SubmitCandidateInfo = {
+  tagName: string;
+  type?: string;
+  text: string;
+  score: number;
+};
+
+export type SubmitCandidateDiagnostic = {
+  submitCandidateCount: number;
+  rejectedCandidateCount: number;
+  selectedCandidate: SubmitCandidateInfo | null;
+  selectedScore: number;
+  rejectionReasons: string[];
+};
+
+export async function findSubmitButtonWithDiagnostics(
+  page: Page,
+  leadData?: LeadData,
+  targetForm?: Locator | null
+): Promise<{ locator: Locator | null; diagnostics: SubmitCandidateDiagnostic }> {
+  await unhideHiddenFormContainers(page).catch(() => undefined);
 
   const primaryForm = targetForm ?? (await findPrimaryForm(page));
+
+  const RANK_FN = `(function(container, currentFormId) {
+    var elements = Array.from(
+      container.querySelectorAll(
+        "button, input[type='submit'], input[type='button'], input[type='image'], [role='button'], a.btn, a.button, a[class*='btn'], a[class*='button'], [data-form-submit], [data-submit], [data-action*='submit' i], [data-state*='submit' i], div[role='button'], span[role='button'], div.btn, div.button, span.btn, span.button, [class*='submit' i], [id*='submit' i], a[href='javascript:void(0)'], a[href='#'], a:not([href])"
+      )
+    );
+
+    var POSITIVE_KEYWORDS = [
+      "submit", "send", "send message", "submit message", "send enquiry", "get in touch",
+      "contact", "contact us", "reach out", "request quote", "request a quote", "get a quote",
+      "get quote", "request consultation", "request demo", "schedule", "schedule call",
+      "schedule consultation", "book call", "book now", "book consultation", "start now",
+      "get started", "let's talk", "lets talk", "inquire", "connect", "start booking",
+      "enviar", "absenden", "nachricht", "envoyer", "next", "continue"
+    ];
+
+    var candidates = [];
+    var rejectedReasons = [];
+
+    elements.forEach(function(el, index) {
+      var tag = el.tagName.toLowerCase();
+      var type = (el.getAttribute("type") || "").toLowerCase();
+      var role = (el.getAttribute("role") || "").toLowerCase();
+      var text = (el.innerText || el.textContent || el.getAttribute("value") || el.getAttribute("aria-label") || el.getAttribute("title") || "")
+        .trim().toLowerCase().replace(/\\s+/g, " ");
+      var cls = (el.className || "").toString().toLowerCase();
+      var id = (el.id || "").toLowerCase();
+      var hasFormSubmitAttr = el.hasAttribute("data-form-submit") || el.hasAttribute("data-submit") || (el.getAttribute("data-action") || "").toLowerCase().indexOf("submit") !== -1;
+      var hasPositiveText = false;
+      for (var k = 0; k < POSITIVE_KEYWORDS.length; k++) {
+        if (text.indexOf(POSITIVE_KEYWORDS[k]) !== -1) {
+          hasPositiveText = true;
+          break;
+        }
+      }
+      var hrefAttr = (el.getAttribute("href") || "").trim().toLowerCase();
+      var isActionAnchor = tag === "a" && (hasFormSubmitAttr || hrefAttr === "" || hrefAttr === "#" || hrefAttr.indexOf("javascript:") === 0);
+
+      var rect = el.getBoundingClientRect();
+      var style = window.getComputedStyle(el);
+      var isVisible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      var isDisabled = el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true" || el.classList.contains("disabled");
+      var isInsideForm = Boolean(el.closest("form")) || Boolean(currentFormId && el.getAttribute("form") === currentFormId);
+
+      var score = 0;
+      var rejectionReason = null;
+
+      if (/\\b(search|find)\\b/i.test(text) || id.indexOf("search") !== -1 || cls.indexOf("search") !== -1) {
+        score -= 100;
+        rejectionReason = "SEARCH_KEYWORD";
+      }
+      if (/\\b(log[ _-]?in|sign[ _-]?in|sign[ _-]?up|register|my account|client portal)\\b/i.test(text)) {
+        score -= 80;
+        rejectionReason = rejectionReason || "AUTH_KEYWORD";
+      }
+      if (/\\b(newsletter|subscribe|stay updated|join mailing list)\\b/i.test(text) && !(type === "submit" && isInsideForm)) {
+        score -= 60;
+        rejectionReason = rejectionReason || "NEWSLETTER_KEYWORD";
+      }
+      if (/\\b(cart|checkout|buy now|add to cart|bag|shop now)\\b/i.test(text)) {
+        score -= 100;
+        rejectionReason = rejectionReason || "COMMERCE_KEYWORD";
+      }
+      if (/\\b(cookie|accept all|accept cookies|decline cookies|preferences|got it|dismiss|agree)\\b/i.test(text)) {
+        score -= 100;
+        rejectionReason = rejectionReason || "COOKIE_CONSENT_KEYWORD";
+      }
+      if (/\\b(close|dismiss|cancel)\\b/i.test(text)) {
+        score -= 80;
+        rejectionReason = rejectionReason || "DISMISS_KEYWORD";
+      }
+      if (tag === "a" && cls.indexOf("btn") === -1 && cls.indexOf("button") === -1 && !isInsideForm && !hasFormSubmitAttr && !(isActionAnchor && hasPositiveText)) {
+        score -= 80;
+        rejectionReason = rejectionReason || "NAV_LINK";
+      }
+      if (isDisabled) {
+        score -= 50;
+        rejectionReason = rejectionReason || "DISABLED";
+      }
+      if (!isVisible) {
+        score -= 40;
+        rejectionReason = rejectionReason || "HIDDEN";
+      }
+
+      if (type === "submit" || type === "image" || hasFormSubmitAttr) score += 50;
+      if (isInsideForm) score += 40;
+      if (role === "button" || tag === "button") score += 20;
+      if (currentFormId && el.getAttribute("form") === currentFormId) score += 25;
+      if (
+        cls.indexOf("submit") !== -1 || id.indexOf("submit") !== -1 ||
+        cls.indexOf("gform_button") !== -1 || cls.indexOf("forminator-button") !== -1 ||
+        cls.indexOf("wpforms-submit") !== -1 || cls.indexOf("hs-button") !== -1 ||
+        cls.indexOf("wpcf7-submit") !== -1 || cls.indexOf("ff-btn-submit") !== -1
+      ) {
+        score += 30;
+      }
+      if (hasPositiveText) score += 35;
+      if (isVisible) score += 20;
+
+      if (score >= 20) {
+        candidates.push({ index: index, tag: tag, type: type, text: text.slice(0, 40), score: score });
+      } else {
+        if (rejectionReason) rejectedReasons.push(rejectionReason);
+      }
+    });
+
+    candidates.sort(function(a, b) { return b.score - a.score; });
+    var selected = candidates[0] || null;
+    if (selected) {
+      var prev = container.querySelectorAll("[data-sdi-submit]");
+      for (var p = 0; p < prev.length; p++) {
+        prev[p].removeAttribute("data-sdi-submit");
+      }
+      elements[selected.index].setAttribute("data-sdi-submit", "selected");
+    }
+
+    return {
+      submitCandidateCount: candidates.length,
+      rejectedCandidateCount: elements.length - candidates.length,
+      selectedCandidate: selected ? {
+        tagName: selected.tag,
+        type: selected.type,
+        text: selected.text,
+        score: selected.score
+      } : null,
+      selectedScore: selected ? selected.score : 0,
+      rejectionReasons: rejectedReasons.slice(0, 5)
+    };
+  })`;
+
+  const evaluateLocator = async (loc: Locator, formId?: string | null): Promise<SubmitCandidateDiagnostic | null> => {
+    return loc.evaluate(
+      (el: HTMLElement, args: { script: string; formId?: string }) => {
+        const fn = (window as any).eval(args.script);
+        return fn(el, args.formId);
+      },
+      { script: RANK_FN, formId: formId ?? undefined }
+    ).catch((err) => {
+      console.warn("[findSubmitButton] evaluateLocator failed:", err?.message);
+      return null;
+    });
+  };
+
+  const evaluatePageOrFrame = async (scope: Page | Frame): Promise<SubmitCandidateDiagnostic | null> => {
+    return scope.evaluate(
+      (args: { script: string; formId?: string }) => {
+        const fn = (window as any).eval(args.script);
+        return fn(document, args.formId);
+      },
+      { script: RANK_FN, formId: undefined }
+    ).catch((err) => {
+      console.warn("[findSubmitButton] evaluatePageOrFrame failed:", err?.message);
+      return null;
+    });
+  };
+
+  let defaultDiag: SubmitCandidateDiagnostic = {
+    submitCandidateCount: 0,
+    rejectedCandidateCount: 0,
+    selectedCandidate: null,
+    selectedScore: 0,
+    rejectionReasons: []
+  };
+
+  // 1. First search inside primary form
   if (primaryForm) {
-    for (const selector of selectors) {
-      const locators = primaryForm.locator(selector);
-      const count = await locators.count().catch(() => 0);
-      for (let index = 0; index < count; index++) {
-        const locator = locators.nth(index);
-        if (await locator.isVisible().catch(() => false)) return locator;
-
-        // If not immediately visible, scroll into view and re-check
-        await locator.scrollIntoViewIfNeeded().catch(() => undefined);
-        if (await locator.isVisible().catch(() => false)) return locator;
-
-        // Zero-height / Theme-styled Gravity / Forminator recovery:
-        // If attached, enabled, and matches designated submit traits inside form
-        const isAttachedSubmit = await locator.evaluate((el) => {
-          const tag = el.tagName.toLowerCase();
-          const type = (el as HTMLInputElement).type?.toLowerCase();
-          const cls = (el.className || "").toLowerCase();
-          const id = (el.id || "").toLowerCase();
-          const isSubmitType = type === "submit" || type === "image";
-          const isSubmitClass = cls.includes("submit") || cls.includes("gform_button") || cls.includes("forminator-button") || cls.includes("wpforms-submit");
-          const isSubmitId = id.includes("submit") || id.includes("gform_submit");
-          const isBtn = tag === "button" || tag === "input";
-          const isDisabled = (el as HTMLButtonElement).disabled === true || el.getAttribute("aria-disabled") === "true";
-          return isBtn && (isSubmitType || isSubmitClass || isSubmitId) && !isDisabled;
-        }).catch(() => false);
-        if (isAttachedSubmit) return locator;
-      }
-    }
-
-    // Check if primaryForm has an id, look for external submit button associated via HTML5 form="id"
     const formId = await primaryForm.getAttribute("id").catch(() => null);
+    const formEval = await evaluateLocator(primaryForm, formId);
+    if (formEval && formEval.selectedCandidate) {
+      const locator = primaryForm.locator("[data-sdi-submit='selected']").first();
+      return { locator, diagnostics: formEval };
+    }
+
+    // Check external submit button tied to form id
     if (formId) {
-      const externalLocators = page.locator(`button[form='${formId}'], input[form='${formId}'][type='submit']`);
-      const extCount = await externalLocators.count().catch(() => 0);
-      for (let i = 0; i < extCount; i++) {
-        const extLoc = externalLocators.nth(i);
-        if (await extLoc.isVisible().catch(() => false)) return extLoc;
+      const extLoc = page.locator(`button[form='${formId}'], input[form='${formId}'][type='submit']`).first();
+      if (await extLoc.isVisible().catch(() => false)) {
+        return {
+          locator: extLoc,
+          diagnostics: {
+            submitCandidateCount: 1,
+            rejectedCandidateCount: 0,
+            selectedCandidate: { tagName: "button", type: "submit", text: "External Form Submit", score: 90 },
+            selectedScore: 90,
+            rejectionReasons: []
+          }
+        };
       }
     }
   }
 
-  const modalRoots = page.locator([
-    "[role='dialog']:visible",
-    "[aria-modal='true']:visible",
-    ".modal:visible",
-    "[class*='popup' i]:visible"
-  ].join(", "));
-  for (let rootIndex = 0; rootIndex < await modalRoots.count(); rootIndex++) {
-    const root = modalRoots.nth(rootIndex);
-    for (const selector of selectors) {
-      const locators = root.locator(selector);
-      const count = await locators.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        const loc = locators.nth(i);
-        if (await loc.isVisible().catch(() => false)) return loc;
-      }
+  // 2. Search on the main page
+  const pageEval = await evaluatePageOrFrame(page);
+  if (pageEval && pageEval.selectedCandidate) {
+    const locator = page.locator("[data-sdi-submit='selected']").first();
+    return { locator, diagnostics: pageEval };
+  }
+  if (pageEval) defaultDiag = pageEval;
+
+  // 3. Search child frames
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const frameEval = await evaluatePageOrFrame(frame);
+    if (frameEval && frameEval.selectedCandidate) {
+      const locator = frame.locator("[data-sdi-submit='selected']").first();
+      return { locator, diagnostics: frameEval };
     }
   }
 
-  for (const selector of selectors) {
-    const locators = page.locator(selector);
-    const count = await locators.count().catch(() => 0);
-    for (let i = 0; i < count; i++) {
-      const loc = locators.nth(i);
-      if (await loc.isVisible().catch(() => false)) {
-        return loc;
-      }
-      // If not immediately visible, scroll into view and re-check
-      await loc.scrollIntoViewIfNeeded().catch(() => undefined);
-      if (await loc.isVisible().catch(() => false)) return loc;
-
-      const isAttachedSubmit = await loc.evaluate((el) => {
-        const tag = el.tagName.toLowerCase();
-        const type = (el as HTMLInputElement).type?.toLowerCase();
-        const cls = (el.className || "").toLowerCase();
-        const id = (el.id || "").toLowerCase();
-        const isSubmitType = type === "submit" || type === "image";
-        const isSubmitClass = cls.includes("submit") || cls.includes("gform_button") || cls.includes("forminator-button") || cls.includes("wpforms-submit");
-        const isSubmitId = id.includes("submit") || id.includes("gform_submit");
-        const isBtn = tag === "button" || tag === "input";
-        const isDisabled = (el as HTMLButtonElement).disabled === true || el.getAttribute("aria-disabled") === "true";
-        return isBtn && (isSubmitType || isSubmitClass || isSubmitId) && !isDisabled;
-      }).catch(() => false);
-      if (isAttachedSubmit) return loc;
-    }
-  }
-
-  // Multi-step forms (e.g. Elementor, Town & Country Web Design): click "NEXT" button to reveal submit button
+  // 4. Multi-step forms (click NEXT and re-evaluate)
   const nextStepSelectors = [
     ".e-form__buttons__wrapper__button-next:visible",
     "button:has-text('NEXT'):visible",
@@ -1056,20 +1155,29 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     "button:has-text('Continue'):visible",
     "button:has-text('Weiter'):visible",
     "button:has-text('Siguiente'):visible",
+    "button:has-text('Suivant'):visible",
+    "button:has-text('Avanti'):visible",
+    "button:has-text('Volgende'):visible",
+    "button:has-text('Continuar'):visible",
+    "button:has-text('Avançar'):visible",
     "input[value='NEXT' i]:visible",
     "input[value='Next' i]:visible",
-    "[role='button']:has-text('Next'):visible"
+    "input[value='Continue' i]:visible",
+    "input[value='Siguiente' i]:visible",
+    "input[value='Suivant' i]:visible",
+    "[role='button']:has-text('Next'):visible",
+    "[role='button']:has-text('Continue'):visible",
+    "[data-action*='next' i]:visible",
+    ".btn-next:visible, .button-next:visible, .next-step:visible"
   ];
 
-  for (let step = 0; step < 4; step++) {
+  for (let step = 0; step < 3; step++) {
     let clickedNext = false;
     for (const nextSel of nextStepSelectors) {
       const nextBtn = page.locator(nextSel).first();
-      if ((await nextBtn.count()) > 0 && (await nextBtn.isVisible().catch(() => false))) {
-        // If there are visible unchecked checkboxes, check the first one to allow next step
+      if ((await nextBtn.count().catch(() => 0)) > 0 && (await nextBtn.isVisible().catch(() => false))) {
         const visibleCbs = page.locator("input[type='checkbox']:visible");
-        const cbCount = await visibleCbs.count().catch(() => 0);
-        if (cbCount > 0) {
+        if ((await visibleCbs.count().catch(() => 0)) > 0) {
           const firstCb = visibleCbs.first();
           if (!(await firstCb.isChecked().catch(() => false))) {
             await firstCb.check({ force: true }).catch(() => undefined);
@@ -1078,7 +1186,7 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
         }
         await nextBtn.scrollIntoViewIfNeeded().catch(() => undefined);
         await nextBtn.click({ force: true }).catch(() => undefined);
-        await page.waitForTimeout(1200);
+        await page.waitForTimeout(1000);
         clickedNext = true;
         if (leadData) {
           await fillAllVisibleForms(page, leadData).catch(() => undefined);
@@ -1088,44 +1196,60 @@ export async function findSubmitButton(page: Page, leadData?: LeadData, targetFo
     }
 
     if (clickedNext) {
-      for (const selector of selectors) {
-        const locators = page.locator(selector);
-        const count = await locators.count().catch(() => 0);
-        for (let i = 0; i < count; i++) {
-          const loc = locators.nth(i);
-          if (await loc.isVisible().catch(() => false)) {
-            return loc;
-          }
-        }
+      const reEval = primaryForm ? await evaluateLocator(primaryForm) : await evaluatePageOrFrame(page);
+      if (reEval && reEval.selectedCandidate) {
+        const targetScope = primaryForm ?? page;
+        const locator = targetScope.locator("[data-sdi-submit='selected']").first();
+        return { locator, diagnostics: reEval };
       }
     } else {
       break;
     }
   }
 
-  // Also check inside child frames (e.g. Dubsado on zachtoth.com, embedded forms)
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    for (const selector of selectors) {
-      const locators = frame.locator(selector);
-      const count = await locators.count().catch(() => 0);
-      for (let i = 0; i < count; i++) {
-        const loc = locators.nth(i);
-        if (await loc.isVisible().catch(() => false)) {
-          return loc;
-        }
-        await loc.scrollIntoViewIfNeeded().catch(() => undefined);
-        if (await loc.isVisible().catch(() => false)) {
-          return loc;
-        }
+  // 5. Fallback safety net for zero-height Gravity / Forminator buttons
+  const fallbackSelectors = [
+    "button[type='submit']",
+    "input[type='submit']",
+    ".wpcf7-submit",
+    ".gform_button",
+    ".forminator-button-submit",
+    "button.wpforms-submit",
+    "button:has-text('Submit')",
+    "button:has-text('Send')"
+  ];
+  for (const sel of fallbackSelectors) {
+    const loc = (primaryForm ?? page).locator(sel).first();
+    if ((await loc.count().catch(() => 0)) > 0) {
+      await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => undefined);
+      if (await loc.isVisible().catch(() => false)) {
+        return {
+          locator: loc,
+          diagnostics: {
+            submitCandidateCount: 1,
+            rejectedCandidateCount: 0,
+            selectedCandidate: { tagName: "button", type: "submit", text: "Fallback Match", score: 60 },
+            selectedScore: 60,
+            rejectionReasons: []
+          }
+        };
       }
     }
   }
 
-  return null;
+  return { locator: null, diagnostics: defaultDiag };
 }
 
-async function detectBookingWidget(page: Page): Promise<BookingWidgetDetection> {
+export async function findSubmitButton(page: Page, leadData?: LeadData, targetForm?: Locator | null): Promise<Locator | null> {
+  const { locator } = await findSubmitButtonWithDiagnostics(page, leadData, targetForm);
+  return locator;
+}
+
+export async function detectBookingWidget(page: Page, fieldsFilledCount = 0): Promise<BookingWidgetDetection> {
+  const frames = page.frames();
+  const frameURLs = frames.map((f) => f.url()).filter((u) => u && u !== "about:blank");
+  const frameCount = frames.length;
+
   const iframeMatch = await page
     .locator("iframe")
     .evaluateAll((iframes) => {
@@ -1136,19 +1260,19 @@ async function detectBookingWidget(page: Page): Promise<BookingWidgetDetection> 
         const lowerTitle = title.toLowerCase();
 
         if (lowerSrc.includes("calendly") || lowerTitle.includes("calendly")) {
-          return "iframe contains Calendly";
+          return { widgetType: "calendly", reason: "iframe contains Calendly" };
         }
 
         if (lowerSrc.includes("leadconnector") || lowerSrc.includes("highlevel") || lowerTitle.includes("leadconnector")) {
-          return "iframe contains LeadConnector / HighLevel booking widget";
+          return { widgetType: "leadconnector", reason: "iframe contains LeadConnector / HighLevel booking widget" };
         }
 
         if (/(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com/i.test(lowerSrc) || lowerSrc.includes("meetings.hubspot.com")) {
-          return "iframe contains HubSpot Meetings";
+          return { widgetType: "hubspot", reason: "iframe contains HubSpot Meetings" };
         }
 
         if (/acuityscheduling\.com|tidycal\.com|simplybook\.me|youcanbook\.me|calendarhero\.com|appointlet\.com|setmore\.com|cal\.com/i.test(lowerSrc)) {
-          return "iframe contains booking calendar widget";
+          return { widgetType: "third_party", reason: "iframe contains booking calendar widget" };
         }
       }
 
@@ -1157,76 +1281,85 @@ async function detectBookingWidget(page: Page): Promise<BookingWidgetDetection> 
     .catch(() => null);
 
   if (iframeMatch) {
-    return { found: true, reason: iframeMatch };
+    return {
+      found: true,
+      state: "BOOKING_FRAME_FOUND",
+      reason: iframeMatch.reason,
+      frameCount,
+      frameURLs,
+      widgetType: iframeMatch.widgetType
+    };
   }
 
-  const textMatch = await page
-    .locator("body")
-    .innerText({ timeout: 5000 })
-    .then((text) => {
-      const normalized = text.toLowerCase().replace(/\s+/g, " ");
-      const phrases = [
-        "select a date & time",
-        "schedule a meeting",
-        "book a call",
-        "choose a time"
-      ];
+  const containerMatch = await page.evaluate(() => {
+    const calendarContainers = document.querySelectorAll(
+      ".widgets-step-1, .label-select-date, .vdpCell.selectable, [class*='booking-calendar' i], [class*='scheduler' i], [data-testid*='calendar' i], [class*='calendar-grid' i], [role='grid'][aria-label*='calendar' i]"
+    );
+    return calendarContainers.length > 0;
+  }).catch(() => false);
 
-      return phrases.find((phrase) => normalized.includes(phrase)) ?? null;
-    })
-    .catch(() => null);
-
-  if (textMatch) {
-    return { found: true, reason: `text contains "${textMatch}"` };
+  if (containerMatch) {
+    return {
+      found: true,
+      state: "BOOKING_CONTAINER_FOUND",
+      reason: "calendar container element detected",
+      frameCount,
+      frameURLs,
+      widgetType: "embedded_container"
+    };
   }
 
-  const slotReason = await page
-    .locator("button, [role='button'], a")
+  const dateGridMatch = await page
+    .locator("button, [role='button'], [role='gridcell']")
     .evaluateAll((elements) => {
-      const visibleElements = elements.filter((element) => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
+      const visible = elements.filter((el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
         return (
           style.visibility !== "hidden" &&
           style.display !== "none" &&
           rect.width > 0 &&
-          rect.height > 0
+          rect.height > 0 &&
+          !el.closest("footer, header, nav")
         );
       });
-      const slotTextPattern =
-        /\b(\d{1,2}:\d{2}\s?(am|pm)|\d{1,2}\s?(am|pm)|today|tomorrow|morning|afternoon|evening)\b/i;
-      const dateLabelPattern =
-        /\b(mon|tue|wed|thu|fri|sat|sun|january|february|march|april|may|june|july|august|september|october|november|december)\b/i;
-      const explicitSlot = visibleElements.find((element) => {
-        const text = element.textContent ?? "";
-        const label = element.getAttribute("aria-label") ?? "";
-        const combined = `${text} ${label}`;
-        return slotTextPattern.test(combined) || dateLabelPattern.test(combined);
-      });
-
-      if (explicitSlot) {
-        return "button with date/time slot text";
-      }
-
-      const numericButtons = visibleElements.filter((element) => {
-        const text = (element.textContent ?? "").trim();
-        const label = element.getAttribute("aria-label") ?? "";
+      const numericButtons = visible.filter((el) => {
+        const text = (el.textContent ?? "").trim();
+        const label = el.getAttribute("aria-label") ?? "";
         return /^\d{1,2}$/.test(text) || /\b\d{1,2},?\s?\d{4}\b/.test(label);
       });
-
-      if (numericButtons.length >= 5) {
-        return "multiple date-slot buttons detected";
-      }
-
-      return null;
+      return numericButtons.length >= 5;
     })
-    .catch(() => null);
+    .catch(() => false);
 
-  if (slotReason) {
-    return { found: true, reason: slotReason };
+  if (dateGridMatch) {
+    return {
+      found: true,
+      state: "BOOKING_READY",
+      reason: "multiple date-slot buttons detected",
+      frameCount,
+      frameURLs,
+      widgetType: "interactive_calendar_grid"
+    };
   }
 
-  return { found: false, reason: null };
+  if (fieldsFilledCount >= 2) {
+    return {
+      found: false,
+      state: "BOOKING_NOT_FOUND",
+      reason: null,
+      frameCount,
+      frameURLs
+    };
+  }
+
+  return {
+    found: false,
+    state: "BOOKING_NOT_FOUND",
+    reason: null,
+    frameCount,
+    frameURLs
+  };
 }
 
 async function submitBookingWidget({
@@ -1345,7 +1478,25 @@ async function checkSuccessText(page: Page): Promise<boolean> {
     "inquiry has been sent",
     "request submitted",
     "form submitted successfully",
-    "as soon as possible"
+    "as soon as possible",
+    // Multilingual Success Patterns
+    "gracias por contactar",
+    "mensaje enviado",
+    "hemos recibido su mensaje",
+    "solicitud enviada",
+    "merci pour votre message",
+    "message envoyé",
+    "bien reçu votre message",
+    "vielen dank für ihre nachricht",
+    "nachricht erfolgreich gesendet",
+    "ihre anfrage wurde gesendet",
+    "grazie per averci contattato",
+    "messaggio inviato",
+    "richiesta inviata",
+    "obrigado por entrar em contato",
+    "mensagem enviada",
+    "bedankt voor uw bericht",
+    "bericht succesvol verzonden"
   ];
 
   const bodyText = (await page.locator("body").innerText({ timeout: 1500 }).catch(() => ""))
@@ -1377,7 +1528,11 @@ async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
     const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
     const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-    await page.screenshot({ path: absolutePath, fullPage: true, timeout: 15000, animations: "disabled" });
+    try {
+      await page.screenshot({ path: absolutePath, fullPage: true, timeout: 5000, animations: "disabled" });
+    } catch {
+      await page.screenshot({ path: absolutePath, fullPage: false, timeout: 3000 });
+    }
     return `/screenshots/${fileName}`;
   } catch (err) {
     console.warn("Screenshot capture skipped:", err);
@@ -1479,6 +1634,13 @@ export async function submitContactForm({
   let skippedFields: string[] = [];
   let fillMetrics: FormFillMetrics | null = null;
 
+  const tStart = Date.now();
+  let tNav = 0;
+  let tReadiness = 0;
+  let tFieldFilling = 0;
+  let tSubmitDiscovery = 0;
+  let submitDiag: SubmitCandidateDiagnostic | null = null;
+
   try {
     if (browserContext) {
       page = await browserContext.newPage();
@@ -1523,6 +1685,7 @@ export async function submitContactForm({
     activePage.on("response", responseHandler);
 
     let navResponse: any = null;
+    const tNavStart = Date.now();
     try {
       navResponse = await Promise.race([
         activePage.goto(websiteUrl, {
@@ -1548,17 +1711,11 @@ export async function submitContactForm({
     } finally {
       activePage.off("response", responseHandler);
     }
+    tNav = Date.now() - tNavStart;
 
     if (navResponse?.status() === 407 || proxy407Hit) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
     }
-
-    // Bounded wait for dynamic form or inputs to mount (HubSpot, LeadConnector, SPA embeds)
-    await activePage
-      .locator("form:not([action*='search']), input:not([type=hidden]):not([type=search]), textarea")
-      .first()
-      .waitFor({ state: "attached", timeout: 3500 })
-      .catch(() => undefined);
 
     const pageBodyText = await activePage.locator("body").innerText({ timeout: 1500 }).catch(() => "");
     if (isProxyAuthenticationFailure(null, navResponse?.status(), pageBodyText)) {
@@ -1577,20 +1734,12 @@ export async function submitContactForm({
       throw new Error("Unsupported verification: Robot Challenge Screen detected. Manual verification required.");
     }
 
-    // Auto-accept cookie consent banners so contact forms and submit buttons become visible
+    // Progressive Dynamic Page Readiness
+    const tReadinessStart = Date.now();
     await dismissCookieBanners(activePage).catch(() => undefined);
-
-    await activePage
-      .locator("form, input, textarea, select, button[type='submit'], input[type='submit']")
-      .first()
-      .waitFor({
-        state: "attached",
-        timeout: Math.min(timeoutMs, 15000)
-      })
-      .catch(() => undefined);
-
+    await waitForDynamicPageReadiness(activePage, Math.min(timeoutMs, 8000));
     await dismissCookieBanners(activePage).catch(() => undefined);
-    await page.waitForTimeout(500);
+    tReadiness = Date.now() - tReadinessStart;
 
     const verification = await detectUnsupportedVerification(page, websiteUrl);
     if (verification) {
@@ -1598,9 +1747,10 @@ export async function submitContactForm({
       throw new Error(verification.reason);
     }
 
-    // Fill the selected primary form only once. Repeating this pass cleared
-    // and retyped every field, making each website visibly slower.
+    // Fill the selected primary form only once.
+    const tFillStart = Date.now();
     const fillResult = await fillAllVisibleForms(page, leadData);
+    tFieldFilling = Date.now() - tFillStart;
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
     fillMetrics = fillResult.metrics;
@@ -1609,33 +1759,43 @@ export async function submitContactForm({
     if (fillMetrics && fillMetrics.unmappedRequiredFields.length > 0) {
       const unmappedSummary = fillMetrics.unmappedRequiredFields.join(", ");
       console.warn(`[contact-form-automation] Unmapped required fields on ${websiteUrl}: ${unmappedSummary}`);
+      if (fillMetrics.unmappedRequiredFields.some((f) => /captcha|turnstile|recaptcha|challenge/i.test(f))) {
+        throw new Error(`Unsupported verification: CAPTCHA required field detected (${unmappedSummary}). Manual verification required.`);
+      }
       throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}`);
     }
 
     // Dismiss any newly popped cookie consent banners
     await dismissCookieBanners(activePage).catch(() => undefined);
 
-    // Some services show bot protection only after their client-side form has
-    // hydrated. Check once more before locating the submit action.
+    // Check once more after form fill for late bot challenges
     const postFillVerification = await detectUnsupportedVerification(page, websiteUrl);
     if (postFillVerification) {
       if (postFillVerification.screenshotPath) screenshotPath = postFillVerification.screenshotPath;
       throw new Error(postFillVerification.reason);
     }
 
-    let submitButton = await findSubmitButton(page, leadData, fillResult.primaryForm);
+    const tSubmitStart = Date.now();
+    const submitResult = await findSubmitButtonWithDiagnostics(page, leadData, fillResult.primaryForm);
+    let submitButton = submitResult.locator;
+    submitDiag = submitResult.diagnostics;
 
-    // Bounded hydration polling window (up to 2.5s) for asynchronously mounted/enabled submit buttons
+    // Bounded hydration polling window (up to 1.6s) for asynchronously mounted/enabled submit buttons
     if (!submitButton) {
-      for (let poll = 0; poll < 5; poll++) {
-        await page.waitForTimeout(500);
-        submitButton = await findSubmitButton(page, leadData, fillResult.primaryForm);
-        if (submitButton) break;
+      for (let poll = 0; poll < 4; poll++) {
+        await page.waitForTimeout(400);
+        const retry = await findSubmitButtonWithDiagnostics(page, leadData, fillResult.primaryForm);
+        if (retry.locator) {
+          submitButton = retry.locator;
+          submitDiag = retry.diagnostics;
+          break;
+        }
       }
     }
+    tSubmitDiscovery = Date.now() - tSubmitStart;
 
     if (!submitButton) {
-      const bookingWidget = await detectBookingWidget(page);
+      const bookingWidget = await detectBookingWidget(page, filledFields.length);
 
       if (bookingWidget.found) {
         const result = await submitBookingWidget({
@@ -1658,7 +1818,7 @@ export async function submitContactForm({
 
     if (shouldSubmit) {
       await dismissCookieBanners(activePage).catch(() => undefined);
-      await submitButton.scrollIntoViewIfNeeded().catch(() => undefined);
+      await submitButton.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => undefined);
       // Wait for either navigation (redirect) or immediate DOM update/AJAX completion
       try {
         await Promise.allSettled([
@@ -1685,20 +1845,60 @@ export async function submitContactForm({
       throw new Error("Submit clicked, but no success message or successful page response was detected.");
     }
 
+    const totalMs = Date.now() - tStart;
+    const stageTiming: StageTimingMetrics = {
+      navigationMs: tNav,
+      readinessMs: tReadiness,
+      fieldFillingMs: tFieldFilling,
+      submitDiscoveryMs: tSubmitDiscovery,
+      totalMs
+    };
+
+    const finalFieldsDetected = fillMetrics?.fieldsDetected ?? (filledFields.length > 0 ? filledFields.length : 0);
+    const finalFieldsClassified = fillMetrics?.fieldsClassified ?? (filledFields.length > 0 ? filledFields.length : 0);
+    const finalFieldsFilled = fillMetrics?.filledFieldsCount ?? filledFields.length;
+    const finalFieldsVerified = fillMetrics?.verifiedFieldsCount ?? filledFields.length;
+    const finalUnmappedRequired = fillMetrics?.unmappedRequiredFields ?? [];
+
+    const invariantCheck = evaluateFinalAutomationSuccess({
+      targetType: "contact_form",
+      status: shouldSubmit ? "success" : "dry_run_ready_to_book",
+      fieldsDetected: finalFieldsDetected,
+      fieldsClassified: finalFieldsClassified,
+      fieldsFilled: finalFieldsFilled,
+      fieldsVerified: finalFieldsVerified,
+      unmappedRequiredFields: finalUnmappedRequired,
+      submitControlFound: Boolean(submitButton),
+      submitControlScore: submitDiag?.selectedScore ?? 0,
+      errorMessage: null,
+      discoveryReason: null
+    });
+
+    if (!invariantCheck.isSuccess) {
+      throw new Error(`INVARIANT_GATE_REJECTED: [${invariantCheck.taxonomyCategory}] ${invariantCheck.failureReason}`);
+    }
+
     const result: SubmitContactFormResult = {
       websiteUrl,
       status: shouldSubmit ? "success" : "dry_run_ready_to_book",
       errorMessage: null,
+      message: shouldSubmit ? "Contact form submitted successfully." : "Dry run: Form fields filled and submit button verified.",
       screenshotPath,
       submittedAt,
       filledFields,
       skippedFields,
       bookingWidgetReason: null,
-      filledFieldsCount: fillMetrics?.filledFieldsCount ?? filledFields.length,
-      verifiedFieldsCount: fillMetrics?.verifiedFieldsCount ?? filledFields.length,
-      unmappedRequiredFields: fillMetrics?.unmappedRequiredFields ?? [],
+      fieldsDetectedCount: finalFieldsDetected,
+      fieldsClassifiedCount: finalFieldsClassified,
+      filledFieldsCount: finalFieldsFilled,
+      verifiedFieldsCount: finalFieldsVerified,
+      unmappedRequiredFields: finalUnmappedRequired,
       unmappedOptionalFields: fillMetrics?.unmappedOptionalFields ?? [],
-      fieldVerificationItems: fillMetrics?.items ?? []
+      fieldVerificationItems: fillMetrics?.items ?? [],
+      stageTiming,
+      submitCandidateCount: submitDiag?.submitCandidateCount,
+      rejectedCandidateCount: submitDiag?.rejectedCandidateCount,
+      selectedCandidateInfo: submitDiag?.selectedCandidate
     };
 
     if (!skipPersist) {
@@ -1720,6 +1920,15 @@ export async function submitContactForm({
       );
     }
 
+    const totalMs = Date.now() - tStart;
+    const stageTiming: StageTimingMetrics = {
+      navigationMs: tNav,
+      readinessMs: tReadiness,
+      fieldFillingMs: tFieldFilling,
+      submitDiscoveryMs: tSubmitDiscovery,
+      totalMs
+    };
+
     const result: SubmitContactFormResult = {
       websiteUrl,
       status: "failed",
@@ -1729,11 +1938,17 @@ export async function submitContactForm({
       filledFields,
       skippedFields,
       bookingWidgetReason: null,
+      fieldsDetectedCount: fillMetrics?.fieldsDetected ?? 0,
+      fieldsClassifiedCount: fillMetrics?.fieldsClassified ?? 0,
       filledFieldsCount: fillMetrics?.filledFieldsCount ?? filledFields.length,
       verifiedFieldsCount: fillMetrics?.verifiedFieldsCount ?? 0,
       unmappedRequiredFields: fillMetrics?.unmappedRequiredFields ?? [],
       unmappedOptionalFields: fillMetrics?.unmappedOptionalFields ?? [],
-      fieldVerificationItems: fillMetrics?.items ?? []
+      fieldVerificationItems: fillMetrics?.items ?? [],
+      stageTiming,
+      submitCandidateCount: submitDiag?.submitCandidateCount,
+      rejectedCandidateCount: submitDiag?.rejectedCandidateCount,
+      selectedCandidateInfo: submitDiag?.selectedCandidate
     };
 
     if (!skipPersist) {

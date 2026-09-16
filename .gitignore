@@ -16,7 +16,12 @@ tsconfig.tsbuildinfo
 *.log
 tmp-*.png
 artifact_work/
+.artifact-work/
 outputs/
 scratch/
 *.db-shm
 *.db-wal
+node.exe
+cookies.txt
+headers.txt
+

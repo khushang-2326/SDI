@@ -1,7 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { chromium, type Browser, type Locator, type Page, type BrowserContext } from "playwright";
+import { chromium, type Browser, type Locator, type Page, type BrowserContext, type Frame } from "playwright";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
+
+type BookingScope = Page | Frame;
+
+function getCandidateScopes(page: Page): BookingScope[] {
+  const frames = page.frames();
+  return [page, ...frames.filter((f) => f !== page.mainFrame())];
+}
 import { prisma } from "@/lib/prisma";
 import {
   LeadData,
@@ -158,57 +165,54 @@ async function visibleEnabled(locator: Locator) {
   );
 }
 
-async function scrollToBookingWidget(page: Page) {
-  // Keep CSS selectors separate from text matching. Playwright selector
-  // engines cannot safely be combined in one comma-separated locator.
-  const schedulerElements = page.locator([
-    ".widgets-step-1",
-    ".label-select-date",
-    ".vdpCell.selectable",
-    "[class*='booking-calendar' i]",
-    "[class*='scheduler' i]"
-  ].join(", ")).first();
+async function scrollToBookingWidget(page: Page): Promise<{ found: boolean; activeScope: BookingScope }> {
+  const scopes = getCandidateScopes(page);
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (const scope of scopes) {
+      const schedulerElements = scope.locator([
+        ".widgets-step-1",
+        ".label-select-date",
+        ".vdpCell.selectable",
+        "[class*='booking-calendar' i]",
+        "[class*='scheduler' i]",
+        "[data-testid*='calendar' i]",
+        "[class*='calendar-grid' i]"
+      ].join(", ")).first();
 
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    if ((await schedulerElements.count().catch(() => 0)) > 0 && (await schedulerElements.isVisible().catch(() => false))) {
-      await schedulerElements.scrollIntoViewIfNeeded().catch(() => undefined);
-      await sleep(1000);
-      return true;
+      if ((await schedulerElements.count().catch(() => 0)) > 0 && (await schedulerElements.isVisible().catch(() => false))) {
+        await schedulerElements.scrollIntoViewIfNeeded().catch(() => undefined);
+        return { found: true, activeScope: scope };
+      }
+
+      const dateControls = scope.locator("button, [role='button'], .vdpCell.selectable, [aria-label*='slot available' i], [data-date]");
+      if (await dateControls.count().then((count) => count >= 2).catch(() => false)) {
+        return { found: true, activeScope: scope };
+      }
+
+      const calendarIsPresent = await scope.locator("button, [role='button']")
+        .filter({ hasText: /^\s*(?:today\s*)?\d{1,2}\s*(?:[a-z]+)?\s*$/i })
+        .count()
+        .then((count) => count >= 2)
+        .catch(() => false);
+      if (calendarIsPresent) return { found: true, activeScope: scope };
     }
-
-    const pageText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
-    const hasSchedulerText = /step\s*1|select date(?: &| and) time|choose date(?: and| &) time|active calendars/i.test(pageText);
-    if (hasSchedulerText) {
-      const dateControls = page.locator("button, [role='button'], .vdpCell.selectable");
-      if (await dateControls.count().then((count) => count >= 2).catch(() => false)) return true;
-    }
-
-    const calendarIsPresent = await page.locator("button, [role='button']")
-      .filter({ hasText: /^\s*(?:today\s*)?\d{1,2}\s*(?:[a-z]+)?\s*$/i })
-      .count()
-      .then((count) => count >= 2)
-      .catch(() => false);
-    if (calendarIsPresent) return true;
 
     await page.mouse.wheel(0, 850).catch(() => undefined);
-    await sleep(700);
+    await sleep(400);
   }
 
-  return false;
+  return { found: false, activeScope: page };
 }
 
-async function collectDateCandidates(page: Page, preferredDate?: string) {
+async function collectDateCandidates(scope: BookingScope, preferredDate?: string) {
   const preferredDay = parseDayFromPreference(preferredDate);
-  const candidates = await page.locator("button, [role='button'], .vdpCell.selectable").evaluateAll((buttons) =>
+  const candidates = await scope.locator("button, [role='button'], .vdpCell.selectable, [aria-label*='slot available' i], [data-date]").evaluateAll((buttons) =>
     buttons
       .map((button, index) => {
         const style = window.getComputedStyle(button);
         const rect = button.getBoundingClientRect();
         const rawText = button.textContent?.replace(/\s+/g, " ").trim() ?? "";
         const accessibleLabel = button.getAttribute("aria-label") ?? "";
-        // Pipedrive day cards include the complete accessible date in their
-        // text (e.g. "Today September 4, 2026"). Extract the day before
-        // falling back to compact calendar controls that contain only "4".
         const dateLabel = `${accessibleLabel} ${rawText}`;
         const dayFirstMatch = dateLabel.match(
           /\b(\d{1,2})\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)\b/i
@@ -253,17 +257,23 @@ async function collectDateCandidates(page: Page, preferredDate?: string) {
   });
 }
 
-async function visibleTimeSlotExists(page: Page) {
-  const slot = page.locator("button, [role='button'], a, .widgets-time-slot").filter({
+async function visibleTimeSlotExists(scope: BookingScope) {
+  const slot = scope.locator("button, [role='button'], a, .widgets-time-slot").filter({
     hasText: /\b\d{1,2}:\d{2}\s?(am|pm)\b/i
   }).first();
 
-  return (await slot.count().catch(() => 0)) > 0 && (await slot.isVisible().catch(() => false));
+  return (await slot.waitFor({ state: "visible", timeout: 3500 }).then(() => true).catch(() => false));
 }
 
-async function chooseDate(page: Page, preferredDate?: string) {
-  const candidates = await collectDateCandidates(page, preferredDate);
-  const buttons = page.locator("button, [role='button'], .vdpCell.selectable");
+async function chooseDate(scope: BookingScope, preferredDate?: string) {
+  const deadline = Date.now() + 6000;
+  let candidates: Awaited<ReturnType<typeof collectDateCandidates>> = [];
+  while (Date.now() < deadline) {
+    candidates = await collectDateCandidates(scope, preferredDate);
+    if (candidates.length > 0) break;
+    await sleep(400);
+  }
+  const buttons = scope.locator("button, [role='button'], .vdpCell.selectable, [aria-label*='slot available' i], [data-date]");
 
   for (const candidate of candidates.slice(0, 18)) {
     const button = buttons.nth(candidate.index);
@@ -272,7 +282,7 @@ async function chooseDate(page: Page, preferredDate?: string) {
     await button.click({ timeout: 3000 }).catch(() => undefined);
     await sleep(900);
 
-    if (await visibleTimeSlotExists(page)) {
+    if (await visibleTimeSlotExists(scope)) {
       return candidate.text;
     }
   }
@@ -318,12 +328,12 @@ function cleanTimeForComparison(val: string): string {
   return val.toLowerCase().replace(/[\s:.,-]/g, "");
 }
 
-async function chooseTime(page: Page, preferredTime?: string) {
+async function chooseTime(scope: BookingScope, preferredTime?: string) {
   const rounded = roundPreferredTime(preferredTime);
   const cleanPreferred = rounded ? cleanTimeForComparison(rounded) : "";
   const cleanPreferredNoAmPm = cleanPreferred.replace(/am|pm/g, "");
 
-  const timeButtons = page.locator("button, [role='button'], a, .widgets-time-slot").filter({
+  const timeButtons = scope.locator("button, [role='button'], a, .widgets-time-slot").filter({
     hasText: /\b\d{1,2}:\d{2}\s?(am|pm)\b/i
   });
   await timeButtons.first().waitFor({ state: "visible", timeout: 20000 }).catch(() => undefined);
@@ -366,10 +376,8 @@ async function chooseTime(page: Page, preferredTime?: string) {
   return selected.text;
 }
 
-async function clickNextStep(page: Page) {
-  // Pipedrive and similar schedulers reveal the invitee form immediately
-  // after choosing a time, with no intermediate Next/Select button.
-  const inviteeField = page.locator([
+async function clickNextStep(scope: BookingScope) {
+  const inviteeField = scope.locator([
     'input[type="email"]',
     'input[name*="email" i]',
     'input[placeholder*="email" i]',
@@ -378,7 +386,7 @@ async function clickNextStep(page: Page) {
   ].join(", ")).first();
   if (await inviteeField.isVisible().catch(() => false)) return true;
 
-  const button = page.locator("button, [role='button']").filter({ hasText: /next step|next|continue|^select$/i }).first();
+  const button = scope.locator("button, [role='button']").filter({ hasText: /next step|next|continue|^select$/i }).first();
 
   await button.waitFor({ state: "visible", timeout: 20000 }).catch(() => undefined);
   if (!(await visibleEnabled(button))) return false;
@@ -406,22 +414,21 @@ async function fillFirstAvailable(locators: Locator[], value: string, lookupTime
   return false;
 }
 
-async function fillBookingForm(page: Page, leadData: LeadData) {
+async function fillBookingForm(scope: BookingScope, leadData: LeadData) {
   const filledFields: string[] = [];
   const skippedFields: string[] = [];
   const { firstName, lastName } = splitName(leadData.fullName);
 
   const firstNameFilled = await fillFirstAvailable(
     [
-      page.locator('input[name*="first" i]'),
-      page.locator('input[placeholder*="First" i]'),
-      page.locator('input[aria-label*="First" i]'),
-      page.locator('input[name="name" i]'),
-      page.locator('input[name*="name" i]:not([type="email"])'),
-      page.locator('input[placeholder="Name" i]'),
-      page.locator('input[aria-label="Name" i]')
+      scope.locator('input[name*="first" i]'),
+      scope.locator('input[placeholder*="First" i]'),
+      scope.locator('input[aria-label*="First" i]'),
+      scope.locator('input[name="name" i]'),
+      scope.locator('input[name*="name" i]:not([type="email"])'),
+      scope.locator('input[placeholder="Name" i]'),
+      scope.locator('input[aria-label="Name" i]')
     ],
-    // Schedulers with one Name field receive the full lead name.
     lastName ? leadData.fullName : firstName
   );
   firstNameFilled ? filledFields.push("fullName") : skippedFields.push("fullName");
@@ -429,10 +436,10 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
   if (lastName) {
     await fillFirstAvailable(
       [
-        page.locator('input[name*="surname" i]'),
-        page.locator('input[name*="last" i]'),
-        page.locator('input[placeholder*="Last" i]'),
-        page.locator('input[aria-label*="Last" i]')
+        scope.locator('input[name*="surname" i]'),
+        scope.locator('input[name*="last" i]'),
+        scope.locator('input[placeholder*="Last" i]'),
+        scope.locator('input[aria-label*="Last" i]')
       ],
       lastName,
       350
@@ -441,9 +448,9 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
 
   const emailFilled = await fillFirstAvailable(
     [
-      page.locator('input[type="email"]'),
-      page.locator('input[name*="email" i]'),
-      page.locator('input[placeholder*="Email" i]')
+      scope.locator('input[type="email"]'),
+      scope.locator('input[name*="email" i]'),
+      scope.locator('input[placeholder*="Email" i]')
     ],
     leadData.email
   );
@@ -452,9 +459,9 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
   if (leadData.companyName) {
     const companyFilled = await fillFirstAvailable(
       [
-        page.locator('input[name*="company" i]'),
-        page.locator('input[placeholder*="Company" i]'),
-        page.locator('input[aria-label*="Company" i]')
+        scope.locator('input[name*="company" i]'),
+        scope.locator('input[placeholder*="Company" i]'),
+        scope.locator('input[aria-label*="Company" i]')
       ],
       leadData.companyName,
       350
@@ -466,9 +473,9 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
   if (mobile) {
     const phoneFilled = await fillFirstAvailable(
       [
-        page.locator('input[type="tel"]'),
-        page.locator('input[name*="phone" i]'),
-        page.locator('input[placeholder*="Phone" i]')
+        scope.locator('input[type="tel"]'),
+        scope.locator('input[name*="phone" i]'),
+        scope.locator('input[placeholder*="Phone" i]')
       ],
       mobile,
       350
@@ -484,7 +491,7 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
 
   if (message) {
     const messageFilled = await fillFirstAvailable(
-      [page.locator("textarea"), page.locator('input[name*="message" i]')],
+      [scope.locator("textarea"), scope.locator('input[name*="message" i]')],
       message,
       350
     );
@@ -496,8 +503,8 @@ async function fillBookingForm(page: Page, leadData: LeadData) {
   return { filledFields, skippedFields };
 }
 
-async function clickFinalSubmit(page: Page) {
-  const button = page.locator("button, [role='button']").filter({ hasText: /submit|schedule|book|confirm/i }).first();
+async function clickFinalSubmit(scope: BookingScope) {
+  const button = scope.locator("button, [role='button']").filter({ hasText: /submit|schedule|book|confirm/i }).first();
 
   if (!(await visibleEnabled(button))) return false;
 
@@ -506,10 +513,12 @@ async function clickFinalSubmit(page: Page) {
   return true;
 }
 
-async function confirmationFound(page: Page) {
+async function confirmationFound(page: Page, scope?: BookingScope) {
   await page.waitForTimeout(2500);
-  const bodyText = await page.locator("body").innerText({ timeout: 5000 }).catch(() => "");
-  return /confirmed|booking confirmed|thank you|scheduled|submitted/i.test(bodyText);
+  const pageBodyText = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+  const scopeBodyText = scope && scope !== page ? await scope.locator("body").innerText({ timeout: 3000 }).catch(() => "") : "";
+  const combined = `${pageBodyText} ${scopeBodyText}`;
+  return /confirmed|booking confirmed|thank you|scheduled|submitted/i.test(combined);
 }
 
 export async function submitGenericBookingWidget({
@@ -530,6 +539,12 @@ export async function submitGenericBookingWidget({
   let selectedTime: string | null = null;
   let filledFields: string[] = [];
   let skippedFields: string[] = [];
+  let bookingProvider: string | null = "generic_scheduler";
+  let bookingContainerDetected = false;
+  let interactiveCalendarDetected = false;
+  let bookingState: "BOOKING_PROVIDER_FOUND" | "BOOKING_CONTAINER_MOUNTING" | "BOOKING_READY" | "BOOKING_NO_INVENTORY" | "BOOKING_BLOCKED" | "BOOKING_FAILED" = "BOOKING_PROVIDER_FOUND";
+  let availableSlotState: "available" | "none" | "unmounted" | "blocked" = "unmounted";
+  let requiredInteractionState: "ready" | "pending" | "failed" = "pending";
 
   async function finish(status: GenericBookingStatus, errorMessage: string | null) {
     const screenshotPath = page
@@ -550,7 +565,13 @@ export async function submitGenericBookingWidget({
       skippedFields,
       screenshotPaths,
       selectedDate,
-      selectedTime
+      selectedTime,
+      bookingProvider,
+      bookingContainerDetected,
+      bookingState,
+      interactiveCalendarDetected,
+      availableSlotState,
+      requiredInteractionState
     };
 
     if (!skipPersist) {
@@ -614,12 +635,15 @@ export async function submitGenericBookingWidget({
     // Use a bounded polling window (8 seconds) rather than stalling the worker.
     const widgetDeadline = Date.now() + Math.min(timeoutMs, 8000);
     let widgetFound = false;
+    let activeScope: BookingScope = page;
     while (Date.now() < widgetDeadline) {
-      if (await scrollToBookingWidget(page)) {
+      const res = await scrollToBookingWidget(page);
+      if (res.found) {
         widgetFound = true;
+        activeScope = res.activeScope;
         break;
       }
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(400);
     }
 
     if (!widgetFound) {
@@ -628,7 +652,7 @@ export async function submitGenericBookingWidget({
 
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "generic-booking-loaded"));
 
-    selectedDate = await chooseDate(page, bookingPreferences.preferredDate);
+    selectedDate = await chooseDate(activeScope, bookingPreferences.preferredDate);
 
     if (!selectedDate) {
       return finish("no_available_slots", "No date with available time slots was found.");
@@ -636,7 +660,7 @@ export async function submitGenericBookingWidget({
 
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "generic-booking-date-selected"));
 
-    selectedTime = await chooseTime(page, bookingPreferences.preferredTime);
+    selectedTime = await chooseTime(activeScope, bookingPreferences.preferredTime);
 
     if (!selectedTime) {
       return finish("no_available_slots", "No available time slots were found.");
@@ -644,17 +668,17 @@ export async function submitGenericBookingWidget({
 
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "generic-booking-time-selected"));
 
-    if (!(await clickNextStep(page))) {
+    if (!(await clickNextStep(activeScope))) {
       return finish("confirmation_not_found", "Next step button was not found after selecting a time.");
     }
 
-    await page
+    await activeScope
       .locator('input[type="email"], input[name*="first" i], input[placeholder*="First" i]')
       .first()
       .waitFor({ state: "visible", timeout: 25000 })
       .catch(() => undefined);
 
-    const fillResult = await fillBookingForm(page, leadData);
+    const fillResult = await fillBookingForm(activeScope, leadData);
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "generic-booking-form-filled"));
@@ -663,13 +687,13 @@ export async function submitGenericBookingWidget({
       return finish("dry_run_ready_to_book", null);
     }
 
-    const didClickFinal = await clickFinalSubmit(page);
+    const didClickFinal = await clickFinalSubmit(activeScope);
 
     if (!didClickFinal) {
       return finish("confirmation_not_found", "Final submit button was not found.");
     }
 
-    if (!(await confirmationFound(page))) {
+    if (!(await confirmationFound(page, activeScope))) {
       return finish("confirmation_not_found", "Final confirmation was not detected.");
     }
 

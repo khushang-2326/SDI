@@ -115,7 +115,39 @@ export type AcquireContextOptions = {
   disableProxy?: boolean;
   bandwidthSaver?: boolean;
   startupTimeoutMs?: number;
+  targetId?: string | number;
+  workerId?: string;
 };
+
+export type ContextMetadata = {
+  contextId: string;
+  targetId?: string | number;
+  workerId?: string;
+  createdAt: number;
+  closeInitiator?: "deadline" | "cleanup" | "manual" | "crash" | "unknown";
+  closeReason?: string;
+  isCrashed?: boolean;
+};
+
+const contextMetadataMap = new WeakMap<BrowserContext, ContextMetadata>();
+
+export function getContextMetadata(context: BrowserContext): ContextMetadata | undefined {
+  return contextMetadataMap.get(context);
+}
+
+export function markContextClosed(
+  context: BrowserContext,
+  initiator: "deadline" | "cleanup" | "manual" | "crash",
+  reason?: string
+): void {
+  const meta = contextMetadataMap.get(context);
+  if (meta) {
+    if (!meta.closeInitiator) {
+      meta.closeInitiator = initiator;
+      meta.closeReason = reason;
+    }
+  }
+}
 
 /**
  * Resolves the effective proxy configuration for a browser session.
@@ -201,16 +233,7 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     timezoneId: "America/New_York",
     ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
-      "Accept-Language": "en-US,en;q=0.9",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-      "Sec-Ch-Ua-Mobile": "?0",
-      "Sec-Ch-Ua-Platform": '"Windows"',
-      "Sec-Fetch-Dest": "document",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "none",
-      "Sec-Fetch-User": "?1",
-      "Upgrade-Insecure-Requests": "1"
+      "Accept-Language": "en-US,en;q=0.9"
     }
   };
 
@@ -271,6 +294,35 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     return route.continue();
   }).catch(() => undefined);
 
+  const contextId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const metadata: ContextMetadata = {
+    contextId,
+    targetId: options.targetId,
+    workerId: options.workerId,
+    createdAt: Date.now()
+  };
+  contextMetadataMap.set(context, metadata);
+
+  context.on("page", (page) => {
+    page.on("crash", () => {
+      metadata.isCrashed = true;
+      metadata.closeInitiator = "crash";
+      metadata.closeReason = "page crashed";
+    });
+  });
+
+  context.on("close", () => {
+    if (!metadata.closeInitiator) {
+      if (!browser.isConnected()) {
+        metadata.isCrashed = true;
+        metadata.closeInitiator = "crash";
+        metadata.closeReason = "browser disconnected";
+      } else {
+        metadata.closeInitiator = "cleanup";
+      }
+    }
+  });
+
   const mode: BrowserMode = headless ? "headless" : "headed";
   browserPools[mode].activeContexts++;
   browserPools[mode].contextsCreated++;
@@ -281,7 +333,15 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
 /**
  * Safely closes a context and handles browser error tracking.
  */
-export async function releaseContext(context: BrowserContext): Promise<void> {
+export async function releaseContext(
+  context: BrowserContext,
+  options?: { initiator?: "deadline" | "cleanup" | "manual"; reason?: string }
+): Promise<void> {
+  const meta = contextMetadataMap.get(context);
+  if (meta && !meta.closeInitiator) {
+    meta.closeInitiator = options?.initiator || "cleanup";
+    meta.closeReason = options?.reason || "releaseContext called";
+  }
   const mode = contextModes.get(context);
   await context.close().catch(() => undefined);
   if (mode) {

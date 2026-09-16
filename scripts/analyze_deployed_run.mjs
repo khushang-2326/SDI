@@ -23,13 +23,17 @@ async function run() {
   try {
     // 1. Login
     await page.goto(`${BASE_URL}/login`, { waitUntil: 'domcontentloaded' });
+    console.log("Current URL before login:", page.url());
     await page.fill('input[name="loginId"]', 'admin');
     await page.fill('input[name="password"]', 'admin123');
     await page.click('button:has-text("Sign in")');
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(4000);
+    console.log("Current URL after login click:", page.url());
+    await page.screenshot({ path: path.join(outputDir, '00_after_login_click.png') });
 
     // 2. Go to Automation Page
-    await page.goto(`${BASE_URL}/automation`, { waitUntil: 'domcontentloaded' });
+    console.log("Navigating to /automation...");
+    await page.goto(`${BASE_URL}/automation`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(3000);
 
     await page.screenshot({ path: path.join(outputDir, '01_automation_dashboard.png'), fullPage: true });

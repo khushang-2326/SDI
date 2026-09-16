@@ -23,6 +23,7 @@ import { extractFeatureVector, extractUniversalFeatureVector } from "./discovery
 import { scoreAndRankCandidates } from "./discovery/hybrid-ranker";
 import { recordDiscoveryFeedback } from "./discovery/feedback-store";
 import { unhideHiddenFormContainers } from "./contact-form-automation";
+import { waitForUniversalPageReadiness } from "./page-readiness";
 import type { CandidateFeatureVector, CandidateLocation, CandidateType } from "./discovery/types";
 export type { CandidateLocation, CandidateType };
 
@@ -59,7 +60,32 @@ const COMMON_TARGET_PATHS = [
   "/lets-talk",
   "/work-with-us",
   "/start-a-project",
-  "/talk-to-us"
+  "/talk-to-us",
+  // Multilingual Standard Paths
+  "/contacto",
+  "/contactenos",
+  "/pedir-cita",
+  "/cita-previa",
+  "/solicitar-demo",
+  "/solicitar-presupuesto",
+  "/nous-contacter",
+  "/contactez-nous",
+  "/devis",
+  "/demande-de-devis",
+  "/prendre-rendez-vous",
+  "/kontakt",
+  "/kontaktformular",
+  "/termin-vereinbaren",
+  "/anfrage",
+  "/contatti",
+  "/contattaci",
+  "/richiesta-preventivo",
+  "/fale-conosco",
+  "/agendamento",
+  "/solicitar-orcamento",
+  "/neem-contact-op",
+  "/afspraak-maken",
+  "/offerte"
 ];
 
 export type Candidate = {
@@ -104,7 +130,16 @@ const NAVIGATION_LINK_SELECTOR = [
   "a[href*='meeting']",
   "a[href*='consult']",
   "a[href*='started']",
-  "a[href*='inquire']"
+  "a[href*='inquire']",
+  "a[href*='contacto']",
+  "a[href*='kontakt']",
+  "a[href*='contatt']",
+  "a[href*='devis']",
+  "a[href*='anfrage']",
+  "a[href*='termin']",
+  "a[href*='presupuesto']",
+  "a[href*='orcamento']",
+  "a[href*='afspraak']"
 ].join(", ");
 
 const INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR = [
@@ -289,7 +324,7 @@ export function scoreTargetHint(text: string, href: string, location?: "header" 
 
   // URL Path Matches
   if (
-    /\/(contact|contact-us|contactus|get-in-touch|book-a-call|book-call|schedule|schedule-a-call|meeting|book-meeting|consultation|quote|request-quote|get-started|inquire|lets-talk)(\/|\?|#|$)/i.test(
+    /(?:^|\/)(contact|contact-us|contactus|contact-sales|contact_us|get-in-touch|book-a-call|book-call|schedule|schedule-a-call|meeting|book-meeting|consultation|quote|request-quote|get-started|inquire|lets-talk)(?:\/|\?|#|$)/i.test(
       normalizedHref
     )
   ) {
@@ -309,6 +344,9 @@ export function scoreTargetHint(text: string, href: string, location?: "header" 
   if (combined.includes("mailto:") || combined.includes("tel:")) score -= 50;
   if (combined.includes("privacy") || combined.includes("terms") || combined.includes("cookies") || combined.includes("blog") || combined.includes("news")) {
     score -= 30;
+  }
+  if (/templates|directory|locations|urgent-care-locations|find-office|store-locator|press|careers|jobs|case-studies/i.test(normalizedHref)) {
+    score -= 40;
   }
 
   return score;
@@ -553,13 +591,13 @@ export async function collectHttpDiscoveryCandidates(websiteUrl: string): Promis
 
 async function getVisibleFormScore(container: Page | Frame) {
   try {
-    const inputCount = await container.locator("input, textarea, select").count().catch(() => 0);
+    const inputCount = await container.locator("input:not([type=hidden]):not([type=search]), textarea, select, [role='textbox'], [contenteditable='true'], [role='form'], form").count().catch(() => 0);
     if (inputCount === 0) return 0;
 
     return await container
-      .locator("form, [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], input:not([type=hidden]), textarea, select, button[type='submit'], input[type='submit'], button, [role='button'], a[class*='btn'], a[class*='button'], a[class*='submit'], a[href*='submit']")
+      .locator("form, [role='form'], [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], [class*='contact-form'], input:not([type=hidden]), textarea, select, [role='textbox'], [contenteditable='true'], button[type='submit'], input[type='submit'], button, [role='button'], a[class*='btn'], a[class*='button'], a[class*='submit'], a[href*='submit']")
       .evaluateAll((elements) => {
-        const sliced = elements.slice(0, 100);
+        const sliced = elements.slice(0, 150);
         let hasEmail = false;
         let hasPhone = false;
         let hasMessage = false;
@@ -798,6 +836,12 @@ async function getVisibleFormScore(container: Page | Frame) {
 
         if (knownContainerMatched && (interactiveInputsCount >= 2 || (interactiveInputsCount >= 1 && hasProgression))) {
           return Math.max(score, 75);
+        }
+
+        // Structural Invariant: A valid contact form requires at least 2 interactive inputs,
+        // OR an input with a textarea message, OR a known CRM container, OR multi-step progression.
+        if (interactiveInputsCount < 2 && !hasMessage && !knownContainerMatched && !hasProgression) {
+          return Math.min(score, 40);
         }
 
         return score;
@@ -1265,11 +1309,21 @@ async function detectTargetWithLazyScroll(
   const initialResult = await detectTargetOnPage(page, url, candidateReason);
   if (initialResult) return initialResult;
 
+  // Fast-path: if page contains zero form/input/iframe cues and is not a dedicated contact URL, exit early
+  const hasAnyFormCues = await page.evaluate(() => {
+    return Boolean(document.querySelector(
+      "input:not([type='hidden']), textarea, select, [role='textbox'], [role='form'], form, iframe[src*='form'], iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='pardot'], iframe[src*='calendar'], iframe[src*='calendly'], iframe[src*='hubspot'], iframe[src*='leadconnector']"
+    ));
+  }).catch(() => false);
+  if (!hasAnyFormCues && !/contact|book|schedule|touch|reach|quote|appointment|inquir/i.test(url)) {
+    return null;
+  }
+
   // STEP 2: Wait a short bounded period for dynamic client-side form rendering (HubSpot, Marketo, React, Vue, CF7, Webflow, Acuity, LeadConnector)
   const dynamicFormAttached = await page
     .locator("form, [class*='wpcf7'], [class*='wpforms'], [class*='hs-form'], [class*='gform'], [class*='ninja-form'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form'], iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='pardot'], iframe[src*='acuity'], iframe[src*='leadconnector']")
     .first()
-    .waitFor({ state: "attached", timeout: 2000 })
+    .waitFor({ state: "attached", timeout: 1200 })
     .then(() => true)
     .catch(() => false);
 
@@ -1711,6 +1765,7 @@ async function discoverSubmissionTargetsInternal({
       });
     }
     page.setDefaultTimeout(timeoutMs);
+    const discoveryDeadlineAt = Date.now() + timeoutMs;
     await blockHeavyAssets(page);
 
     let proxy407Hit = false;
@@ -1819,9 +1874,18 @@ async function discoverSubmissionTargetsInternal({
       };
     }
 
-    // Fast-path: if a contact form is already present on the page, use it immediately
-    // rather than spending seconds crawling secondary navigation links.
-    if (directResult?.targetType === "contact_form") {
+    // Dedicated Contact Form Fast-Path:
+    // If the entered page already contains a dedicated, high-confidence contact form (or is a /contact URL),
+    // use it immediately. But if the root homepage only has a low-confidence/single-field widget,
+    // ensure dedicated navigation candidates like /contact or /contact-us are prioritized.
+    const isRootHomepage = withoutHash(page.url()) === normalizedWebsiteUrl || withoutHash(page.url()) === `${normalizedWebsiteUrl}/`;
+    const isDedicatedContactForm = directResult?.targetType === "contact_form" && (
+      !isRootHomepage ||
+      directResult.confidence >= 85 ||
+      /contact|reach|touch|book/i.test(page.url())
+    );
+
+    if (isDedicatedContactForm) {
       const targets = Array.from(discovered.values()).sort(
         (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
       );
@@ -1849,16 +1913,60 @@ async function discoverSubmissionTargetsInternal({
     let consecutiveSyntheticFailures = 0;
     let lastDetectedVerification: import("@/services/verification-detector").UnsupportedVerificationResult | null = null;
 
-    // Strict Real-Link Priority: all real DOM/HTTP/external links MUST be evaluated before synthetic common paths
-    const candidatesQueue: Candidate[] = [
+    // Strict Topology Priority:
+    // 1. Real DOM navigation candidates ALWAYS precede synthetic common-path guesses
+    // 2. High-intent contact/booking paths
+    // 3. Generic informational pages (services, locations, blog, careers, privacy, login) deprioritized
+    // 4. Candidate score
+    const isHighContactPath = (urlStr: string) => {
+      try {
+        const p = new URL(urlStr).pathname.toLowerCase();
+        return /(contact|get-in-touch|reach-us|talk-to-us|book-a-demo|book-now|schedule|inquiry|consultation)/i.test(p);
+      } catch {
+        return false;
+      }
+    };
+    const isNegativeInfoPath = (urlStr: string) => {
+      try {
+        const p = new URL(urlStr).pathname.toLowerCase();
+        return /\/(services|locations|careers|jobs|blog|news|press|privacy|terms|login|cart|checkout|publications|case-studies)\b/i.test(p);
+      } catch {
+        return false;
+      }
+    };
+
+    const rawQueue: Candidate[] = [
       ...navigationCandidates,
       ...fallbackCandidates.filter(fb => !navigationCandidates.some(nc => withoutHash(nc.url) === withoutHash(fb.url)))
     ];
+
+    rawQueue.sort((a, b) => {
+      // Real DOM navigation candidates ALWAYS precede synthetic common path fallbacks
+      const aIsNav = a.reason.startsWith("common path") ? 0 : 1;
+      const bIsNav = b.reason.startsWith("common path") ? 0 : 1;
+      if (aIsNav !== bIsNav) return bIsNav - aIsNav;
+
+      const aContact = isHighContactPath(a.url) ? 1 : 0;
+      const bContact = isHighContactPath(b.url) ? 1 : 0;
+      if (bContact !== aContact) return bContact - aContact;
+
+      const aNeg = isNegativeInfoPath(a.url) ? 1 : 0;
+      const bNeg = isNegativeInfoPath(b.url) ? 1 : 0;
+      if (aNeg !== bNeg) return aNeg - bNeg; // lower negative first
+
+      return b.score - a.score;
+    });
+
+    const candidatesQueue = rawQueue;
 
     let candidateIndex = 0;
     while (candidateIndex < candidatesQueue.length) {
       if (Array.from(discovered.values()).some((target) => target.targetType === "contact_form")) break;
       if (checkedUrls.length >= maxPageVisits) break;
+      if (Date.now() >= discoveryDeadlineAt - 1000) {
+        console.log(`[CONTACT-DISCOVERY] Approaching discovery deadline budget (${timeoutMs}ms). Exiting candidate loop.`);
+        break;
+      }
 
       const candidate = candidatesQueue[candidateIndex++];
       const candidateUrl = withoutHash(candidate.url);
@@ -1878,9 +1986,10 @@ async function discoverSubmissionTargetsInternal({
       );
       const mappedType = (candidate.candidateType?.toLowerCase() === "cta" ? "cta" : (candidate.candidateType || "anchor")) as any;
 
+      const candTimeout = Math.max(2000, Math.min(7000, discoveryDeadlineAt - Date.now() - 500));
       const candResponse = await page.goto(candidate.url, {
         waitUntil: "domcontentloaded",
-        timeout: Math.min(timeoutMs, 7000)
+        timeout: candTimeout
       }).catch(() => null);
 
       if (!candResponse) {
@@ -2088,7 +2197,7 @@ export async function discoverSubmissionTargets(
   input: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }
 ): Promise<DiscoverSubmissionTargetsResult> {
   const timeoutMs = input.timeoutMs ?? 8000;
-  const overallBudgetMs = Math.min(Math.max(timeoutMs * 4, 30000), 38000);
+  const overallBudgetMs = Math.min(Math.max(timeoutMs * 3, 20000), 28000);
   let timer: NodeJS.Timeout | null = null;
   const timeoutPromise = new Promise<DiscoverSubmissionTargetsResult>((resolve) => {
     timer = setTimeout(() => {
@@ -2103,7 +2212,7 @@ export async function discoverSubmissionTargets(
   });
 
   try {
-    return await Promise.race([discoverSubmissionTargetsInternal(input), timeoutPromise]);
+    return await Promise.race([discoverSubmissionTargetsInternal({ ...input, timeoutMs: overallBudgetMs }), timeoutPromise]);
   } finally {
     if (timer) clearTimeout(timer);
   }

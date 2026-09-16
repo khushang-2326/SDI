@@ -1,5 +1,5 @@
 import type { BrowserContext } from "playwright";
-import { acquireContext, releaseContext } from "@/lib/browserPool";
+import { acquireContext, releaseContext, markContextClosed, getContextMetadata } from "@/lib/browserPool";
 import { submitCalendlyBooking } from "@/services/calendly-booking-automation";
 import { submitContactForm } from "@/services/contact-form-automation";
 import { submitGenericBookingWidget } from "@/services/generic-booking-widget-automation";
@@ -53,10 +53,20 @@ function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
   }
 }
 
-function withAttemptTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+function withAttemptTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  onTimeout?: () => void | Promise<void>
+): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeoutPromise = new Promise<T>((_, reject) => {
-    timer = setTimeout(() => {
+    timer = setTimeout(async () => {
+      try {
+        if (onTimeout) await onTimeout();
+      } catch {
+        // ignore
+      }
       reject(new Error(`${label} exceeded attempt budget limit of ${Math.round(timeoutMs / 1000)}s.`));
     }, timeoutMs);
   });
@@ -210,25 +220,45 @@ export async function runMultiTargetAutomation({
   headless?: boolean;
   isDirectRetry?: boolean;
 }): Promise<MultiTargetRunResult> {
+  const executionId = `exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  console.log(`[TARGET_LIFECYCLE:${executionId}] TARGET_STARTED url=${websiteUrl}`);
+
   const attempts: MultiTargetAttemptResult[] = [];
   let consecutiveFailures = 0;
   let targetSucceeded = false;
   let timedOut = false;
   let encounteredProxyFailure = false;
   const attemptedKeys = new Set<string>();
-  const deadlineTimer = deadlineAt === undefined
-    ? undefined
-    : setTimeout(() => {
-        timedOut = true;
-        // This context belongs to the current website run. Closing it is the
-        // only reliable way to interrupt Playwright waits at the deadline.
-        void browserContext.close().catch(() => undefined);
-      }, Math.max(0, deadlineAt - Date.now()));
+
+  let deadlineTimerActive = deadlineAt !== undefined;
+      const deadlineTimer = deadlineAt === undefined
+        ? undefined
+        : setTimeout(() => {
+            if (!deadlineTimerActive) return;
+            deadlineTimerActive = false;
+            timedOut = true;
+            console.log(`[TARGET_LIFECYCLE:${executionId}] DEADLINE_FIRED url=${websiteUrl}`);
+            // This context belongs exclusively to this website run.
+            markContextClosed(browserContext, "deadline", "overall deadline budget exceeded");
+            void browserContext.close().catch(() => undefined);
+          }, Math.max(0, deadlineAt - Date.now()));
+
+  if (deadlineAt !== undefined) {
+    console.log(`[TARGET_LIFECYCLE:${executionId}] DEADLINE_STARTED url=${websiteUrl} budgetMs=${Math.max(0, deadlineAt - Date.now())}`);
+  }
+
   const stopDeadlineTimer = () => {
-    if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (!deadlineTimerActive) return;
+    deadlineTimerActive = false;
+    if (deadlineTimer) {
+      clearTimeout(deadlineTimer);
+      console.log(`[TARGET_LIFECYCLE:${executionId}] DEADLINE_STOPPED url=${websiteUrl}`);
+    }
   };
   const isSuccessful = (result: SubmitContactFormResult) =>
     ["success", "dry_run_ready_to_book"].includes(result.status);
+
+  try {
 
   async function executeTargets(targets: DiscoveredSubmissionTarget[]) {
     for (const target of targets) {
@@ -259,6 +289,7 @@ export async function runMultiTargetAutomation({
       let recoveryContext: BrowserContext | null = null;
       let activeContext = browserContext;
 
+      console.log(`[TARGET_LIFECYCLE:${executionId}] STAGE_STARTED stage=${target.targetType} url=${target.url}`);
       try {
         result = await withAttemptTimeout(
           executeTarget({
@@ -273,12 +304,16 @@ export async function runMultiTargetAutomation({
           attemptBudgetMs + 1000,
           `Target ${target.url}`
         );
+        console.log(`[TARGET_LIFECYCLE:${executionId}] STAGE_COMPLETED stage=${target.targetType} url=${target.url} status=${result.status}`);
       } catch (error) {
         const errStr = error instanceof Error ? error.message : String(error);
         const isClosedError = /target page, context or browser has been closed|target closed|browser has been closed/i.test(errStr);
         const remainingForRecovery = deadlineAt !== undefined ? deadlineAt - Date.now() : timeoutMs;
 
-        if (isClosedError && !recoveryContext && remainingForRecovery > 10000) {
+        if (timedOut || (deadlineAt !== undefined && Date.now() >= deadlineAt)) {
+          const timeoutReason = `Website automation exceeded overall deadline budget of ${Math.round(timeoutMs / 1000)}s.`;
+          result = failedResult(target, new Error(timeoutReason));
+        } else if (isClosedError && !recoveryContext && remainingForRecovery > 10000) {
           console.warn(`[BROWSER-RECOVERY] Browser context closed unexpectedly on ${target.url}. Re-acquiring context and retrying stage once...`);
           try {
             recoveryContext = await acquireContext({
@@ -302,6 +337,7 @@ export async function runMultiTargetAutomation({
               `Recovered Target ${target.url}`
             );
             console.log(`[BROWSER-RECOVERY] Successfully recovered ${target.url} after browser context crash.`);
+            console.log(`[TARGET_LIFECYCLE:${executionId}] STAGE_COMPLETED stage=${target.targetType} url=${target.url} status=${result.status}`);
           } catch (recoveryErr) {
             console.warn(`[BROWSER-RECOVERY] Recovery attempt failed on ${target.url}:`, recoveryErr);
             result = failedResult(target, recoveryErr);
@@ -316,6 +352,14 @@ export async function runMultiTargetAutomation({
         if (recoveryContext) {
           await releaseContext(recoveryContext).catch(() => undefined);
         }
+      }
+
+      const ctxMeta = getContextMetadata(activeContext);
+      if (
+        result.status === "failed" &&
+        (timedOut || ctxMeta?.closeInitiator === "deadline" || (deadlineAt !== undefined && Date.now() >= deadlineAt))
+      ) {
+        result.errorMessage = `Website automation exceeded overall deadline budget of ${Math.round(timeoutMs / 1000)}s.`;
       }
 
       const errLower = (result.errorMessage || "").toLowerCase();
@@ -431,7 +475,7 @@ export async function runMultiTargetAutomation({
     };
   }
 
-  const discoveryBudgetMs = Math.max(5000, Math.min(30_000, discoveryRemainingMs));
+  const discoveryBudgetMs = Math.max(5000, Math.min(20_000, Math.floor(discoveryRemainingMs * 0.50)));
 
   let discovery: DiscoverSubmissionTargetsResult;
   try {
@@ -491,18 +535,21 @@ export async function runMultiTargetAutomation({
     ).values()
   ).sort((a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence);
 
-  stopDeadlineTimer();
-  return {
-    discoveryReason: targetSucceeded
-      ? `${discovery.reason} The first successful target was used and remaining targets were skipped.`
-      : timedOut
-        ? "Website automation exceeded its time limit."
-        : redactProxyDetails(discovery.reason),
-    checkedUrls: Array.from(new Set([
-      ...orderedCachedTargets.map((target) => target.url),
-      ...discovery.checkedUrls
-    ])),
-    targets,
-    attempts
-  };
+    return {
+      discoveryReason: targetSucceeded
+        ? `${discovery.reason} The first successful target was used and remaining targets were skipped.`
+        : timedOut
+          ? "Website automation exceeded its time limit."
+          : redactProxyDetails(discovery.reason),
+      checkedUrls: Array.from(new Set([
+        ...orderedCachedTargets.map((target) => target.url),
+        ...discovery.checkedUrls
+      ])),
+      targets,
+      attempts
+    };
+  } finally {
+    stopDeadlineTimer();
+    console.log(`[TARGET_LIFECYCLE:${executionId}] TARGET_COMPLETED url=${websiteUrl} attempts=${attempts.length} success=${targetSucceeded}`);
+  }
 }

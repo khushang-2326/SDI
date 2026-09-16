@@ -63,6 +63,52 @@ function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+export function sanitizeCalendlyTargetUrl(rawUrl: string): { url: string; staleMonthIgnored: boolean; ignoredMonth?: string } {
+  try {
+    const parsed = new URL(rawUrl);
+    const monthParam = parsed.searchParams.get("month");
+    if (monthParam) {
+      const match = monthParam.match(/^(\d{4})-(\d{2})$/);
+      if (match) {
+        const year = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10);
+        const now = new Date();
+        const currentYear = now.getFullYear();
+        const currentMonth = now.getMonth() + 1;
+
+        const isStale = year < currentYear || (year === currentYear && month < currentMonth);
+        if (isStale) {
+          const dateParam = parsed.searchParams.get("date");
+          let hasFutureDate = false;
+          if (dateParam) {
+            const dateMatch = dateParam.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (dateMatch) {
+              const dYear = parseInt(dateMatch[1], 10);
+              const dMonth = parseInt(dateMatch[2], 10);
+              if (dYear > currentYear || (dYear === currentYear && dMonth >= currentMonth)) {
+                hasFutureDate = true;
+              }
+            }
+          }
+
+          if (!hasFutureDate) {
+            parsed.searchParams.delete("month");
+            console.log(`[calendly-automation] Detected stale month parameter "${monthParam}" (prior to current ${currentYear}-${String(currentMonth).padStart(2, "0")}). Parameter ignored to expose active dates.`);
+            return {
+              url: parsed.toString(),
+              staleMonthIgnored: true,
+              ignoredMonth: monthParam
+            };
+          }
+        }
+      }
+    }
+  } catch {
+    // Malformed URL, return original
+  }
+  return { url: rawUrl, staleMonthIgnored: false };
+}
+
 async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
   try {
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
@@ -811,10 +857,15 @@ export async function submitCalendlyBooking({
     };
     page.on("response", responseHandler);
 
+    const { url: effectiveUrl, staleMonthIgnored, ignoredMonth } = sanitizeCalendlyTargetUrl(websiteUrl);
+    if (staleMonthIgnored) {
+      console.log(`[calendly-automation] Ignored stale month query parameter: ${ignoredMonth}`);
+    }
+
     let navResponse: any = null;
     let navError: any = null;
     try {
-      navResponse = await page.goto(websiteUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      navResponse = await page.goto(effectiveUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     } catch (err: any) {
       navError = err;
     } finally {

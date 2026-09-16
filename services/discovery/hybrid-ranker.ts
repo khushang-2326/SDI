@@ -84,6 +84,7 @@ export function scoreAndRankCandidates(
   filtered.sort((a, b) => {
     if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
     if (b.ruleScore !== a.ruleScore) return b.ruleScore - a.ruleScore;
+    if (b.mlScore !== a.mlScore) return b.mlScore - a.mlScore;
     return a.url.length - b.url.length;
   });
 

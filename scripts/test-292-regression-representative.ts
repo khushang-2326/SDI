@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { getChromiumExecutablePath } from "../services/browser-executable";
 import { discoverSubmissionTargets } from "../services/submission-target-discovery";
 
 interface TargetTestItem {
@@ -145,6 +146,7 @@ async function runRegressionSuite() {
 
   const browser = await chromium.launch({
     headless: true,
+    executablePath: await getChromiumExecutablePath(),
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
   });
 

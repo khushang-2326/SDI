@@ -124,7 +124,7 @@ export function extractUniversalFeatureVector(
 
   // 5. Negative Intent Signals
   let negativeScore = 0.0;
-  const negativeStems = /\b(privacy|terms|cookie|cookies|login|signin|sign-in|cart|checkout|panier|warenkorb|carrello|anmelden|connexion|acceder|careers|jobs|blog|articles?)\b/i;
+  const negativeStems = /\b(privacy|terms|cookie|cookies|login|signin|sign-in|cart|checkout|panier|warenkorb|carrello|anmelden|connexion|acceder|careers|jobs|blog|articles?|templates?|showcase|case-studies|directory|locations?|urgent-care-locations|find-office|store-locator|press|news)\b/i;
   if (negativeStems.test(normalizedText)) {
     negativeScore = 1.0;
   } else if (pathSegments.some((p) => negativeStems.test(p))) {

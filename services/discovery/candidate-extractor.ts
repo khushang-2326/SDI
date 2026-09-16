@@ -21,7 +21,7 @@ export interface RawCandidate {
 }
 
 const SKIPPED_PATH_PATTERN =
-  /\/(privacy|terms|cookies?|blog|news|articles?|category|tags?|login|sign-?in|sign-?up|cart|checkout)(\/|$)/i;
+  /\/(privacy|terms|cookies?|blog|news|articles?|category|tags?|login|sign-?in|sign-?up|cart|checkout|mentions-legales|politica-privacidad|aviso-legal|impressum|datenschutz|carriere|stellenangebote)(\/|$)/i;
 const SKIPPED_EXTENSION_PATTERN =
   /\.(pdf|jpe?g|png|gif|svg|webp|zip|rar|mp[34]|avi|mov|docx?|xlsx?|css|js|json|xml|ico|woff2?|ttf|eot)(\?|$)/i;
 
@@ -112,7 +112,9 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           const text = (anchor.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
           const ariaLabel = (anchor.getAttribute("aria-label") ?? "").trim();
           const title = (anchor.getAttribute("title") ?? "").trim();
-          const parentText = (anchor.parentElement?.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
+          const parentTag = anchor.parentElement?.tagName?.toLowerCase();
+          const isSharedContainer = Boolean(parentTag && ["nav", "header", "ul", "ol", "menu", "body", "main"].includes(parentTag));
+          const parentText = (!isSharedContainer && anchor.parentElement?.textContent ? anchor.parentElement.textContent : "").replace(/\s+/g, " ").trim().slice(0, 150);
           const domDepth = getDomDepth(anchor);
 
           let location: CandidateLocation = "body";

@@ -37,6 +37,7 @@ export interface FieldSignals {
   ariaLabelledby: string;
   autocomplete: string;
   title: string;
+  dataAttributes?: string;
   explicitLabel: string;
   associatedLabels: string[];
   surroundingLabel: string;
@@ -72,6 +73,8 @@ export interface FieldVerificationItem {
 }
 
 export interface FormFillMetrics {
+  fieldsDetected?: number;
+  fieldsClassified?: number;
   filledFieldsCount: number;
   verifiedFieldsCount: number;
   unmappedRequiredFields: string[];
@@ -106,8 +109,9 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(ihr[ _-]?name|votre[ _-]?nom|su[ _-]?nombre|il[ _-]?tuo[ _-]?nome|uw[ _-]?naam)\b/i
   ],
   email: [
-    /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email)\b/i,
-    /\b(courriel|correo|correo[ _-]?electronico|indirizzo[ _-]?email|e-post|e-mailadresse)\b/i
+    /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email|corporate[ _-]?email)\b/i,
+    /\b(courriel|correo|correo[ _-]?electronico|indirizzo[ _-]?email|e-post|e-mailadresse)\b/i,
+    /(^|[ _-])(email|work-email|business-email|user-email)([ _-]|$)/i
   ],
   phone: [
     /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number)\b/i,
@@ -211,12 +215,45 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
       const ariaLabelledby = input.getAttribute("aria-labelledby") || "";
       const autocomplete = (input.getAttribute("autocomplete") || "").toLowerCase();
       const title = input.getAttribute("title") || "";
+      const dataAttributes = [
+        input.getAttribute("data-testid"),
+        input.getAttribute("data-test"),
+        input.getAttribute("data-qa"),
+        input.getAttribute("data-cy"),
+        input.getAttribute("data-field"),
+        input.getAttribute("data-name"),
+        input.getAttribute("data-field-name")
+      ].filter(Boolean).join(" ");
 
-      // Explicit labels (<label for="id">)
+      // Dereference aria-labelledby to its element text content
+      let ariaLabelledbyText = "";
+      if (ariaLabelledby) {
+        try {
+          const ids = ariaLabelledby.split(/\s+/).filter(Boolean);
+          ariaLabelledbyText = ids
+            .map((refId) => document.getElementById(refId)?.textContent ?? "")
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim();
+        } catch {
+          // ignore selector errors
+        }
+      }
+      const effectiveAriaLabel = [ariaLabel, ariaLabelledbyText].filter(Boolean).join(" ");
+
+      // Explicit labels (<label for="id"> or <label for="name">)
       let explicitLabel = "";
       if (id) {
         try {
           const el = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (el) explicitLabel = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+        } catch {
+          // ignore selector escape errors
+        }
+      }
+      if (!explicitLabel && name) {
+        try {
+          const el = document.querySelector(`label[for="${CSS.escape(name)}"]`);
           if (el) explicitLabel = (el.textContent ?? "").replace(/\s+/g, " ").trim();
         } catch {
           // ignore selector escape errors
@@ -239,9 +276,38 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
       const fieldset = input.closest("fieldset");
       const legendText = fieldset?.querySelector("legend")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
 
-      // Immediate parent container text (limited to 150 chars to avoid giant block noise)
-      const parentContainer = input.closest("div, p, li, td, tr, .form-group, .field, .form-field, .elementor-field-group, .hs-form-field");
-      const parentContainerText = (parentContainer?.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
+      // Hierarchical field container: look up to 4 ancestors for field wrappers (Gravity Forms, Pardot, Formidable, Elementor, HubSpot, Divs)
+      let fieldContainer: HTMLElement | null = null;
+      let curr = input.parentElement;
+      let depth = 0;
+      while (curr && depth < 4) {
+        const cls = (curr.className || "").toString().toLowerCase();
+        const tag = curr.tagName.toLowerCase();
+        if (
+          cls.includes("form-field") ||
+          cls.includes("gfield") ||
+          cls.includes("frm_form_field") ||
+          cls.includes("elementor-field-group") ||
+          cls.includes("form-group") ||
+          cls.includes("hs-form-field") ||
+          cls.includes("field") ||
+          tag === "fieldset" ||
+          tag === "p" ||
+          tag === "li"
+        ) {
+          fieldContainer = curr;
+          break;
+        }
+        curr = curr.parentElement;
+        depth++;
+      }
+      if (!fieldContainer) fieldContainer = input.parentElement;
+
+      const containerLabel = fieldContainer?.querySelector("label")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+      if (!explicitLabel && containerLabel) {
+        explicitLabel = containerLabel;
+      }
+      const parentContainerText = (fieldContainer?.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 180);
 
       // Sibling texts
       const precedingSiblingText = (input.previousElementSibling?.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
@@ -251,7 +317,7 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
       const isRequired = input.required ||
         input.getAttribute("aria-required") === "true" ||
         input.classList.contains("required") ||
-        Boolean(parentContainer?.classList.contains("required")) ||
+        Boolean(fieldContainer?.classList.contains("required")) ||
         parentContainerText.includes("*");
 
       // Disabled / Readonly
@@ -285,10 +351,11 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
         name,
         id,
         placeholder,
-        ariaLabel,
+        ariaLabel: effectiveAriaLabel,
         ariaLabelledby,
         autocomplete,
         title,
+        dataAttributes,
         explicitLabel,
         associatedLabels,
         surroundingLabel,
@@ -425,7 +492,7 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     return { fieldType: "attachment", confidence: 0.95, evidence, isNegative: false };
   }
 
-  // Checkbox consent handling
+  // Checkbox & Radio handling
   if (signals.type === "checkbox") {
     const text = [
       signals.explicitLabel,
@@ -442,6 +509,61 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     if (matchSynonyms(text, MULTILINGUAL_SYNONYMS.newsletter)) {
       evidence.push("checkbox matching newsletter opt-in");
       return { fieldType: "newsletter", confidence: 0.85, evidence, isNegative: false };
+    }
+    evidence.push("non-consent checkbox selection");
+    return { fieldType: "unknown", confidence: 0, evidence, isNegative: false };
+  }
+
+  if (signals.type === "radio") {
+    evidence.push("radio selection");
+    return { fieldType: "unknown", confidence: 0, evidence, isNegative: false };
+  }
+
+  // Select options semantic inspection
+  if (signals.tagName === "select" && signals.selectOptions && signals.selectOptions.length > 0) {
+    const optionTexts = signals.selectOptions
+      .map((o) => o.text.toLowerCase())
+      .filter((t) => t && !/^(select|choose|please|none|--)/.test(t));
+    const combinedOptions = optionTexts.join(" ");
+
+    // Country detection
+    if (
+      /\b(united states|canada|united kingdom|australia|germany|france|spain|italy|netherlands|brazil|india|japan)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain country names");
+      return { fieldType: "country", confidence: 0.95, evidence, isNegative: false };
+    }
+
+    // State detection
+    if (
+      /\b(california|new york|texas|florida|illinois|pennsylvania|ohio|georgia|north carolina|michigan)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain state names");
+      return { fieldType: "state", confidence: 0.95, evidence, isNegative: false };
+    }
+
+    // Job title / role / position level detection
+    if (
+      /\b(ceo|cfo|cto|cio|cmo|vp|director|manager|executive|founder|owner|partner|consultant|purchaser|operational|board of directors)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain job roles / levels");
+      return { fieldType: "job_title", confidence: 0.92, evidence, isNegative: false };
+    }
+
+    // Budget detection
+    if (
+      /\b(\$|€|£|\b\d+k\b|budget|under \$|over \$|\d+,\d{3})/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain budget ranges");
+      return { fieldType: "budget", confidence: 0.92, evidence, isNegative: false };
+    }
+
+    // Subject / Inquiry reason detection
+    if (
+      /\b(general|inquiry|enquiry|sales|support|billing|partnerships?|services?|business|quote|careers)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain inquiry topics / reasons");
+      return { fieldType: "subject", confidence: 0.88, evidence, isNegative: false };
     }
   }
 
@@ -493,7 +615,7 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     signals.ariaLabel
   ].filter(Boolean).join(" ");
 
-  const technicalIdentifiers = [signals.name, signals.id].filter(Boolean).join(" ");
+  const technicalIdentifiers = [signals.name, signals.id, signals.dataAttributes].filter(Boolean).join(" ");
 
   const contextualText = [
     signals.precedingSiblingText,

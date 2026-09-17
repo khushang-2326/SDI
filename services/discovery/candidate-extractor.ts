@@ -55,13 +55,24 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
     for (let i = 0; i < inspectCount; i++) {
       const parent = dropdownParents.nth(i);
       const text = (await parent.innerText().catch(() => "")).toLowerCase();
-      if (/company|about|contact|connect|service|more|kontakt|contacto/i.test(text)) {
+      if (/company|about|contact|connect|service|more|kontakt|contacto|sales|expert/i.test(text)) {
         await parent.hover({ timeout: 500 }).catch(() => undefined);
       }
     }
   } catch {
     // Dropdown hover failure is non-fatal
   }
+
+  // 2. Bounded Footer Scroll for Lazy-Hydrated Footers
+  try {
+    await page.evaluate(() => {
+      const footer = document.querySelector("footer, [role='contentinfo'], .site-footer, #footer, .footer");
+      if (!footer || footer.querySelectorAll("a[href]").length === 0) {
+        window.scrollBy({ top: 1200, behavior: "instant" });
+      }
+    }).catch(() => undefined);
+    await page.waitForTimeout(250);
+  } catch {}
 
   const extractDomElements = async (isMobileMenu: boolean = false): Promise<RawCandidate[]> => {
     return page
@@ -99,10 +110,19 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           return depth;
         }
 
-        // 1. Anchors across the rendered page (capped at 300 to prevent DOM thrashing)
-        const anchors = Array.from(document.querySelectorAll("a[href]")).slice(0, 300);
+        // 1. Anchors and links across the rendered page (capped at 400 to prevent thrashing)
+        const anchors = Array.from(
+          document.querySelectorAll("a[href], [role='link'][data-href], [role='link'][data-url]")
+        ).slice(0, 400);
+
         for (const anchor of anchors) {
-          const rawHref = (anchor.getAttribute("href") ?? "").trim();
+          const rawHref = (
+            anchor.getAttribute("href") ||
+            anchor.getAttribute("data-href") ||
+            anchor.getAttribute("data-url") ||
+            ""
+          ).trim();
+
           if (!rawHref || rawHref.startsWith("javascript:void(0)") || rawHref === "javascript:;") continue;
 
           const rect = anchor.getBoundingClientRect();
@@ -120,13 +140,13 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           let location: CandidateLocation = "body";
           if (isMobile) {
             location = "mobile menu";
-          } else if (anchor.closest("nav, [role='navigation'], .navbar, .menu, .nav")) {
+          } else if (anchor.closest("nav, [role='navigation'], .navbar, .menu, .nav, [class*='nav-menu']")) {
             location = "nav";
           } else if (anchor.closest("header, .site-header, .header, #header, [role='banner']")) {
             location = "header";
           } else if (anchor.closest("footer, .site-footer, .footer, #footer, [role='contentinfo']")) {
             location = "footer";
-          } else if (anchor.closest("aside, .sidebar")) {
+          } else if (anchor.closest("aside, .sidebar, [class*='drawer'], [class*='offcanvas']")) {
             location = "sidebar";
           } else if (anchor.closest(".hero, [class*='hero']")) {
             location = "hero";
@@ -188,10 +208,11 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           });
         }
 
-        // 2. Buttons and JS navigation / modal elements (capped to 200)
+        // 2. Buttons and JS navigation / modal elements (capped to 250)
         const buttons = Array.from(
-          document.querySelectorAll("button, [role='button'], div[onclick], a[href='#'], [data-url], [data-href]")
-        ).slice(0, 200);
+          document.querySelectorAll("button, [role='button'], div[onclick], a[href='#'], [data-url], [data-href], [data-modal-target], [data-drawer-target]")
+        ).slice(0, 250);
+
         for (const el of buttons) {
           const dataUrl =
             el.getAttribute("data-url") ||
@@ -286,11 +307,9 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
             }
 
             // 2. Same-brand / same-domain check or supported external booking targets
-            // Allow same origin OR same base brand across TLDs (e.g. brand.com -> brand.fr / brand.es)
             const getDomainRoot = (host: string) => {
               const parts = host.replace(/^www\./i, "").split(".");
               if (parts.length <= 2) return parts[0];
-              // Handle second-level ccTLDs like .co.uk, .com.au, .com.es
               if (parts.length >= 3 && ["co", "com", "org", "net", "gov", "edu"].includes(parts[parts.length - 2])) {
                 return parts[parts.length - 3];
               }
@@ -342,7 +361,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
 
   let candidates = await extractDomElements(false);
 
-  // Check if we need mobile menu / off-canvas disclosure
+  // Check if we need mobile menu / off-canvas / drawer disclosure (Phase 5)
   const hasStrongCandidate = candidates.some((c) => {
     const combined = `${c.text} ${c.href} ${c.ariaLabel}`.toLowerCase();
     return (
@@ -359,35 +378,49 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
       combined.includes("anfrage") ||
       combined.includes("presupuesto") ||
       combined.includes("rendez-vous") ||
-      combined.includes("quote")
+      combined.includes("quote") ||
+      combined.includes("sales") ||
+      combined.includes("talk to") ||
+      combined.includes("speak with")
     );
   });
 
   if (!hasStrongCandidate) {
     try {
-      const menuTrigger = page.locator(
-        "button[aria-label*='menu' i], button.navbar-toggler, .hamburger, [aria-expanded='false']:has-text('menu'), .menu-toggle, .mobile-menu-btn, button:has(span.navbar-toggler-icon), [data-drawer-trigger], [data-toggle='drawer'], [data-toggle='offcanvas'], [aria-controls*='drawer'], [aria-controls*='offcanvas'], [aria-controls*='nav']"
-      ).first();
-      const isVisible = await menuTrigger.isVisible().catch(() => false);
-      if (isVisible) {
-        // Exclude non-lead utility controls like cart or search
-        const triggerAttrs = await menuTrigger.evaluate((el) => {
-          return `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""} ${el.className || ""} ${el.getAttribute("aria-controls") || ""} ${el.getAttribute("data-drawer") || ""}`.toLowerCase();
+      const menuTriggers = await page
+        .locator(
+          "button[aria-label*='menu' i], button.navbar-toggler, .hamburger, [aria-expanded='false']:has-text('menu'), .menu-toggle, .mobile-menu-btn, button:has(span.navbar-toggler-icon), [data-drawer-trigger], [data-toggle='drawer'], [data-toggle='offcanvas'], [aria-controls*='drawer'], [aria-controls*='offcanvas'], [aria-controls*='nav'], [aria-controls*='menu'], button[aria-label*='navigation' i]"
+        )
+        .elementHandles();
+
+      const maxClicks = Math.min(menuTriggers.length, 2);
+      for (let i = 0; i < maxClicks; i++) {
+        const handle = menuTriggers[i];
+        const isVis = await handle.isVisible().catch(() => false);
+        if (!isVis) continue;
+
+        const attrs = await handle.evaluate((node) => {
+          const el = node as HTMLElement;
+          return `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""} ${typeof el.className === "string" ? el.className : ""} ${el.getAttribute?.("aria-controls") || ""}`.toLowerCase();
         }).catch(() => "");
-        if (!/\b(cart|bag|basket|search|checkout|cookie)\b/i.test(triggerAttrs)) {
-          await menuTrigger.click({ timeout: 1000 }).catch(() => undefined);
-          await page.waitForTimeout(500);
-          const mobileCandidates = await extractDomElements(true);
-          const existingHrefs = new Set(candidates.map((c) => c.href));
-          for (const mc of mobileCandidates) {
-            if (!existingHrefs.has(mc.href)) {
-              candidates.push(mc);
-            }
+
+        if (/\b(cart|bag|basket|search|checkout|cookie|login|account)\b/i.test(attrs)) {
+          continue;
+        }
+
+        await handle.click({ timeout: 800 }).catch(() => undefined);
+        await page.waitForTimeout(350);
+
+        const newCandidates = await extractDomElements(true);
+        const existingHrefs = new Set(candidates.map((c) => c.href));
+        for (const nc of newCandidates) {
+          if (!existingHrefs.has(nc.href)) {
+            candidates.push(nc);
           }
         }
       }
     } catch {
-      // Ignore mobile menu click failure
+      // Ignore menu disclosure errors
     }
   }
 

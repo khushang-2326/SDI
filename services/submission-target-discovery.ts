@@ -32,6 +32,13 @@ const DEFAULT_MAX_NAVIGATION_LINKS = 10;
 const DEFAULT_MAX_FALLBACK_PATHS = 4;
 
 const COMMON_TARGET_PATHS = [
+  "/contact-sales",
+  "/contact/sales",
+  "/contact_sales",
+  "/talk-to-sales",
+  "/sales",
+  "/demo",
+  "/request-a-demo",
   "/contact",
   "/contact-us",
   "/contactus",
@@ -122,6 +129,8 @@ const NAVIGATION_LINK_SELECTOR = [
   ".hero a[href]",
   ".cta a[href]",
   "a[href*='contact']",
+  "a[href*='sales']",
+  "a[href*='demo']",
   "a[href*='talk']",
   "a[href*='touch']",
   "a[href*='quote']",
@@ -589,15 +598,146 @@ export async function collectHttpDiscoveryCandidates(websiteUrl: string): Promis
   return candidates;
 }
 
+export interface DiscoveryNavigationResult {
+  committed: boolean;
+  responseStatus: number;
+  finalUrl: string;
+  navigationMs: number;
+  readinessState: string;
+  hasForms: boolean;
+  hasBooking: boolean;
+  interactiveCount: number;
+  timedOut: boolean;
+  navResponse: any;
+  navError: any;
+}
+
+/**
+ * High-performance bounded navigation engine for discovery.
+ * Uses waitUntil: "commit" + progressive universal readiness rather than brittle networkidle.
+ */
+export async function navigateForDiscovery(
+  page: Page,
+  url: string,
+  budgetMs: number,
+  purpose: "discovery" | "form" | "booking" | "any" = "discovery"
+): Promise<DiscoveryNavigationResult> {
+  const tStart = Date.now();
+  let committed = false;
+  let responseStatus = 0;
+  let navResponse: any = null;
+  let navError: any = null;
+  let timedOut = false;
+
+  const commitTimeout = Math.max(1500, Math.min(6000, budgetMs - 1000));
+
+  try {
+    navResponse = await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: commitTimeout
+    });
+    committed = true;
+    responseStatus = navResponse?.status() ?? 200;
+  } catch (err: any) {
+    if (isProxyAuthenticationFailure(err)) {
+      throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+    // If domcontentloaded timed out or was delayed by media/trackers, try commit fallback
+    try {
+      navResponse = await page.goto(url, {
+        waitUntil: "commit",
+        timeout: Math.max(1000, Math.min(3000, budgetMs - (Date.now() - tStart)))
+      });
+      committed = true;
+      responseStatus = navResponse?.status() ?? 200;
+    } catch (commitErr: any) {
+      navError = commitErr;
+      if (commitErr?.message?.includes("Timeout") || commitErr?.name === "TimeoutError") {
+        timedOut = true;
+      }
+    }
+  }
+
+  const remainingBudget = Math.max(800, budgetMs - (Date.now() - tStart));
+  const readiness = await waitForUniversalPageReadiness(page, {
+    maxWaitMs: Math.min(remainingBudget, 3000),
+    pollIntervalMs: 150,
+    targetPurpose: purpose
+  }).catch(() => ({
+    ready: false,
+    state: "TIMEOUT_FALLBACK" as const,
+    durationMs: 0,
+    hasForms: false,
+    hasBooking: false,
+    interactiveCount: 0
+  }));
+
+  const navigationMs = Date.now() - tStart;
+  const finalUrl = page.url() || url;
+
+  return {
+    committed,
+    responseStatus,
+    finalUrl,
+    navigationMs,
+    readinessState: readiness.state,
+    hasForms: readiness.hasForms,
+    hasBooking: readiness.hasBooking,
+    interactiveCount: readiness.interactiveCount,
+    timedOut,
+    navResponse,
+    navError
+  };
+}
+
 async function getVisibleFormScore(container: Page | Frame) {
   try {
-    const inputCount = await container.locator("input:not([type=hidden]):not([type=search]), textarea, select, [role='textbox'], [contenteditable='true'], [role='form'], form").count().catch(() => 0);
+    const inputCount = await container
+      .locator("input:not([type=hidden]):not([type=search]), textarea, select, [role='textbox'], [contenteditable='true'], [role='form'], form")
+      .count()
+      .catch(() => 0);
+
     if (inputCount === 0) return 0;
 
     return await container
-      .locator("form, [role='form'], [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], [class*='contact-form'], input:not([type=hidden]), textarea, select, [role='textbox'], [contenteditable='true'], button[type='submit'], input[type='submit'], button, [role='button'], a[class*='btn'], a[class*='button'], a[class*='submit'], a[href*='submit']")
+      .locator("form, [role='form'], [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], [class*='contact-form'], [class*='form'], input:not([type=hidden]), textarea, select, [role='textbox'], [contenteditable='true'], button[type='submit'], input[type='submit'], button, [role='button'], a[class*='btn'], a[class*='button'], a[class*='submit'], a[href*='submit']")
       .evaluateAll((elements) => {
-        const sliced = elements.slice(0, 150);
+        // Collect additional elements from open shadow roots iteratively without recursion or nested closures
+        const allElements: Element[] = [...elements];
+        const visitedRoots = new Set<Node>();
+        const shadowQueue: ShadowRoot[] = [];
+
+        for (const el of elements) {
+          if (el.shadowRoot && !visitedRoots.has(el.shadowRoot)) {
+            visitedRoots.add(el.shadowRoot);
+            shadowQueue.push(el.shadowRoot);
+          }
+        }
+
+        let depth = 0;
+        const MAX_SHADOW_DEPTH = 3;
+        while (shadowQueue.length > 0 && depth < MAX_SHADOW_DEPTH) {
+          const currentLevelSize = shadowQueue.length;
+          depth++;
+          for (let q = 0; q < currentLevelSize; q++) {
+            const root = shadowQueue.shift();
+            if (!root) continue;
+            try {
+              const shadowEls = root.querySelectorAll("form, [role='form'], [class*='w-form'], [data-name*='form'], [class*='form-wrapper'], [class*='contact-form'], [class*='form'], input:not([type=hidden]), textarea, select, [role='textbox'], [contenteditable='true'], button[type='submit'], input[type='submit'], button, [role='button'], a[class*='btn'], a[class*='button'], a[class*='submit'], a[href*='submit']");
+              allElements.push(...Array.from(shadowEls));
+              const nestedRoots = root.querySelectorAll("*");
+              for (let i = 0; i < nestedRoots.length; i++) {
+                const nested = nestedRoots[i];
+                if (nested.shadowRoot && !visitedRoots.has(nested.shadowRoot)) {
+                  visitedRoots.add(nested.shadowRoot);
+                  shadowQueue.push(nested.shadowRoot);
+                }
+              }
+            } catch {}
+          }
+        }
+
+        const sliced = allElements.slice(0, 150);
         let hasEmail = false;
         let hasPhone = false;
         let hasMessage = false;
@@ -613,7 +753,7 @@ async function getVisibleFormScore(container: Page | Frame) {
         let interactiveInputsCount = 0;
 
         // 1. Check form elements and framework containers
-        for (const element of elements) {
+        for (const element of sliced) {
           const tag = element.tagName.toLowerCase();
           const formId = (element.id || "").toLowerCase();
           const formClass = (element.className || "").toString().toLowerCase();
@@ -647,7 +787,6 @@ async function getVisibleFormScore(container: Page | Frame) {
             formId.includes("store-locator") ||
             formClass.includes("store-locator")
           ) {
-            // Only mark negative if there is no textarea or message field
             const hasTextarea = element.querySelector("textarea") !== null;
             if (!hasTextarea) {
               const allInputs = element.querySelectorAll("input:not([type=hidden]):not([type=search])");
@@ -705,7 +844,7 @@ async function getVisibleFormScore(container: Page | Frame) {
           const rect = element.getBoundingClientRect();
           const hasDimensions = rect.height > 0 || rect.width > 0;
 
-          // Allow inputs in known framework containers or forms even if initially zero-height due to accordion/animation
+          // Allow inputs in forms or containers even if zero-height / unrendered in mocks
           if (!knownContainerMatched && (!isVisible && !hasDimensions)) continue;
 
           if (tag === "textarea") {
@@ -732,7 +871,6 @@ async function getVisibleFormScore(container: Page | Frame) {
           } else if (tag === "input") {
             const input = element as HTMLInputElement;
             const inputType = (input.type || "text").toLowerCase();
-            // Strictly exclude hidden and search inputs
             if (["hidden", "search"].includes(inputType)) continue;
 
             const name = (input.name || "").toLowerCase();
@@ -741,7 +879,6 @@ async function getVisibleFormScore(container: Page | Frame) {
             const aria = (input.getAttribute("aria-label") || "").toLowerCase();
             const attrDescriptor = `${name} ${id} ${placeholder} ${aria}`;
 
-            // Exclude standalone store/location selectors or internal search
             if (attrDescriptor.includes("search") || id.includes("search") || name === "s" || name === "q") {
               continue;
             }
@@ -777,7 +914,6 @@ async function getVisibleFormScore(container: Page | Frame) {
               hasSubmit = true;
             }
 
-            // High-precision lead context vs explicit newsletter
             if (/get in touch|request a quote|request quote|request demo|book consultation|start project|work with us|contact sales|talk to us|contact us|let'?s talk/i.test(btnText)) {
               hasLeadIntentCta = true;
             }
@@ -785,7 +921,6 @@ async function getVisibleFormScore(container: Page | Frame) {
               hasExplicitNewsletterCta = true;
             }
 
-            // Multi-step progression recognition
             if (
               /^(next|continue|proceed|volgende|siguiente|suivant|weiter|continua|próximo|forward)(\s|$|>|→)/i.test(btnText) ||
               element.hasAttribute("data-next-step") ||
@@ -796,13 +931,10 @@ async function getVisibleFormScore(container: Page | Frame) {
           }
         }
 
-        // Rule 2 & 5: Negative form filtering with lead intent preservation
-        // If a form is marked negative (e.g. newsletter) BUT has explicit lead intent CTA or textarea/phone, do not penalize
         if (isNegativeForm && !hasMessage && !hasPhone && !hasLeadIntentCta) {
-          return 10; // Penalize pure standalone search/newsletter form
+          return 10;
         }
 
-        // Multi-signal weighted scoring
         let score = 0;
         if (hasEmail) score += 35;
         if (hasMessage) score += 25;
@@ -810,12 +942,10 @@ async function getVisibleFormScore(container: Page | Frame) {
         if (hasPhone) score += 15;
         if (hasSubmit || hasFormSubmit) score += 20;
 
-        // Rule 1: Multi-Step Lead Forms (e.g. 1 visible text/name/email input + progression button + form container/CTA)
         if (hasProgression && interactiveInputsCount >= 1 && (hasName || hasEmail || hasMessage || knownContainerMatched || isMultiStepStructure)) {
           score = Math.max(score, 65);
         }
 
-        // Rule 2: Lightweight lead capture forms with verified lead intent (e.g. Email + Lead CTA, not pure newsletter)
         if (hasEmail && (hasLeadIntentCta || (hasSubmit && !hasExplicitNewsletterCta && !isNegativeForm))) {
           score = Math.max(score, 70);
         }
@@ -823,7 +953,6 @@ async function getVisibleFormScore(container: Page | Frame) {
           score = Math.max(score, 70);
         }
 
-        // Rule 3 & 4: General structural lead forms (at least 3 interactive inputs or at least 2 with email/name)
         if (interactiveInputsCount >= 3 && (hasSubmit || hasFormSubmit || hasEmail)) {
           score = Math.max(score, 65);
         }
@@ -838,8 +967,6 @@ async function getVisibleFormScore(container: Page | Frame) {
           return Math.max(score, 75);
         }
 
-        // Structural Invariant: A valid contact form requires at least 2 interactive inputs,
-        // OR an input with a textarea message, OR a known CRM container, OR multi-step progression.
         if (interactiveInputsCount < 2 && !hasMessage && !knownContainerMatched && !hasProgression) {
           return Math.min(score, 40);
         }
@@ -1527,16 +1654,9 @@ export async function discoverSubmissionTarget({
 
     let navResponse: any = null;
     let navError: any = null;
-    try {
-      navResponse = await page.goto(normalizedWebsiteUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: timeoutMs
-      });
-    } catch (err: any) {
-      navError = err;
-    } finally {
-      page.off("response", responseHandler);
-    }
+    const navResult = await navigateForDiscovery(page, normalizedWebsiteUrl, timeoutMs, "any");
+    navResponse = navResult.navResponse;
+    navError = navResult.navError;
 
     if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
       await takeScreenshot(page, normalizedWebsiteUrl, "proxy-407-failure").catch(() => null);
@@ -1563,17 +1683,14 @@ export async function discoverSubmissionTarget({
       };
     }
 
-    const homepageLoaded = Boolean(navResponse && !navError);
+    const homepageLoaded = navResult.committed && !navError;
     if (homepageLoaded) {
       await dismissCookieBanners(page).catch(() => undefined);
-      // Do not wait indefinitely for background trackers/analytics.
-      // 2.5s networkidle or immediate DOM interactive is plenty.
-      await page.waitForLoadState("networkidle", { timeout: 2500 }).catch(() => undefined);
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(200);
     }
 
     const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
-    if (verification) {
+    if (verification && verification.blocking !== false) {
       return {
         websiteUrl: normalizedWebsiteUrl,
         discoveredUrl: null,
@@ -1614,22 +1731,15 @@ export async function discoverSubmissionTarget({
       }
       checkedUrls.push(candidate.url);
 
-      const remainingCandidateTimeout = Math.max(2000, Math.min(12000, discoveryDeadline - Date.now()));
-      const candidateLoaded = await page
-        .goto(candidate.url, {
-          waitUntil: "domcontentloaded",
-          timeout: remainingCandidateTimeout
-        })
-        .then(() => true)
-        .catch(() => false);
+      const remainingCandidateTimeout = Math.max(2000, Math.min(7000, discoveryDeadline - Date.now()));
+      const candNav = await navigateForDiscovery(page, candidate.url, remainingCandidateTimeout, "form");
 
-      if (!candidateLoaded) {
+      if (!candNav.committed) {
         continue;
       }
 
       await dismissCookieBanners(page).catch(() => undefined);
-      await page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => undefined);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(200);
 
       const result = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
 
@@ -1783,19 +1893,9 @@ async function discoverSubmissionTargetsInternal({
 
     let navResponse: any = null;
     let navError: any = null;
-    try {
-      navResponse = await Promise.race([
-        page.goto(normalizedWebsiteUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: timeoutMs
-        }),
-        proxy407Promise
-      ]);
-    } catch (err: any) {
-      navError = err;
-    } finally {
-      page.off("response", responseHandler);
-    }
+    const initialNav = await navigateForDiscovery(page, normalizedWebsiteUrl, timeoutMs, "any");
+    navResponse = initialNav.navResponse;
+    navError = initialNav.navError;
 
     if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
@@ -1841,7 +1941,7 @@ async function discoverSubmissionTargetsInternal({
 
     // Check for CAPTCHA, Cloudflare managed challenge, or bot-detection screens
     const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
-    if (verification) {
+    if (verification && verification.blocking !== false) {
       return {
         websiteUrl: normalizedWebsiteUrl,
         targets: [],
@@ -1853,7 +1953,7 @@ async function discoverSubmissionTargetsInternal({
 
     // Auto-accept cookie banners so nav links and forms are visible
     await dismissCookieBanners(page).catch(() => undefined);
-    await page.waitForTimeout(700);
+    await page.waitForTimeout(300);
     await dismissCookieBanners(page).catch(() => undefined);
     checkedUrls.push(withoutHash(page.url()));
     const directResult = await detectTargetWithLazyScroll(page, page.url(), "entered URL already works");
@@ -1913,19 +2013,30 @@ async function discoverSubmissionTargetsInternal({
     let consecutiveSyntheticFailures = 0;
     let lastDetectedVerification: import("@/services/verification-detector").UnsupportedVerificationResult | null = null;
 
-    // Strict Topology Priority:
-    // 1. Real DOM navigation candidates ALWAYS precede synthetic common-path guesses
-    // 2. High-intent contact/booking paths
-    // 3. Generic informational pages (services, locations, blog, careers, privacy, login) deprioritized
-    // 4. Candidate score
-    const isHighContactPath = (urlStr: string) => {
+    // 5-Tier Discovery Priority:
+    // Tier 1: Explicit High-Intent Contact / Booking paths (/contact, /book, /schedule)
+    // Tier 2: Real CTA / Action links ("Let's Talk", "Get in Touch", "Start a Project")
+    // Tier 3: Supported External / Iframe links (Calendly, HubSpot meetings)
+    // Tier 4: General site navigation links
+    // Tier 5: Synthetic common-path fallbacks (tried only if real links absent)
+    const getCandidateTier = (c: Candidate): number => {
+      const isSynthetic = c.reason.startsWith("common path");
+      if (isSynthetic) return 5;
+      const isExternal = isCalendlyEventUrl(new URL(c.url)) || c.reason.includes("external booking");
+      if (isExternal) return 3;
       try {
-        const p = new URL(urlStr).pathname.toLowerCase();
-        return /(contact|get-in-touch|reach-us|talk-to-us|book-a-demo|book-now|schedule|inquiry|consultation)/i.test(p);
-      } catch {
-        return false;
+        const p = new URL(c.url).pathname.toLowerCase();
+        if (/(contact|get-in-touch|reach-us|talk-to-us|talk-to-sales|contact-sales|book-a-demo|book-now|schedule|inquiry|consultation|sales|demo)/i.test(p)) {
+          return 1;
+        }
+      } catch {}
+      const txt = (c.candidateText || "").toLowerCase();
+      if (/(contact|talk to us|talk to sales|contact sales|get in touch|book|schedule|request quote|request demo|estimate|start a project|expert)/i.test(txt)) {
+        return 2;
       }
+      return 4;
     };
+
     const isNegativeInfoPath = (urlStr: string) => {
       try {
         const p = new URL(urlStr).pathname.toLowerCase();
@@ -1935,25 +2046,13 @@ async function discoverSubmissionTargetsInternal({
       }
     };
 
-    const rawQueue: Candidate[] = [
-      ...navigationCandidates,
-      ...fallbackCandidates.filter(fb => !navigationCandidates.some(nc => withoutHash(nc.url) === withoutHash(fb.url)))
-    ];
-
-    rawQueue.sort((a, b) => {
-      // Real DOM navigation candidates ALWAYS precede synthetic common path fallbacks
-      const aIsNav = a.reason.startsWith("common path") ? 0 : 1;
-      const bIsNav = b.reason.startsWith("common path") ? 0 : 1;
-      if (aIsNav !== bIsNav) return bIsNav - aIsNav;
-
-      const aContact = isHighContactPath(a.url) ? 1 : 0;
-      const bContact = isHighContactPath(b.url) ? 1 : 0;
-      if (bContact !== aContact) return bContact - aContact;
-
-      const aNeg = isNegativeInfoPath(a.url) ? 1 : 0;
-      const bNeg = isNegativeInfoPath(b.url) ? 1 : 0;
-      if (aNeg !== bNeg) return aNeg - bNeg; // lower negative first
-
+    const rawQueue = [
+      ...navigationCandidates.filter((c) => !isNegativeInfoPath(c.url)),
+      ...(navigationCandidates.length === 0 ? fallbackCandidates : [])
+    ].sort((a, b) => {
+      const tierA = getCandidateTier(a);
+      const tierB = getCandidateTier(b);
+      if (tierA !== tierB) return tierA - tierB;
       return b.score - a.score;
     });
 
@@ -1963,7 +2062,7 @@ async function discoverSubmissionTargetsInternal({
     while (candidateIndex < candidatesQueue.length) {
       if (Array.from(discovered.values()).some((target) => target.targetType === "contact_form")) break;
       if (checkedUrls.length >= maxPageVisits) break;
-      if (Date.now() >= discoveryDeadlineAt - 1000) {
+      if (Date.now() >= discoveryDeadlineAt - 500) {
         console.log(`[CONTACT-DISCOVERY] Approaching discovery deadline budget (${timeoutMs}ms). Exiting candidate loop.`);
         break;
       }
@@ -1986,13 +2085,12 @@ async function discoverSubmissionTargetsInternal({
       );
       const mappedType = (candidate.candidateType?.toLowerCase() === "cta" ? "cta" : (candidate.candidateType || "anchor")) as any;
 
-      const candTimeout = Math.max(2000, Math.min(7000, discoveryDeadlineAt - Date.now() - 500));
-      const candResponse = await page.goto(candidate.url, {
-        waitUntil: "domcontentloaded",
-        timeout: candTimeout
-      }).catch(() => null);
+      const remainingBudget = discoveryDeadlineAt - Date.now();
+      if (remainingBudget <= 500) break;
+      const candTimeout = Math.min(6500, Math.max(1500, remainingBudget - 200));
+      const candNav = await navigateForDiscovery(page, candidate.url, candTimeout, "form");
 
-      if (!candResponse) {
+      if (!candNav.committed) {
         console.log(`[CONTACT-DISCOVERY] Failed to load candidate: ${candidate.url}`);
         if (candidate.reason.startsWith("common path")) {
           consecutiveSyntheticFailures++;
@@ -2028,7 +2126,7 @@ async function discoverSubmissionTargetsInternal({
         continue;
       }
 
-      const candStatus = candResponse.status();
+      const candStatus = candNav.responseStatus;
       const currentCandidateUrl = withoutHash(page.url());
       const redirectedToRoot = currentCandidateUrl === normalizedWebsiteUrl || currentCandidateUrl === `${normalizedWebsiteUrl}/`;
       if (candStatus === 404 || (candidate.reason.startsWith("common path") && redirectedToRoot)) {
@@ -2044,20 +2142,14 @@ async function discoverSubmissionTargetsInternal({
 
       // Check anti-bot on candidate URL (e.g., Cloudflare Turnstile / Challenge on /contact)
       const candidateVerification = await detectUnsupportedVerification(page, candidate.url);
-      if (candidateVerification) {
+      if (candidateVerification && candidateVerification.blocking !== false) {
         lastDetectedVerification = candidateVerification;
         console.log(`[CONTACT-DISCOVERY] Unsupported verification encountered on candidate ${candidate.url}: ${candidateVerification.reason}`);
         break;
       }
 
       await dismissCookieBanners(page).catch(() => undefined);
-      // Bounded wait for dynamic client-side forms (HubSpot, Marketo, LeadConnector, SPA embeds)
-      await page
-        .locator("form:not([action*='search']), input:not([type=hidden]):not([type=search]), textarea, iframe[src*='hsforms'], iframe[src*='marketo']")
-        .first()
-        .waitFor({ state: "attached", timeout: 2000 })
-        .catch(() => undefined);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(200);
       const candResult = await detectTargetWithLazyScroll(page, page.url(), candidate.reason);
       addResult(candResult);
 

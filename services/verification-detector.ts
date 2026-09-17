@@ -17,12 +17,18 @@ export type UnsupportedVerificationResult = {
   name: string;
   reason: string;
   screenshotPath: string | null;
+  confidence?: number;
+  blocking?: boolean;
 };
 
 /**
  * Detects reCAPTCHA, hCaptcha, Turnstile, Cloudflare verification, human verification,
  * and bot detection screens. When detected, captures a full-page screenshot and returns
  * a clear unsupported-verification failure reason. No bypass or solving is attempted.
+ * 
+ * Accurately scores evidence: strong interactive challenges or verified blocking challenge screens
+ * return blocking=true (confidence >= 0.85). Weak text occurrences on ordinary content pages
+ * do not falsely abort automation.
  */
 export async function detectUnsupportedVerification(
   page: Page,
@@ -37,7 +43,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "reCAPTCHA",
         reason: "Unsupported verification: reCAPTCHA challenge detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.99,
+        blocking: true
       };
     }
   }
@@ -55,7 +63,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "reCAPTCHA",
         reason: "Unsupported verification: reCAPTCHA detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.95,
+        blocking: true
       };
     }
   }
@@ -69,7 +79,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "reCAPTCHA",
         reason: "Unsupported verification: reCAPTCHA detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.95,
+        blocking: true
       };
     }
   }
@@ -84,7 +96,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "hCaptcha",
         reason: "Unsupported verification: hCaptcha detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.95,
+        blocking: true
       };
     }
   }
@@ -97,7 +111,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "hCaptcha",
         reason: "Unsupported verification: hCaptcha detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.95,
+        blocking: true
       };
     }
   }
@@ -110,7 +126,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "Cloudflare Turnstile",
         reason: "Unsupported verification: Cloudflare Turnstile detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.98,
+        blocking: true
       };
     }
   }
@@ -123,7 +141,9 @@ export async function detectUnsupportedVerification(
       return {
         name: "Cloudflare Turnstile",
         reason: "Unsupported verification: Cloudflare Turnstile detected. Manual verification required.",
-        screenshotPath
+        screenshotPath,
+        confidence: 0.95,
+        blocking: true
       };
     }
   }
@@ -167,41 +187,56 @@ export async function detectUnsupportedVerification(
       return {
         name: challenge.name,
         reason: `Unsupported verification: ${challenge.name} detected. Manual verification required.`,
-        screenshotPath
+        screenshotPath,
+        confidence: 0.95,
+        blocking: true
       };
     }
   }
 
-  // Cloudflare full-page managed challenge ("Just a moment...", "Verify you are human")
+  // 5. Cloudflare full-page managed challenge ("Just a moment...", "Verify you are human")
   const pageText = await page.locator("body").innerText({ timeout: 2000 }).catch(() => "");
   const title = await page.title().catch(() => "");
 
-  const cloudflareManagedChallenge =
+  const hasCloudflareChallengeSignature =
     /performing security verification|verify you are human|just a moment\.\.\./i.test(pageText) &&
-    (/cloudflare/i.test(pageText) || /cloudflare/i.test(title) || /ray id/i.test(pageText));
+    (/cloudflare/i.test(pageText) || /cloudflare/i.test(title) || /ray id/i.test(pageText) || /cf-chl/i.test(pageText));
 
-  if (cloudflareManagedChallenge) {
+  if (hasCloudflareChallengeSignature) {
     const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, "Cloudflare Managed Challenge");
     return {
       name: "Cloudflare Managed Challenge",
       reason: "Unsupported verification: Cloudflare managed verification detected. Manual verification required.",
-      screenshotPath
+      screenshotPath,
+      confidence: 0.98,
+      blocking: true
     };
   }
 
-  // Generic human-verification or bot-detection challenge screens
-  const humanVerificationChallenge =
-    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|robot challenge|checking (?:your browser|the site connection security)|automated traffic|unusual traffic|bot (?:detection|verification|protection)|access denied.*bot|security check to proceed|datadome|perimeterx|aws waf/i.test(
+  // 6. Generic full-screen human-verification or bot-detection challenge screens
+  // Strong indicators: Title explicitly calls out security/bot challenge AND page has short interstitial body
+  const isDedicatedChallengeTitle = /robot challenge|attention required!|just a moment\.\.\.|security check to proceed/i.test(title);
+  const hasChallengeText =
+    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|checking (?:your browser|the site connection security)|unusual traffic from your computer network|automated traffic detected|access denied.*(?:bot|automated|cloudflare|perimeterx)/i.test(
       pageText
-    ) || /robot challenge screen|just a moment|attention required|security check/i.test(title);
+    );
 
-  if (humanVerificationChallenge) {
+  // Guard against false positives: If the page has rich navigational links or a full content body,
+  // the phrase "automated traffic" in a privacy policy or FAQ must NOT trigger a verification failure.
+  const pageTextLength = pageText.trim().length;
+  const isInterstitialChallengeScreen =
+    (isDedicatedChallengeTitle && pageTextLength < 2500) ||
+    (hasChallengeText && pageTextLength < 1800);
+
+  if (isInterstitialChallengeScreen) {
     const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, "Human Verification Challenge");
     return {
       name: "Human Verification Challenge",
       reason:
         "Unsupported verification: Human verification or bot detection screen detected. Manual verification required.",
-      screenshotPath
+      screenshotPath,
+      confidence: 0.90,
+      blocking: true
     };
   }
 

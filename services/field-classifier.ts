@@ -401,7 +401,9 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     signals.title
   ].filter(Boolean).join(" ");
 
-  if (NEGATIVE_FIELD_PATTERN.test(combinedAttributes)) {
+  const isZipOrPostal = /\b(zip|postal|postcode|zipcode|plz)\b/i.test(combinedAttributes);
+
+  if (!isZipOrPostal && NEGATIVE_FIELD_PATTERN.test(combinedAttributes)) {
     const match = combinedAttributes.match(NEGATIVE_FIELD_PATTERN)?.[0] ?? "negative";
     return {
       fieldType: "unknown",
@@ -412,8 +414,8 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     };
   }
 
-  // Check for search type
-  if (signals.type === "search" || signals.ariaLabel.toLowerCase().includes("search") || signals.placeholder.toLowerCase().includes("search")) {
+  // Check for search type (excluding zip/postal intake)
+  if (!isZipOrPostal && (signals.type === "search" || signals.ariaLabel.toLowerCase().includes("search") || signals.placeholder.toLowerCase().includes("search"))) {
     return {
       fieldType: "unknown",
       confidence: 0,

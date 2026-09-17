@@ -672,6 +672,20 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
   }
 
+  // 8b. Postal / ZIP code field
+  const zipCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "postal_code")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (zipCandidates.length > 0) {
+    const best = zipCandidates[0];
+    const zipMatch = leadData.address?.match(/\b\d{5}(-\d{4})?\b/)?.[0];
+    const zipValue = zipMatch || "94105";
+    await fillSignal(best.signal, "postal_code", "postalCode", zipValue, best.cls.confidence, best.cls.evidence);
+  }
+
   // 9. Dropdowns: Select first real option for unmapped selects
   for (const signal of signals) {
     if (signal.tagName !== "select" || usedIndexes.has(signal.index)) continue;

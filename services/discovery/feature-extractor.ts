@@ -76,18 +76,21 @@ export function extractUniversalFeatureVector(
 
   // 1. Multi-Lingual Contact Intent Signal (0.0 to 1.0)
   let contactScore = 0.0;
-  const contactStems = /\b(contact|kontakt|contacto|contatt|contat|touch|reach|fale|anfrage|nachricht|devis|presupuesto|preventivo|offerte|parlons|hablemos|inquir|inquiry)\b/i;
-  if (normalizedText === "contact" || contactStems.test(normalizedText)) {
-    contactScore = 1.0;
+  const contactStems = /\b(contact|kontakt|contacto|contatt|contat|touch|reach|fale|anfrage|nachricht|devis|presupuesto|preventivo|offerte|parlons|hablemos|inquir|inquiry|sales|talk to|speak with|connect|get in touch|lets talk|let's talk)\b/i;
+  const isSalesOrExpert = /\b(contact sales|talk to sales|speak with sales|talk to an expert|speak with an expert|talk to our team|sales inquiry|contact us|get in touch)\b/i.test(normalizedText) ||
+    /\b(contact-sales|contact_sales|sales-inquiry|talk-to-sales)\b/i.test(targetUrl.pathname);
+
+  if (normalizedText === "contact" || isSalesOrExpert || contactStems.test(normalizedText)) {
+    contactScore = isSalesOrExpert ? 1.0 : (normalizedText === "contact" ? 1.0 : 0.95);
   } else if (contactStems.test(combinedSemantics)) {
     contactScore = 0.92;
   } else if (pathSegments.some((p) => contactStems.test(p))) {
     contactScore = 0.88;
   }
 
-  // 2. Multi-Lingual Booking Intent Signal (0.0 to 1.0)
+  // 2. Multi-Lingual Booking & Demo Intent Signal (0.0 to 1.0)
   let bookingScore = 0.0;
-  const bookingStems = /\b(book|schedule|appointment|calendar|meeting|termin|rendez-vous|cita|appuntamento|agenda|prenota|reserva|boeken)\b/i;
+  const bookingStems = /\b(book|schedule|appointment|calendar|meeting|termin|rendez-vous|cita|appuntamento|agenda|prenota|reserva|boeken|demo|request demo|book demo|schedule demo)\b/i;
   if (
     targetUrl.hostname.includes("calendly.com") ||
     /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(targetUrl.hostname) ||
@@ -104,7 +107,7 @@ export function extractUniversalFeatureVector(
 
   // 3. Multi-Lingual Consultation & Quote Signal (0.0 to 1.0)
   let consultationScore = 0.0;
-  const quoteStems = /\b(consultation|consult|quote|estimate|proposal|budget|tarif|kostenvoranschlag|devis|presupuesto|preventivo|orçamento|evaluation|audit)\b/i;
+  const quoteStems = /\b(consultation|consult|quote|estimate|proposal|budget|tarif|kostenvoranschlag|devis|presupuesto|preventivo|orçamento|evaluation|audit|information|request info)\b/i;
   if (quoteStems.test(normalizedText)) {
     consultationScore = 0.95;
   } else if (quoteStems.test(combinedSemantics)) {
@@ -115,7 +118,7 @@ export function extractUniversalFeatureVector(
 
   // 4. Multi-Lingual Lead & Project Start Signal (0.0 to 1.0)
   let leadScore = 0.0;
-  const startStems = /\b(start|begin|get started|work with|let'?s talk|start project|demarrer|iniciar|progetto|vamos|grow|scale|launch)\b/i;
+  const startStems = /\b(start|begin|get started|work with|let'?s talk|start project|demarrer|iniciar|progetto|vamos|grow|scale|launch|talk to us|speak with us)\b/i;
   if (startStems.test(normalizedText)) {
     leadScore = 0.90;
   } else if (startStems.test(combinedSemantics)) {

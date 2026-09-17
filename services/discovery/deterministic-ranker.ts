@@ -35,6 +35,7 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
   const universalPathTokens = [
     "contact", "contactus", "touch", "reach", "book", "schedule", "meeting",
     "consultation", "quote", "start", "started", "inquire", "talk", "connect",
+    "sales", "demo",
     "kontakt", "contacto", "contatt", "contat", "fale", "devis", "anfrage",
     "presupuesto", "preventivo", "termin", "cita", "rendez", "boeken", "offerte"
   ];

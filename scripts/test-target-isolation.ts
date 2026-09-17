@@ -1,6 +1,6 @@
-import { acquireContext, releaseContext, closePool } from 'c:/Khushang/SDI-main/lib/browserPool';
-import { runMultiTargetAutomation } from 'c:/Khushang/SDI-main/services/multi-target-automation';
-import { LeadData, BookingPreferences } from 'c:/Khushang/SDI-main/types/automation';
+import { acquireContext, releaseContext, closePool } from '../lib/browserPool';
+import { runMultiTargetAutomation } from '../services/multi-target-automation';
+import { LeadData, BookingPreferences } from '../types/automation';
 
 const leadData: LeadData = {
   fullName: "Alex Rivera",

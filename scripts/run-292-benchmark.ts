@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import XLSX from 'xlsx';
-import { acquireContext, releaseContext, closePool } from 'c:/Khushang/SDI-main/lib/browserPool';
-import { runMultiTargetAutomation } from 'c:/Khushang/SDI-main/services/multi-target-automation';
-import { LeadData, BookingPreferences } from 'c:/Khushang/SDI-main/types/automation';
+import { acquireContext, releaseContext, closePool } from '../lib/browserPool';
+import { runMultiTargetAutomation } from '../services/multi-target-automation';
+import { LeadData, BookingPreferences } from '../types/automation';
 
 const leadData: LeadData = {
   fullName: "Alex Rivera",
@@ -161,8 +161,8 @@ async function runTarget(index: number, url: string): Promise<TargetResult> {
       timeoutMs: 45000,
       deadlineAt: Date.now() + 60000,
       callbacks: {
-        onTargetsDiscovered: async (targets) => {
-          targets.forEach((t) =>
+        onTargetsDiscovered: async (targets: any[]) => {
+          targets.forEach((t: any) =>
             discovered.push({ targetType: t.targetType, url: t.url, confidence: t.confidence })
           );
         }
@@ -171,7 +171,7 @@ async function runTarget(index: number, url: string): Promise<TargetResult> {
 
     const durationMs = Date.now() - start;
     const attempts = result.attempts || [];
-    const successfulAttempt = attempts.find((a) =>
+    const successfulAttempt = attempts.find((a: any) =>
       ["success", "completed", "dry_run_ready_to_book"].includes((a.result?.status || "").toLowerCase())
     );
 
@@ -183,7 +183,7 @@ async function runTarget(index: number, url: string): Promise<TargetResult> {
     let errorMsg = isSuccess
       ? null
       : [
-          ...attempts.map((a) => a.result?.errorMessage),
+          ...attempts.map((a: any) => a.result?.errorMessage),
           attempts.length === 0 ? result.discoveryReason : null
         ]
           .filter(Boolean)
@@ -256,7 +256,8 @@ async function main() {
   console.log(`Start Time: ${suiteStartTime}`);
   console.log("==================================================");
 
-  const wb = XLSX.readFile('c:/Khushang/SDI-main/data/30-form.xlsx');
+  const excelPath = path.join(process.cwd(), 'data', '30-form.xlsx');
+  const wb = XLSX.readFile(excelPath);
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows: any[] = XLSX.utils.sheet_to_json(sheet);
   const targetUrls = rows.map((r, idx) => ({
@@ -341,8 +342,9 @@ async function main() {
   }
 
   const suiteEndTime = new Date().toISOString();
-  fs.mkdirSync('c:/Khushang/SDI-main/outputs', { recursive: true });
-  fs.writeFileSync('c:/Khushang/SDI-main/outputs/final_29_targets_result.json', JSON.stringify({
+  const outputDir = path.join(process.cwd(), 'outputs');
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.writeFileSync(path.join(outputDir, 'final_29_targets_result.json'), JSON.stringify({
     summary: {
       total,
       rawSuccess: successCount,

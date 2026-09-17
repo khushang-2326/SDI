@@ -1,7 +1,7 @@
 import http from "node:http";
-import { chromium } from "c:/Khushang/SDI-main/node_modules/playwright";
-import { getChromiumExecutablePath } from "c:/Khushang/SDI-main/services/browser-executable";
-import { findSubmitButtonWithDiagnostics, detectBookingWidget } from "c:/Khushang/SDI-main/services/contact-form-automation";
+import { chromium } from "playwright";
+import { getChromiumExecutablePath } from "../services/browser-executable";
+import { findSubmitButtonWithDiagnostics, detectBookingWidget } from "../services/contact-form-automation";
 
 async function main() {
   console.log("==================================================");

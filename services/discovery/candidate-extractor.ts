@@ -76,7 +76,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
 
   const extractDomElements = async (isMobileMenu: boolean = false): Promise<RawCandidate[]> => {
     return page
-      .evaluate(([baseOrigin, isMobile]) => {
+      .evaluate(({ baseOrigin, isMobile }: { baseOrigin: string; isMobile: boolean }) => {
         (window as any).__name = (window as any).__name || function(fn: any) { return fn; };
 
         const results: Array<{
@@ -229,10 +229,15 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
               onclick.match(/(?:window\.open|location\.assign)\(\s*['"]([^'"]+)['"]/i);
             if (match) extractedUrl = match[1];
           }
+          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
+          const ariaLabel = (el.getAttribute("aria-label") ?? "").trim();
+          const title = (el.getAttribute("title") ?? "").trim();
+          const combinedIntentText = `${text} ${ariaLabel} ${title}`.toLowerCase();
 
-          // Check if button is a modal/drawer trigger
+          // Check if button is a modal/drawer trigger or has high contact intent
           const dataToggle = el.getAttribute("data-toggle") || el.getAttribute("data-bs-toggle") || "";
           const ariaHasPopup = el.getAttribute("aria-haspopup");
+          const hasContactIntent = /\b(contact|talk to|talk with|speak with|get in touch|let'?s talk|book|schedule|request quote|get quote|request demo|start a project|expert|sales|inquire|inquiry|consultation|kontakt|contacto)\b/i.test(combinedIntentText);
           const isModal =
             dataToggle.includes("modal") ||
             ariaHasPopup === "dialog" ||
@@ -240,11 +245,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
             el.className.toLowerCase().includes("drawer-trigger") ||
             /modal|drawer|popup/i.test(el.getAttribute("aria-controls") || "");
 
-          if (!extractedUrl && !isModal) continue;
-
-          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 150);
-          const ariaLabel = (el.getAttribute("aria-label") ?? "").trim();
-          const title = (el.getAttribute("title") ?? "").trim();
+          if (!extractedUrl && !isModal && !hasContactIntent) continue;
 
           const rect = el.getBoundingClientRect();
           const top = window.scrollY + rect.top;
@@ -267,7 +268,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           }
 
           results.push({
-            href: extractedUrl || "#modal",
+            href: extractedUrl || (isModal ? "#modal" : "#contact-action"),
             text,
             ariaLabel,
             title,
@@ -280,14 +281,14 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
             domDepth,
             isRightmostNav: false,
             isProminentButton: true,
-            isModalTrigger: isModal,
+            isModalTrigger: isModal || (!extractedUrl && hasContactIntent),
             modalTargetSelector: dataUrl.startsWith("#") ? dataUrl : undefined,
             mobileMenuSource: Boolean(isMobile)
           });
         }
 
         return results;
-      }, [base.origin, isMobileMenu])
+      }, { baseOrigin: base.origin, isMobile: isMobileMenu })
       .then((raw) => {
         const sanitized: RawCandidate[] = [];
         const seenUrls = new Set<string>();

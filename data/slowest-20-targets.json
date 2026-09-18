@@ -1,0 +1,222 @@
+[
+  {
+    "url": "https://sharkmatic.com/contact",
+    "resolvedUrl": "https://sharkmatic.com/contact/",
+    "status": "Timeout",
+    "workerId": "worker-02",
+    "message": "[worker-02] Target https://sharkmatic.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.685,
+    "claimedAt": "2026-09-08T19:13:00.210Z",
+    "submittedAt": "2026-09-08T19:15:02.895Z"
+  },
+  {
+    "url": "https://dmtechlabs.us/contact-us",
+    "resolvedUrl": "https://dmtechlabs.us/contact-us/",
+    "status": "Timeout",
+    "workerId": "worker-06",
+    "message": "[worker-06] Target https://dmtechlabs.us/contact-us exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.289,
+    "claimedAt": "2026-09-08T19:10:56.934Z",
+    "submittedAt": "2026-09-08T19:12:59.223Z"
+  },
+  {
+    "url": "https://localleap.com/contact-us",
+    "resolvedUrl": "https://localleap.com/contact-us/",
+    "status": "Timeout",
+    "workerId": "worker-06",
+    "message": "[worker-06] Target https://localleap.com/contact-us exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.227,
+    "claimedAt": "2026-09-08T18:58:49.432Z",
+    "submittedAt": "2026-09-08T19:00:51.659Z"
+  },
+  {
+    "url": "https://www.envoca.com/contacts",
+    "resolvedUrl": "https://www.envoca.com/contacts/",
+    "status": "Timeout",
+    "workerId": "worker-04",
+    "message": "[worker-04] Target https://www.envoca.com/contacts exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.203,
+    "claimedAt": "2026-09-08T19:04:11.691Z",
+    "submittedAt": "2026-09-08T19:06:13.894Z"
+  },
+  {
+    "url": "https://houstonsmallbusinessmarketing.com/contact",
+    "resolvedUrl": "https://houstonsmallbusinessmarketing.com/contact/",
+    "status": "Timeout",
+    "workerId": "worker-05",
+    "message": "[worker-05] Target https://houstonsmallbusinessmarketing.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.145,
+    "claimedAt": "2026-09-08T19:18:32.193Z",
+    "submittedAt": "2026-09-08T19:20:34.338Z"
+  },
+  {
+    "url": "https://tkinternetmarketing.com/contact-tk-internet-marketing",
+    "resolvedUrl": "https://tkinternetmarketing.com/contact-tk-internet-marketing/",
+    "status": "Timeout",
+    "workerId": "worker-05",
+    "message": "[worker-05] Target https://tkinternetmarketing.com/contact-tk-internet-marketing exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.139,
+    "claimedAt": "2026-09-08T19:01:43.284Z",
+    "submittedAt": "2026-09-08T19:03:45.423Z"
+  },
+  {
+    "url": "https://www.magiclogix.com/contact",
+    "resolvedUrl": "https://www.magiclogix.com/contact/",
+    "status": "Timeout",
+    "workerId": "worker-01",
+    "message": "[worker-01] Target https://www.magiclogix.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.134,
+    "claimedAt": "2026-09-08T18:57:47.692Z",
+    "submittedAt": "2026-09-08T18:59:49.826Z"
+  },
+  {
+    "url": "https://www.teknokraft.us/get-in-touch",
+    "resolvedUrl": "https://www.teknokraft.us/get-in-touch/",
+    "status": "Timeout",
+    "workerId": "worker-02",
+    "message": "[worker-02] Target https://www.teknokraft.us/get-in-touch exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.117,
+    "claimedAt": "2026-09-08T19:15:19.245Z",
+    "submittedAt": "2026-09-08T19:17:21.362Z"
+  },
+  {
+    "url": "https://www.idealysis.com/contact",
+    "resolvedUrl": "https://www.idealysis.com/contact/",
+    "status": "Timeout",
+    "workerId": "worker-05",
+    "message": "[worker-05] Target https://www.idealysis.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.073,
+    "claimedAt": "2026-09-08T19:10:39.596Z",
+    "submittedAt": "2026-09-08T19:12:41.669Z"
+  },
+  {
+    "url": "https://thesocialnerds.com/contact",
+    "resolvedUrl": "https://thesocialnerds.com/contact",
+    "status": "Timeout",
+    "workerId": "worker-03",
+    "message": "[worker-03] Target https://thesocialnerds.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.072,
+    "claimedAt": "2026-09-08T19:03:06.480Z",
+    "submittedAt": "2026-09-08T19:05:08.552Z"
+  },
+  {
+    "url": "https://www.yellowfindigital.com/contact",
+    "resolvedUrl": "https://www.yellowfindigital.com/contact/",
+    "status": "Timeout",
+    "workerId": "worker-03",
+    "message": "[worker-03] Target https://www.yellowfindigital.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.061,
+    "claimedAt": "2026-09-08T19:11:41.765Z",
+    "submittedAt": "2026-09-08T19:13:43.826Z"
+  },
+  {
+    "url": "https://aladdinmedia.com/contact",
+    "resolvedUrl": "https://aladdinmedia.com/contact/",
+    "status": "Timeout",
+    "workerId": "worker-02",
+    "message": "[worker-02] Target https://aladdinmedia.com/contact exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.058,
+    "claimedAt": "2026-09-08T18:59:19.069Z",
+    "submittedAt": "2026-09-08T19:01:21.127Z"
+  },
+  {
+    "url": "https://www.jceseo.com/contact-us",
+    "resolvedUrl": "https://www.jceseo.com/contact-us/",
+    "status": "Timeout",
+    "workerId": "worker-04",
+    "message": "[worker-04] Target https://www.jceseo.com/contact-us exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.053,
+    "claimedAt": "2026-09-08T19:13:12.121Z",
+    "submittedAt": "2026-09-08T19:15:14.174Z"
+  },
+  {
+    "url": "https://thebmscompany.com/contact-us",
+    "resolvedUrl": "https://thebmscompany.com/contact-us/",
+    "status": "Timeout",
+    "workerId": "worker-01",
+    "message": "[worker-01] Target https://thebmscompany.com/contact-us exceeded timeout limit of 122 seconds.",
+    "notes": null,
+    "durationSec": 122.041,
+    "claimedAt": "2026-09-08T19:02:50.373Z",
+    "submittedAt": "2026-09-08T19:04:52.414Z"
+  },
+  {
+    "url": "https://sofiaseo.com/contact-us",
+    "resolvedUrl": "https://sofiaseo.com/",
+    "status": "Widget_Mount_Failure",
+    "workerId": "worker-06",
+    "message": "[worker-06] Booking widget source was found, but it did not render on the page.",
+    "notes": "Website automation exceeded its time limit.",
+    "durationSec": 120.481,
+    "claimedAt": "2026-09-08T18:56:02.690Z",
+    "submittedAt": "2026-09-08T18:58:03.171Z"
+  },
+  {
+    "url": "https://www.ewrdigital.com/contact",
+    "resolvedUrl": "https://api.leadconnectorhq.com/widget/booking/wkhPGUfEmnlmWj4v29ko",
+    "status": "Widget_Mount_Failure",
+    "workerId": "worker-06",
+    "message": "[worker-06] Booking widget source was found, but it did not render on the page.",
+    "notes": "Website automation exceeded its time limit.",
+    "durationSec": 120.344,
+    "claimedAt": "2026-09-08T19:16:10.195Z",
+    "submittedAt": "2026-09-08T19:18:10.539Z"
+  },
+  {
+    "url": "https://comradeweb.com/contact-us",
+    "resolvedUrl": "https://comradeweb.com/contact-us/",
+    "status": "Failed",
+    "workerId": "worker-01",
+    "message": "[worker-01] locator.count: Target page, context or browser has been closed",
+    "notes": "Website automation exceeded its time limit before target discovery completed.",
+    "durationSec": 120.195,
+    "claimedAt": "2026-09-08T19:09:25.179Z",
+    "submittedAt": "2026-09-08T19:11:25.374Z"
+  },
+  {
+    "url": "https://www.strictlyplumbers.com/contact",
+    "resolvedUrl": "https://calendly.com/tonygeestrictlyplumbers/hire",
+    "status": "Failed",
+    "workerId": "worker-01",
+    "message": "[worker-01] locator.evaluateAll: Target page, context or browser has been closed",
+    "notes": "Website automation exceeded its time limit.",
+    "durationSec": 120.118,
+    "claimedAt": "2026-09-08T19:13:37.979Z",
+    "submittedAt": "2026-09-08T19:15:38.097Z"
+  },
+  {
+    "url": "https://focusedidea.com/contact-us",
+    "resolvedUrl": "https://focusedidea.com/contact-us/",
+    "status": "Failed",
+    "workerId": "worker-05",
+    "message": "[worker-05] page.waitForTimeout: Target page, context or browser has been closed",
+    "notes": "Website automation exceeded its time limit.",
+    "durationSec": 120.092,
+    "claimedAt": "2026-09-08T19:13:35.760Z",
+    "submittedAt": "2026-09-08T19:15:35.852Z"
+  },
+  {
+    "url": "https://koderhive.com/contact-us",
+    "resolvedUrl": "https://koderhive.com/contact-us/",
+    "status": "Completed",
+    "workerId": "worker-04",
+    "message": "[worker-04] Proxy fallback: resolved via direct connection; A cached normal contact form succeeded; booking targets were skipped.",
+    "notes": "Proxy fallback: resolved via direct connection; A cached normal contact form succeeded; booking targets were skipped.",
+    "durationSec": 116.807,
+    "claimedAt": "2026-09-08T18:59:53.882Z",
+    "submittedAt": "2026-09-08T19:01:50.689Z"
+  }
+]

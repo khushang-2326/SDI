@@ -1,0 +1,323 @@
+{
+  "total": 35,
+  "totalSuccess": 18,
+  "totalFailed": 17,
+  "rawSuccessRate": "51.4",
+  "eligibleSuccessRate": "66.7",
+  "totalTimeSec": "810.6",
+  "failureCategories": {
+    "CAPTCHA / HUMAN VERIFICATION": 5,
+    "OTHER": 3,
+    "NAVIGATION TIMEOUT": 2,
+    "HTTP 403": 3,
+    "FORM NOT FOUND": 4
+  },
+  "metrics": [
+    {
+      "url": "https://eclipsemarketing.io/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://eclipsemarketing.io/contact/",
+      "attemptsCount": 1,
+      "durationMs": 31829,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.moorethanseo.com/contact-us",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 9187,
+      "failureCategory": "CAPTCHA / HUMAN VERIFICATION",
+      "reason": "Unsupported verification: reCAPTCHA detected. Manual verification required."
+    },
+    {
+      "url": "https://webnonline.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://webnonline.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 31433,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://biagomedia.com/categories/biago-media-contact-us.html",
+      "success": false,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://biagomedia.com/categories/biago-media-contact-us.html",
+      "attemptsCount": 1,
+      "durationMs": 20490,
+      "failureCategory": "CAPTCHA / HUMAN VERIFICATION",
+      "reason": "Unsupported verification: reCAPTCHA detected. Manual verification required."
+    },
+    {
+      "url": "https://sandiegodigitalco.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://sandiegodigitalco.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 39634,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://projectdiv.com/contact",
+      "success": false,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://projectdiv.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 28204,
+      "failureCategory": "OTHER",
+      "reason": "INVARIANT_GATE_REJECTED: [FAILURE_FORM_NOT_DETECTED] Page topology contained 0 meaningful form fields (generic buttons/links do not constitute a form)"
+    },
+    {
+      "url": "https://blackswanmedia.co/contact-us",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 28056,
+      "failureCategory": "NAVIGATION TIMEOUT",
+      "reason": "Target discovery exceeded overall budget limit (28s)."
+    },
+    {
+      "url": "https://searchmanipulator.com/contact-us",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://searchmanipulator.com/contact-us/",
+      "attemptsCount": 1,
+      "durationMs": 25752,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://brightvalleymarketing.com/contact",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 10954,
+      "failureCategory": "CAPTCHA / HUMAN VERIFICATION",
+      "reason": "Unsupported verification: reCAPTCHA detected. Manual verification required."
+    },
+    {
+      "url": "https://www.themarketingspecialist.com",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://www.themarketingspecialist.com/",
+      "attemptsCount": 1,
+      "durationMs": 25032,
+      "reason": "Invalid URL The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://dmncreative.com/contact",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 13546,
+      "failureCategory": "CAPTCHA / HUMAN VERIFICATION",
+      "reason": "Unsupported verification: Cloudflare Turnstile detected. Manual verification required."
+    },
+    {
+      "url": "https://contentsocialmediaqueen.com/get-in-touch",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 8051,
+      "failureCategory": "HTTP 403",
+      "reason": "Website blocked access (HTTP 403 Forbidden)."
+    },
+    {
+      "url": "https://bretzmedia.com/contact",
+      "success": false,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://bretzmedia.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 25292,
+      "failureCategory": "OTHER",
+      "reason": "REQUIRED_FIELD_UNMAPPED: Missing required field(s): input_2_2"
+    },
+    {
+      "url": "https://seoversite.com/contact",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 9801,
+      "failureCategory": "CAPTCHA / HUMAN VERIFICATION",
+      "reason": "Unsupported verification: Cloudflare Turnstile detected. Manual verification required."
+    },
+    {
+      "url": "https://www.updigitalgroup.com/contact-us",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://www.updigitalgroup.com/contact-us/",
+      "attemptsCount": 1,
+      "durationMs": 23150,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.mym3media.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://www.mym3media.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 25665,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.redhawkmarketing.net/contact-us",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 19046,
+      "failureCategory": "FORM NOT FOUND",
+      "reason": "No supported contact form found on the supplied page or relevant discovered pages."
+    },
+    {
+      "url": "https://www.dcrwebservices.com/contact-us",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://www.dcrwebservices.com/contact-us",
+      "attemptsCount": 1,
+      "durationMs": 25340,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://searchsitemarketing.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://searchsitemarketing.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 26157,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.tkflux.com",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://tkflux.com/",
+      "attemptsCount": 1,
+      "durationMs": 21623,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://maxbmc.com/maxbmc",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://maxbmc.com/maxbmc",
+      "attemptsCount": 1,
+      "durationMs": 36624,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://nerdcrossing.com/contact-us",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 5477,
+      "failureCategory": "HTTP 403",
+      "reason": "Website blocked access (HTTP 403 Forbidden)."
+    },
+    {
+      "url": "https://cyfrow.org/contact-us",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 5538,
+      "failureCategory": "HTTP 403",
+      "reason": "Website blocked access (HTTP 403 Forbidden)."
+    },
+    {
+      "url": "https://firstpageusa.com/contact-us",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://firstpageusa.com/contact-us/",
+      "attemptsCount": 1,
+      "durationMs": 34663,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://conversionda.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://conversionda.com/contact",
+      "attemptsCount": 1,
+      "durationMs": 26863,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.site-pros.net/contact-page",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 16073,
+      "failureCategory": "FORM NOT FOUND",
+      "reason": "No supported contact form found on the supplied page or relevant discovered pages."
+    },
+    {
+      "url": "https://www.hemlockdigitalgroup.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://www.hemlockdigitalgroup.com/contact",
+      "attemptsCount": 1,
+      "durationMs": 27468,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://digidatsolutions.com/contact",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 22499,
+      "failureCategory": "FORM NOT FOUND",
+      "reason": "No supported contact form found on the supplied page or relevant discovered pages."
+    },
+    {
+      "url": "https://beehivews.com/contact-us",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 28040,
+      "failureCategory": "NAVIGATION TIMEOUT",
+      "reason": "Target discovery exceeded overall budget limit (28s)."
+    },
+    {
+      "url": "https://boutiquedigitalmarketing.com/contact",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://boutiquedigitalmarketing.com/contact/",
+      "attemptsCount": 1,
+      "durationMs": 28343,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.generationalmarketer.com/contact-us",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://www.generationalmarketer.com/contact-us",
+      "attemptsCount": 1,
+      "durationMs": 23412,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://ryancameron.me/contact",
+      "success": false,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://ryancameron.me/contact/",
+      "attemptsCount": 1,
+      "durationMs": 27702,
+      "failureCategory": "OTHER",
+      "reason": "INVARIANT_GATE_REJECTED: [FAILURE_FORM_NOT_DETECTED] Page topology contained 0 meaningful form fields (generic buttons/links do not constitute a form)"
+    },
+    {
+      "url": "https://localseosuperiority.com/contact-page",
+      "success": false,
+      "attemptsCount": 0,
+      "durationMs": 27119,
+      "failureCategory": "FORM NOT FOUND",
+      "reason": "No supported contact form found on the supplied page or relevant discovered pages."
+    },
+    {
+      "url": "https://konnectex.net/contact-us",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://konnectex.net/contact-us/",
+      "attemptsCount": 1,
+      "durationMs": 21009,
+      "reason": "Contact form found directly on the entered page. The first successful target was used and remaining targets were skipped."
+    },
+    {
+      "url": "https://www.soloitech.com",
+      "success": true,
+      "targetType": "contact_form",
+      "discoveredUrl": "https://soloitech.com/contact-us/",
+      "attemptsCount": 1,
+      "durationMs": 27195,
+      "reason": "Discovered 2 supported submission targets. The first successful target was used and remaining targets were skipped."
+    }
+  ]
+}

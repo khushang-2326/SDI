@@ -1,0 +1,543 @@
+{
+  "executive": {
+    "totalTargets": 292,
+    "baseSuccess": 151,
+    "newSuccess": 179,
+    "baseRate": 51.71232876712328,
+    "newRate": 61.3013698630137,
+    "absDiff": 9.589041095890416,
+    "relDiff": 18.543046357615893,
+    "metadata": {
+      "baselineJobId": "cmtsxzdki06x9nm2xv4ilyrt0",
+      "newJobId": "cmtt15fql0001nmm1pcihduhn",
+      "totalTargets": 292,
+      "workerCount": 6,
+      "mode": "dry_run",
+      "startTime": "2026-09-08T18:55:53.353Z",
+      "endTime": "2026-09-08T19:20:37.450Z",
+      "totalDurationSec": 1484,
+      "durationFormatted": "24m 44s",
+      "baselineDurationFormatted": "34m 40s",
+      "baselineDurationSec": 2080
+    },
+    "timeSavedSec": 596,
+    "timeSavedMin": "9.9",
+    "baseThroughput": "8.42",
+    "newThroughput": "11.81"
+  },
+  "transitions": {
+    "successToSuccess": 151,
+    "successToFailed": 0,
+    "failedToSuccess": 28,
+    "failedToFailed": 113
+  },
+  "failures": {
+    "baseFailCats": {
+      "FORM_NOT_FOUND": 48,
+      "NAVIGATION_TIMEOUT": 40,
+      "HUMAN_VERIFICATION": 39,
+      "CAPTCHA": 2,
+      "HTTP_403": 0,
+      "OTHER": 12
+    },
+    "newFailCats": {
+      "FORM_NOT_FOUND": 32,
+      "NAVIGATION_TIMEOUT": 14,
+      "HUMAN_VERIFICATION": 38,
+      "CAPTCHA": 2,
+      "HTTP_403": 0,
+      "OTHER": 27
+    }
+  },
+  "recoveries": [
+    {
+      "url": "https://acceleratorwebsites.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://acceleratorwebsites.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://austincodemonkey.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://austincodemonkey.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://brandastic.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://brandastic.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://digitalmarketingatx.com/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://digitalmarketingatx.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://fullspectrumbranding.com/contact-a-advertising-marketing-agency-san-antonio",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://fullspectrumbranding.com/contact-a-advertising-marketing-agency-san-antonio",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://glintadv.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://glintadv.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://koderhive.com/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://koderhive.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://lattitudesolutions.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://lattitudesolutions.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://matthewwoodard.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://matthewwoodard.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://mediaateam.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://mediaateam.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://oskyblue.com/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://oskyblue.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://pearanalytics.com/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://pearanalytics.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://redgizmo.com/contact-us",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://redgizmo.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://seohoustonpros.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://seohoustonpros.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://sevencube.com/contact",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://sevencube.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://simplificationservices.com/contact-kelly",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://simplificationservices.com/contact-kelly",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://technogrips.com",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://technogrips.com",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://thatware.co/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://thatware.co/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://trendwiseco.com/contact",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://trendwiseco.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://trihead.com/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://trihead.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.appseverywherellc.com/contact-us",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.appseverywherellc.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.awsp.com/contact",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.awsp.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.creativehtx.com/contact",
+      "oldFailure": "HUMAN_VERIFICATION",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.creativehtx.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.makecustomersforlife.com/contact-us",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.makecustomersforlife.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.openpotion.com/contact",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.openpotion.com/contact",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.seobuzzinternetmarketing.com/contact-internet-marketing-company",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.seobuzzinternetmarketing.com/contact-internet-marketing-company",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.seohouston.com/contact.html",
+      "oldFailure": "FORM_NOT_FOUND",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.seohouston.com/contact.html",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    },
+    {
+      "url": "https://www.vdigitalservices.com/contact-us",
+      "oldFailure": "NAVIGATION_TIMEOUT",
+      "newStatus": "Completed",
+      "discoveredUrl": "https://www.vdigitalservices.com/contact-us",
+      "discoverySource": "Direct (Supplied Page)",
+      "formType": "standard_html",
+      "durationSec": "N/A"
+    }
+  ],
+  "regressions": [],
+  "timeouts": {
+    "outcomes": {
+      "CONVERTED_TO_SUCCESS": 18,
+      "FAST_EXIT_NO_FORM": 1,
+      "HUMAN_VERIFICATION": 0,
+      "HTTP_403": 0,
+      "REMAINED_TIMEOUT": 14,
+      "OTHER": 7
+    },
+    "details": [
+      {
+        "url": "https://acceleratorwebsites.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://adventtrinity.com/contact",
+        "newStatus": "Submit_Button_Not_Found",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://aladdinmedia.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://austincodemonkey.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://brandastic.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://comradeweb.com/contact-us",
+        "newStatus": "Failed",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://digitalkiko.com/contact",
+        "newStatus": "No_Form_Detected",
+        "outcome": "FAST_EXIT_NO_FORM"
+      },
+      {
+        "url": "https://digitalmarketingatx.com/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://dmtechlabs.us/contact-us",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://focusedidea.com/contact-us",
+        "newStatus": "Failed",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://glintadv.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://houstonsmallbusinessmarketing.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://koderhive.com/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://lattitudesolutions.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://localleap.com/contact-us",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://matthewwoodard.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://mediaateam.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://oskyblue.com/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://pearanalytics.com/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://practicemarketing.guru/contact-us",
+        "newStatus": "Failed",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://seohoustonpros.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://sharkmatic.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://simplificationservices.com/contact-kelly",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://sofiaseo.com/contact-us",
+        "newStatus": "Widget_Mount_Failure",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://thatware.co/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://thebmscompany.com/contact-us",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://thesocialnerds.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://tkinternetmarketing.com/contact-tk-internet-marketing",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://trendwiseco.com/contact",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://trihead.com/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://www.envoca.com/contacts",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://www.ewrdigital.com/contact",
+        "newStatus": "Widget_Mount_Failure",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://www.idealysis.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://www.jceseo.com/contact-us",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://www.magiclogix.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://www.seobuzzinternetmarketing.com/contact-internet-marketing-company",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://www.strictlyplumbers.com/contact",
+        "newStatus": "Failed",
+        "outcome": "OTHER"
+      },
+      {
+        "url": "https://www.teknokraft.us/get-in-touch",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      },
+      {
+        "url": "https://www.vdigitalservices.com/contact-us",
+        "newStatus": "Completed",
+        "outcome": "CONVERTED_TO_SUCCESS"
+      },
+      {
+        "url": "https://www.yellowfindigital.com/contact",
+        "newStatus": "Timeout",
+        "outcome": "REMAINED_TIMEOUT"
+      }
+    ]
+  },
+  "latency": {
+    "baseP": {
+      "mean": 0,
+      "median": 0,
+      "p90": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "newP": {
+      "mean": 0,
+      "median": 0,
+      "p90": 0,
+      "p95": 0,
+      "max": 0
+    }
+  },
+  "discoverySources": {
+    "Direct (Supplied Page)": 179,
+    "Discovered Subpage (Contact / Quote / Book)": 0,
+    "Discovered Subpage (Generic Candidate)": 0
+  },
+  "formTypes": {
+    "standard_html": 179
+  }
+}

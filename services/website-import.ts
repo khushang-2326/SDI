@@ -1,24 +1,9 @@
 import * as XLSX from "xlsx";
 import { prisma } from "@/lib/prisma";
 import { WebsiteImportRow, WebsiteImportSummary } from "@/types/import";
+import { normalizeInputTargetUrl } from "@/services/url-normalizer";
 
 const REQUIRED_COLUMNS = ["website"] as const;
-
-function normalizeUrl(value: string) {
-  const withProtocol = /^https?:\/\//i.test(value.trim())
-    ? value.trim()
-    : `https://${value.trim()}`;
-  const url = new URL(withProtocol);
-
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("Only HTTP and HTTPS website URLs are supported.");
-  }
-
-  url.hash = "";
-  url.hostname = url.hostname.toLowerCase();
-  if (url.pathname !== "/") url.pathname = url.pathname.replace(/\/+$/, "");
-  return url.toString().replace(/\/$/, "");
-}
 
 function normalizeStatus(value: string) {
   const status = value.trim().toLowerCase();
@@ -90,9 +75,15 @@ export async function importWebsitesFromExcel(
     where: { userId },
     select: { id: true, websiteUrl: true, contactPageUrl: true }
   });
-  const seenUrls = new Set(existingWebsites.map((website) => normalizeUrl(website.websiteUrl)));
+  const seenUrls = new Set(
+    existingWebsites
+      .map((w) => normalizeInputTargetUrl(w.websiteUrl).normalizedTargetUrl)
+      .filter((u): u is string => Boolean(u))
+  );
   const existingByUrl = new Map(
-    existingWebsites.map((website) => [normalizeUrl(website.websiteUrl), website])
+    existingWebsites
+      .map((w) => [normalizeInputTargetUrl(w.websiteUrl).normalizedTargetUrl, w] as const)
+      .filter(([u]) => Boolean(u)) as [string, (typeof existingWebsites)[0]][]
   );
 
   let duplicateRows = 0;
@@ -106,24 +97,24 @@ export async function importWebsitesFromExcel(
     const status = rawStatus ? normalizeStatus(rawStatus) : "active";
     const notes = readCell(row.notes);
 
-    if (!rawWebsiteUrl) {
+    const normTarget = normalizeInputTargetUrl(rawWebsiteUrl);
+    if (!normTarget.isValidTarget || !normTarget.normalizedTargetUrl) {
       invalidRows += 1;
       continue;
     }
 
-    let websiteUrl: string;
+    const websiteUrl = normTarget.normalizedTargetUrl;
     let contactPageUrl = "";
 
-    try {
-      websiteUrl = normalizeUrl(rawWebsiteUrl);
-      const rawContactPageUrl =
-        readCell(row.contactPageUrl) ||
-        readCell(row.directContactUrl) ||
-        readCell(row.bookingUrl);
-      contactPageUrl = rawContactPageUrl ? normalizeUrl(rawContactPageUrl) : "";
-    } catch {
-      invalidRows += 1;
-      continue;
+    const rawContactPageUrl =
+      readCell(row.contactPageUrl) ||
+      readCell(row.directContactUrl) ||
+      readCell(row.bookingUrl);
+    if (rawContactPageUrl) {
+      const normContact = normalizeInputTargetUrl(rawContactPageUrl);
+      if (normContact.isValidTarget && normContact.normalizedTargetUrl) {
+        contactPageUrl = normContact.normalizedTargetUrl;
+      }
     }
 
     if (!status) {

@@ -598,11 +598,27 @@ export async function collectHttpDiscoveryCandidates(websiteUrl: string): Promis
   return candidates;
 }
 
+export type DiscoveryTimeoutStage =
+  | "INITIAL_NAVIGATION"
+  | "REDIRECT"
+  | "DOM_READY"
+  | "HYDRATION"
+  | "CANDIDATE_NAVIGATION"
+  | "CONTACT_NAVIGATION"
+  | "FORM_MOUNT"
+  | "OTHER";
+
 export interface DiscoveryNavigationResult {
+  success: boolean;
   committed: boolean;
+  status: number;
   responseStatus: number;
   finalUrl: string;
   navigationMs: number;
+  readinessMs: number;
+  hydrationMs: number;
+  redirectCount: number;
+  timeoutStage?: DiscoveryTimeoutStage;
   readinessState: string;
   hasForms: boolean;
   hasBooking: boolean;
@@ -620,7 +636,8 @@ export async function navigateForDiscovery(
   page: Page,
   url: string,
   budgetMs: number,
-  purpose: "discovery" | "form" | "booking" | "any" = "discovery"
+  purpose: "discovery" | "form" | "booking" | "any" = "discovery",
+  stage: DiscoveryTimeoutStage = "INITIAL_NAVIGATION"
 ): Promise<DiscoveryNavigationResult> {
   const tStart = Date.now();
   let committed = false;
@@ -628,6 +645,7 @@ export async function navigateForDiscovery(
   let navResponse: any = null;
   let navError: any = null;
   let timedOut = false;
+  let timeoutStage: DiscoveryTimeoutStage | undefined = undefined;
 
   const commitTimeout = Math.max(1500, Math.min(6000, budgetMs - 1000));
 
@@ -654,11 +672,13 @@ export async function navigateForDiscovery(
       navError = commitErr;
       if (commitErr?.message?.includes("Timeout") || commitErr?.name === "TimeoutError") {
         timedOut = true;
+        timeoutStage = stage;
       }
     }
   }
 
-  const remainingBudget = Math.max(800, budgetMs - (Date.now() - tStart));
+  const tNavDone = Date.now();
+  const remainingBudget = Math.max(800, budgetMs - (tNavDone - tStart));
   const readiness = await waitForUniversalPageReadiness(page, {
     maxWaitMs: Math.min(remainingBudget, 3000),
     pollIntervalMs: 150,
@@ -672,14 +692,23 @@ export async function navigateForDiscovery(
     interactiveCount: 0
   }));
 
-  const navigationMs = Date.now() - tStart;
+  const totalMs = Date.now() - tStart;
+  const readinessMs = readiness.durationMs || (Date.now() - tNavDone);
+  const hydrationMs = readiness.state === "HYDRATION_IN_PROGRESS" ? readinessMs : 0;
   const finalUrl = page.url() || url;
+  const success = committed && !navError && (responseStatus < 400 || responseStatus === 404);
 
   return {
+    success,
     committed,
+    status: responseStatus,
     responseStatus,
     finalUrl,
-    navigationMs,
+    navigationMs: tNavDone - tStart,
+    readinessMs,
+    hydrationMs,
+    redirectCount: 0,
+    timeoutStage: timedOut ? timeoutStage : undefined,
     readinessState: readiness.state,
     hasForms: readiness.hasForms,
     hasBooking: readiness.hasBooking,
@@ -1730,6 +1759,35 @@ export async function discoverSubmissionTarget({
         break;
       }
       checkedUrls.push(candidate.url);
+
+      const isModalOrButton = candidate.candidateType === "button" ||
+        candidate.candidateType === "modal_trigger" ||
+        candidate.candidateHref?.startsWith("#") ||
+        (candidate.url.includes("#") && withoutHash(candidate.url) === withoutHash(page.url()));
+
+      if (isModalOrButton && homepageLoaded && candidate.candidateText) {
+        try {
+          const safeText = candidate.candidateText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const btnLocator = page.locator("button, [role='button'], a, [data-modal-target], [data-drawer], [data-bs-toggle='modal'], [data-toggle='modal']").filter({
+            hasText: new RegExp(safeText, "i")
+          }).first();
+          if (await btnLocator.count() > 0) {
+            await btnLocator.click({ timeout: 1200 }).catch(() => {});
+            await page.waitForTimeout(400);
+            await unhideHiddenFormContainers(page).catch(() => {});
+            const modalResult = await detectTargetWithLazyScroll(page, page.url(), `${candidate.reason}; clicked in-page trigger`);
+            if (modalResult) {
+              return {
+                ...modalResult,
+                websiteUrl: normalizedWebsiteUrl,
+                checkedUrls: [normalizedWebsiteUrl, ...checkedUrls]
+              };
+            }
+          }
+        } catch {
+          // ignore and proceed to standard navigation
+        }
+      }
 
       const remainingCandidateTimeout = Math.max(2000, Math.min(7000, discoveryDeadline - Date.now()));
       const candNav = await navigateForDiscovery(page, candidate.url, remainingCandidateTimeout, "form");

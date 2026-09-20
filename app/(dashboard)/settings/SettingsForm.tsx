@@ -74,7 +74,26 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
 
   // Server Actions reset native form controls after a save. Reapply the
   // values confirmed by the database so the visible switches cannot drift
-  // from the saved proxy configuration.
+  // from the saved CAPTCHA or proxy configuration.
+  useEffect(() => {
+    if (!captchaFormState.success) return;
+    if (typeof captchaFormState.captchaEnabled === "boolean") {
+      setCaptchaEnabled(captchaFormState.captchaEnabled);
+    }
+  }, [captchaFormState]);
+
+  useEffect(() => {
+    if (typeof initialSettings.captchaEnabled === "boolean") {
+      setCaptchaEnabled(initialSettings.captchaEnabled);
+    }
+    if (initialSettings.captchaProvider) {
+      setSelectedProviderId(initialSettings.captchaProvider);
+    }
+    if (initialSettings.hasKey && !apiKeyInput) {
+      setApiKeyInput("••••••••");
+    }
+  }, [initialSettings.captchaEnabled, initialSettings.captchaProvider, initialSettings.hasKey]);
+
   useEffect(() => {
     if (!proxyFormState.success) return;
     if (typeof proxyFormState.proxyEnabled === "boolean") {

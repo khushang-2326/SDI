@@ -1,4 +1,4 @@
-import { CaptchaSolver } from "./captcha-solver";
+import { CaptchaSolver, type CaptchaSolveOptions } from "./captcha-solver";
 
 export class TwoCaptchaSolver extends CaptchaSolver {
   async validateKey(): Promise<{ success: boolean; balance?: number; message?: string }> {
@@ -29,8 +29,9 @@ export class TwoCaptchaSolver extends CaptchaSolver {
     siteKey: string,
     url: string,
     version?: "v2" | "v3",
-    action?: string
-  ): Promise<{ token: string }> {
+    action?: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     const params: Record<string, string> = {
       key: this.apiKey,
       method: "userrecaptcha",
@@ -45,10 +46,14 @@ export class TwoCaptchaSolver extends CaptchaSolver {
       if (action) params.action = action;
     }
 
-    return this.pollResult(params);
+    return this.pollResult(params, options);
   }
 
-  async solveHCaptcha(siteKey: string, url: string): Promise<{ token: string }> {
+  async solveHCaptcha(
+    siteKey: string,
+    url: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     const params = {
       key: this.apiKey,
       method: "hcaptcha",
@@ -56,10 +61,14 @@ export class TwoCaptchaSolver extends CaptchaSolver {
       pageurl: url,
       json: "1"
     };
-    return this.pollResult(params);
+    return this.pollResult(params, options);
   }
 
-  async solveTurnstile(siteKey: string, url: string): Promise<{ token: string }> {
+  async solveTurnstile(
+    siteKey: string,
+    url: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     const params = {
       key: this.apiKey,
       method: "turnstile",
@@ -67,10 +76,13 @@ export class TwoCaptchaSolver extends CaptchaSolver {
       pageurl: url,
       json: "1"
     };
-    return this.pollResult(params);
+    return this.pollResult(params, options);
   }
 
-  async solveImage(base64Image: string): Promise<{ text: string }> {
+  async solveImage(
+    base64Image: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ text: string; taskId?: string }> {
     const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
     const params = {
       key: this.apiKey,
@@ -78,18 +90,26 @@ export class TwoCaptchaSolver extends CaptchaSolver {
       body: cleanBase64,
       json: "1"
     };
-    const result = await this.pollResult(params);
-    return { text: result.token };
+    const result = await this.pollResult(params, options);
+    return { text: result.token, taskId: result.taskId };
   }
 
-  private async pollResult(params: Record<string, string>): Promise<{ token: string }> {
+  private async pollResult(
+    params: Record<string, string>,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     try {
+      if (options?.abortSignal?.aborted) {
+        throw new Error("CAPTCHA solving operation aborted before start.");
+      }
+
       // 1. Submit the captcha task
       const bodyParams = new URLSearchParams(params);
       const submitRes = await fetch("https://2captcha.com/in.php", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: bodyParams.toString()
+        body: bodyParams.toString(),
+        signal: options?.abortSignal
       });
 
       if (!submitRes.ok) {
@@ -101,24 +121,42 @@ export class TwoCaptchaSolver extends CaptchaSolver {
         throw new Error(submitData.request || "Failed to submit captcha task to 2Captcha.");
       }
 
-      const taskId = submitData.request;
+      const taskId = String(submitData.request);
+      if (options?.onTaskCreated) {
+        try {
+          options.onTaskCreated(taskId);
+        } catch {}
+      }
 
-      // 2. Poll the result
-      const maxAttempts = 30; // 30 attempts, 5s delay = 150s max timeout
+      // 2. Poll the result with bounded attempts
+      const timeoutMs = options?.timeoutMs || 120000;
+      const intervalMs = 4000;
+      const maxAttempts = Math.max(1, Math.ceil(timeoutMs / intervalMs));
+
+      // Wait 6 seconds initially before first poll
+      await new Promise((resolve) => setTimeout(resolve, 6000));
+
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 5000));
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+
+        if (options?.abortSignal?.aborted) {
+          throw new Error("CAPTCHA solving polling cancelled.");
+        }
 
         const checkRes = await fetch(
           `https://2captcha.com/res.php?key=${encodeURIComponent(
             this.apiKey
-          )}&action=get&id=${encodeURIComponent(taskId)}&json=1`
+          )}&action=get&id=${encodeURIComponent(taskId)}&json=1`,
+          { signal: options?.abortSignal }
         );
 
         if (!checkRes.ok) continue;
 
         const checkData = await checkRes.json();
         if (checkData.status === 1) {
-          return { token: checkData.request };
+          return { token: checkData.request, taskId };
         } else if (checkData.request === "CAPCHA_NOT_READY") {
           continue;
         } else {
@@ -126,7 +164,7 @@ export class TwoCaptchaSolver extends CaptchaSolver {
         }
       }
 
-      throw new Error("CAPTCHA solving request timed out.");
+      throw new Error(`CAPTCHA solving request timed out after ${Math.round(timeoutMs / 1000)}s.`);
     } catch (error: any) {
       throw new Error(`[2Captcha Error] ${error.message}`);
     }

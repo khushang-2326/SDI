@@ -17,6 +17,7 @@ import {
   redactProxyDetails
 } from "@/services/proxy-helper";
 import { detectUnsupportedVerification } from "@/services/verification-detector";
+import { isAuthorizedCaptchaTestTarget } from "@/services/captcha/test-environment";
 import { analyzePageContext } from "./discovery/page-context-analyzer";
 import { extractRawCandidates } from "./discovery/candidate-extractor";
 import { extractFeatureVector, extractUniversalFeatureVector } from "./discovery/feature-extractor";
@@ -1719,16 +1720,19 @@ export async function discoverSubmissionTarget({
     }
 
     const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
-    if (verification && verification.blocking !== false) {
-      return {
-        websiteUrl: normalizedWebsiteUrl,
-        discoveredUrl: null,
-        targetType: "not_found",
-        confidence: 0,
-        reason: verification.reason,
-        checkedUrls: [normalizedWebsiteUrl],
-        screenshotPath: verification.screenshotPath
-      };
+    if (verification && verification.blocking !== false && !isAuthorizedCaptchaTestTarget(normalizedWebsiteUrl)) {
+      const isInlineCaptcha = ["reCAPTCHA", "hCaptcha", "Cloudflare Turnstile"].includes(verification.name);
+      if (!isInlineCaptcha) {
+        return {
+          websiteUrl: normalizedWebsiteUrl,
+          discoveredUrl: null,
+          targetType: "not_found",
+          confidence: 0,
+          reason: verification.reason,
+          checkedUrls: [normalizedWebsiteUrl],
+          screenshotPath: verification.screenshotPath
+        };
+      }
     }
 
     const directResult = homepageLoaded
@@ -1999,14 +2003,17 @@ async function discoverSubmissionTargetsInternal({
 
     // Check for CAPTCHA, Cloudflare managed challenge, or bot-detection screens
     const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
-    if (verification && verification.blocking !== false) {
-      return {
-        websiteUrl: normalizedWebsiteUrl,
-        targets: [],
-        checkedUrls: [normalizedWebsiteUrl],
-        reason: verification.reason,
-        screenshotPath: verification.screenshotPath
-      };
+    if (verification && verification.blocking !== false && !isAuthorizedCaptchaTestTarget(normalizedWebsiteUrl)) {
+      const isInlineCaptcha = ["reCAPTCHA", "hCaptcha", "Cloudflare Turnstile"].includes(verification.name);
+      if (!isInlineCaptcha) {
+        return {
+          websiteUrl: normalizedWebsiteUrl,
+          targets: [],
+          checkedUrls: [normalizedWebsiteUrl],
+          reason: verification.reason,
+          screenshotPath: verification.screenshotPath
+        };
+      }
     }
 
     // Auto-accept cookie banners so nav links and forms are visible
@@ -2198,12 +2205,15 @@ async function discoverSubmissionTargetsInternal({
         continue;
       }
 
-      // Check anti-bot on candidate URL (e.g., Cloudflare Turnstile / Challenge on /contact)
+      // Check anti-bot on candidate URL (e.g., Cloudflare Managed Challenge or blocking screens on /contact)
       const candidateVerification = await detectUnsupportedVerification(page, candidate.url);
-      if (candidateVerification && candidateVerification.blocking !== false) {
-        lastDetectedVerification = candidateVerification;
-        console.log(`[CONTACT-DISCOVERY] Unsupported verification encountered on candidate ${candidate.url}: ${candidateVerification.reason}`);
-        break;
+      if (candidateVerification && candidateVerification.blocking !== false && !isAuthorizedCaptchaTestTarget(candidate.url)) {
+        const isInlineCaptcha = ["reCAPTCHA", "hCaptcha", "Cloudflare Turnstile"].includes(candidateVerification.name);
+        if (!isInlineCaptcha) {
+          lastDetectedVerification = candidateVerification;
+          console.log(`[CONTACT-DISCOVERY] Blocking challenge screen encountered on candidate ${candidate.url}: ${candidateVerification.reason}`);
+          break;
+        }
       }
 
       await dismissCookieBanners(page).catch(() => undefined);

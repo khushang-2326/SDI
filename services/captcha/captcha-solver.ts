@@ -1,3 +1,9 @@
+export interface CaptchaSolveOptions {
+  timeoutMs?: number;
+  abortSignal?: AbortSignal;
+  onTaskCreated?: (taskId: string) => void;
+}
+
 export abstract class CaptchaSolver {
   protected apiKey: string;
 
@@ -17,21 +23,33 @@ export abstract class CaptchaSolver {
     siteKey: string,
     url: string,
     version?: "v2" | "v3",
-    action?: string
-  ): Promise<{ token: string }>;
+    action?: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }>;
 
   /**
    * Solves hCaptcha challenges.
    */
-  abstract solveHCaptcha(siteKey: string, url: string): Promise<{ token: string }>;
+  abstract solveHCaptcha(
+    siteKey: string,
+    url: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }>;
 
   /**
    * Solves Cloudflare Turnstile challenges.
    */
-  abstract solveTurnstile(siteKey: string, url: string): Promise<{ token: string }>;
+  abstract solveTurnstile(
+    siteKey: string,
+    url: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }>;
 
   /**
    * Solves standard image-based (text OCR) CAPTCHA challenges.
    */
-  abstract solveImage(base64Image: string): Promise<{ text: string }>;
+  abstract solveImage(
+    base64Image: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ text: string; taskId?: string }>;
 }

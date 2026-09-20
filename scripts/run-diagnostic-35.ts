@@ -1,4 +1,4 @@
-﻿import * as XLSX from "xlsx";
+import * as XLSX from "xlsx";
 import { normalizeInputTargetUrl } from "../services/url-normalizer";
 import { runMultiTargetAutomation } from "../services/multi-target-automation";
 import { acquireContext, releaseContext, closePool } from "../lib/browserPool";
@@ -14,9 +14,8 @@ const leadData: LeadData = {
 };
 
 const bookingPreferences: BookingPreferences = {
-  preferredTimezone: "America/New_York",
-  preferredDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-  preferredTimeOfDay: "afternoon"
+  timezone: "America/New_York",
+  preferredTime: "14:00"
 };
 
 interface TargetMetric {

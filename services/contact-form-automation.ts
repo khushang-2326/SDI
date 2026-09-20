@@ -10,6 +10,8 @@ import {
   redactProxyDetails
 } from "@/services/proxy-helper";
 import { detectUnsupportedVerification } from "@/services/verification-detector";
+import { isAuthorizedCaptchaTestTarget } from "@/services/captcha/test-environment";
+import { handleCaptchaSolvingForTarget } from "@/services/captcha/captcha-orchestrator";
 import {
   LeadData,
   SubmitContactFormInput,
@@ -1628,6 +1630,20 @@ async function persistResult(result: SubmitContactFormResult, leadData: LeadData
   });
 }
 
+async function shouldAttemptCaptchaSolve(websiteUrl: string, userId?: string): Promise<boolean> {
+  if (isAuthorizedCaptchaTestTarget(websiteUrl)) return true;
+  if (!userId) return false;
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { captchaEnabled: true }
+    });
+    return Boolean(user?.captchaEnabled);
+  } catch {
+    return false;
+  }
+}
+
 export async function submitContactForm({
   websiteUrl,
   leadData,
@@ -1755,10 +1771,25 @@ export async function submitContactForm({
     await dismissCookieBanners(activePage).catch(() => undefined);
     tReadiness = Date.now() - tReadinessStart;
 
+    const canSolveCaptcha = await shouldAttemptCaptchaSolve(websiteUrl, userId);
+
     const verification = await detectUnsupportedVerification(page, websiteUrl);
     if (verification) {
-      if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
-      throw new Error(verification.reason);
+      if (canSolveCaptcha) {
+        const solveRes = await handleCaptchaSolvingForTarget({
+          page,
+          websiteUrl,
+          userId,
+          timeoutMs: Math.max(timeoutMs, 90000)
+        });
+        if (!solveRes.solved) {
+          if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
+          throw new Error(solveRes.errorMessage || verification.reason);
+        }
+      } else {
+        if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
+        throw new Error(verification.reason);
+      }
     }
 
     // Fill the selected primary form only once.
@@ -1774,9 +1805,22 @@ export async function submitContactForm({
       const unmappedSummary = fillMetrics.unmappedRequiredFields.join(", ");
       console.warn(`[contact-form-automation] Unmapped required fields on ${websiteUrl}: ${unmappedSummary}`);
       if (fillMetrics.unmappedRequiredFields.some((f) => /captcha|turnstile|recaptcha|challenge/i.test(f))) {
-        throw new Error(`Unsupported verification: CAPTCHA required field detected (${unmappedSummary}). Manual verification required.`);
+        if (canSolveCaptcha) {
+          const solveRes = await handleCaptchaSolvingForTarget({
+            page,
+            websiteUrl,
+            userId,
+            timeoutMs: Math.max(timeoutMs, 90000)
+          });
+          if (!solveRes.solved) {
+            throw new Error(`CAPTCHA solving failed: ${solveRes.errorMessage || solveRes.reason}`);
+          }
+        } else {
+          throw new Error(`Unsupported verification: CAPTCHA required field detected (${unmappedSummary}). Manual verification required.`);
+        }
+      } else {
+        throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}`);
       }
-      throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}`);
     }
 
     // Dismiss any newly popped cookie consent banners
@@ -1785,8 +1829,21 @@ export async function submitContactForm({
     // Check once more after form fill for late bot challenges
     const postFillVerification = await detectUnsupportedVerification(page, websiteUrl);
     if (postFillVerification) {
-      if (postFillVerification.screenshotPath) screenshotPath = postFillVerification.screenshotPath;
-      throw new Error(postFillVerification.reason);
+      if (canSolveCaptcha) {
+        const solveRes = await handleCaptchaSolvingForTarget({
+          page,
+          websiteUrl,
+          userId,
+          timeoutMs: Math.max(timeoutMs, 90000)
+        });
+        if (!solveRes.solved) {
+          if (postFillVerification.screenshotPath) screenshotPath = postFillVerification.screenshotPath;
+          throw new Error(solveRes.errorMessage || postFillVerification.reason);
+        }
+      } else {
+        if (postFillVerification.screenshotPath) screenshotPath = postFillVerification.screenshotPath;
+        throw new Error(postFillVerification.reason);
+      }
     }
 
     const tSubmitStart = Date.now();

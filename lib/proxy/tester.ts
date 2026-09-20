@@ -68,15 +68,39 @@ export async function testProxyConnection(proxy: ParsedProxy, timeoutMs = 15000)
       message: `Chromium connected: ${String(data?.country || "Unknown")} (${String(data?.city || "")}) • ISP: ${String(data?.isp || "Unknown")}`
     };
   } catch (error: any) {
-    const errorMsg = error?.message || "Connection timed out or proxy refused connection.";
+    const rawError = String(error?.message || "");
     return {
       success: false,
       latencyMs: Date.now() - startTime,
-      message: errorMsg.includes("net::ERR")
-        ? `Network error: ${errorMsg}`
-        : `Proxy test failed: ${errorMsg}`
+      message: formatProxyErrorMessage(rawError)
     };
   } finally {
     await browser?.close().catch(() => undefined);
   }
+}
+
+function formatProxyErrorMessage(rawError: string): string {
+  if (/ERR_HTTP_RESPONSE_CODE_FAILURE/i.test(rawError)) {
+    return "Proxy server rejected the connection. Your proxy data balance (GB) may be exhausted (0 GB left), credentials may be invalid, or IP whitelist binding is required in your proxy dashboard.";
+  }
+  if (/ERR_PROXY_CONNECTION_FAILED|ERR_PROXY_AUTH_REQUESTED|407/i.test(rawError)) {
+    return "Proxy authentication failed or connection was refused. Please check your proxy username, password, or IP whitelist.";
+  }
+  if (/ERR_TIMED_OUT|TimeoutError|timeout/i.test(rawError)) {
+    return "Connection timed out. The proxy server is not responding or is currently offline.";
+  }
+  if (/ERR_NAME_NOT_RESOLVED|ENOTFOUND/i.test(rawError)) {
+    return "Proxy host not found. Please verify the proxy server address and port.";
+  }
+  if (/ERR_CONNECTION_REFUSED|ECONNREFUSED/i.test(rawError)) {
+    return "Proxy port refused connection. Please verify the port number and protocol (HTTP/SOCKS5).";
+  }
+  
+  const clean = rawError
+    .replace(/^page\.goto:\s*/i, "")
+    .replace(/Call log:[\s\S]*$/i, "")
+    .replace(/at http[^\n]+/gi, "")
+    .trim();
+
+  return clean || "Proxy test failed. Please verify your proxy host, port, and credentials.";
 }

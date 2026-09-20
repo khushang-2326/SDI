@@ -1,4 +1,4 @@
-import { CaptchaSolver } from "./captcha-solver";
+import { CaptchaSolver, type CaptchaSolveOptions } from "./captcha-solver";
 
 export class CapSolverSolver extends CaptchaSolver {
   async validateKey(): Promise<{ success: boolean; balance?: number; message?: string }> {
@@ -29,8 +29,9 @@ export class CapSolverSolver extends CaptchaSolver {
     siteKey: string,
     url: string,
     version?: "v2" | "v3",
-    action?: string
-  ): Promise<{ token: string }> {
+    action?: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     const isV3 = version === "v3";
     const taskType = isV3 ? "ReCaptchaV3TaskProxyLess" : "ReCaptchaV2TaskProxyLess";
     const task: Record<string, any> = {
@@ -44,42 +45,58 @@ export class CapSolverSolver extends CaptchaSolver {
       task.minScore = 0.3;
     }
 
-    return this.createAndPollTask(task, (solution) => solution.gRecaptchaResponse);
+    return this.createAndPollTask(task, (solution) => solution.gRecaptchaResponse, options);
   }
 
-  async solveHCaptcha(siteKey: string, url: string): Promise<{ token: string }> {
+  async solveHCaptcha(
+    siteKey: string,
+    url: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     const task = {
       type: "HCaptchaTaskProxyLess",
       websiteURL: url,
       websiteKey: siteKey
     };
-    return this.createAndPollTask(task, (solution) => solution.gRecaptchaResponse);
+    return this.createAndPollTask(task, (solution) => solution.gRecaptchaResponse, options);
   }
 
-  async solveTurnstile(siteKey: string, url: string): Promise<{ token: string }> {
+  async solveTurnstile(
+    siteKey: string,
+    url: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     const task = {
       type: "AntiTurnstileTaskProxyLess",
       websiteURL: url,
       websiteKey: siteKey
     };
-    return this.createAndPollTask(task, (solution) => solution.token);
+    return this.createAndPollTask(task, (solution) => solution.token, options);
   }
 
-  async solveImage(base64Image: string): Promise<{ text: string }> {
+  async solveImage(
+    base64Image: string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ text: string; taskId?: string }> {
     const cleanBase64 = base64Image.replace(/^data:image\/\w+;base64,/, "");
     const task = {
       type: "ImageToTextTask",
       body: cleanBase64
     };
-    const result = await this.createAndPollTask(task, (solution) => solution.text);
-    return { text: result.token };
+    const result = await this.createAndPollTask(task, (solution) => solution.text, options);
+    return { text: result.token, taskId: result.taskId };
   }
 
   private async createAndPollTask(
     task: Record<string, any>,
-    extractToken: (solution: any) => string
-  ): Promise<{ token: string }> {
+    extractToken: (solution: any) => string,
+    options?: CaptchaSolveOptions
+  ): Promise<{ token: string; taskId?: string }> {
     try {
+      if (options?.abortSignal?.aborted) {
+        throw new Error("CapSolver operation aborted before start.");
+      }
+
       // 1. Create task
       const createRes = await fetch("https://api.capsolver.com/createTask", {
         method: "POST",
@@ -87,7 +104,8 @@ export class CapSolverSolver extends CaptchaSolver {
         body: JSON.stringify({
           clientKey: this.apiKey,
           task
-        })
+        }),
+        signal: options?.abortSignal
       });
 
       if (!createRes.ok) {
@@ -99,17 +117,33 @@ export class CapSolverSolver extends CaptchaSolver {
         throw new Error(createData.errorDescription || "Failed to create task on CapSolver.");
       }
 
-      // If already ready (some tasks are solved instantly or cache hit)
-      if (createData.status === "ready" && createData.solution) {
-        return { token: extractToken(createData.solution) };
+      const taskId = String(createData.taskId || "");
+      if (taskId && options?.onTaskCreated) {
+        try {
+          options.onTaskCreated(taskId);
+        } catch {}
       }
 
-      const taskId = createData.taskId;
+      // If already ready
+      if (createData.status === "ready" && createData.solution) {
+        return { token: extractToken(createData.solution), taskId };
+      }
 
-      // 2. Poll task result
-      const maxAttempts = 30;
+      // 2. Poll task result with bounded timeout
+      const timeoutMs = options?.timeoutMs || 150000;
+      const intervalMs = 3000;
+      const maxAttempts = Math.max(1, Math.ceil(timeoutMs / intervalMs));
+
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (options?.abortSignal?.aborted) {
+          throw new Error("CapSolver polling cancelled.");
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+
+        if (options?.abortSignal?.aborted) {
+          throw new Error("CapSolver polling cancelled.");
+        }
 
         const resultRes = await fetch("https://api.capsolver.com/getTaskResult", {
           method: "POST",
@@ -117,7 +151,8 @@ export class CapSolverSolver extends CaptchaSolver {
           body: JSON.stringify({
             clientKey: this.apiKey,
             taskId
-          })
+          }),
+          signal: options?.abortSignal
         });
 
         if (!resultRes.ok) continue;
@@ -128,7 +163,7 @@ export class CapSolverSolver extends CaptchaSolver {
         }
 
         if (resultData.status === "ready" && resultData.solution) {
-          return { token: extractToken(resultData.solution) };
+          return { token: extractToken(resultData.solution), taskId };
         } else if (resultData.status === "processing") {
           continue;
         } else {
@@ -136,7 +171,7 @@ export class CapSolverSolver extends CaptchaSolver {
         }
       }
 
-      throw new Error("CapSolver solving request timed out.");
+      throw new Error(`CapSolver solving request timed out after ${Math.round(timeoutMs / 1000)}s.`);
     } catch (error: any) {
       throw new Error(`[CapSolver Error] ${error.message}`);
     }

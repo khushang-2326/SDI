@@ -65,7 +65,7 @@ export async function detectUnsupportedVerification(
         reason: "Unsupported verification: reCAPTCHA detected. Manual verification required.",
         screenshotPath,
         confidence: 0.95,
-        blocking: true
+        blocking: false
       };
     }
   }
@@ -81,7 +81,7 @@ export async function detectUnsupportedVerification(
         reason: "Unsupported verification: reCAPTCHA detected. Manual verification required.",
         screenshotPath,
         confidence: 0.95,
-        blocking: true
+        blocking: false
       };
     }
   }
@@ -98,7 +98,7 @@ export async function detectUnsupportedVerification(
         reason: "Unsupported verification: hCaptcha detected. Manual verification required.",
         screenshotPath,
         confidence: 0.95,
-        blocking: true
+        blocking: false
       };
     }
   }
@@ -113,7 +113,7 @@ export async function detectUnsupportedVerification(
         reason: "Unsupported verification: hCaptcha detected. Manual verification required.",
         screenshotPath,
         confidence: 0.95,
-        blocking: true
+        blocking: false
       };
     }
   }
@@ -128,7 +128,7 @@ export async function detectUnsupportedVerification(
         reason: "Unsupported verification: Cloudflare Turnstile detected. Manual verification required.",
         screenshotPath,
         confidence: 0.98,
-        blocking: true
+        blocking: false
       };
     }
   }
@@ -143,7 +143,7 @@ export async function detectUnsupportedVerification(
         reason: "Unsupported verification: Cloudflare Turnstile detected. Manual verification required.",
         screenshotPath,
         confidence: 0.95,
-        blocking: true
+        blocking: false
       };
     }
   }

@@ -59,8 +59,10 @@ async function launchBrowser(headless: boolean): Promise<Browser> {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-accelerated-2d-canvas",
-      "--disable-gpu"
-    ]
+      "--disable-gpu",
+      "--disable-blink-features=AutomationControlled"
+    ],
+    ignoreDefaultArgs: ["--enable-automation"]
   };
 
   if (executablePath) {
@@ -252,14 +254,26 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     (lateContext) => lateContext.close().catch(() => undefined)
   );
 
-  // Anti-bot detection script injection
+  // Comprehensive Anti-bot detection script injection
   await context.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     // @ts-ignore
-    window.chrome = { runtime: {}, app: {}, cs: {} };
+    window.chrome = { runtime: {}, app: {}, cs: {}, loadTimes: function() {}, csi: function() {} };
     // @ts-ignore
     if (!navigator.languages || navigator.languages.length === 0) {
       Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    }
+    // @ts-ignore
+    if (!navigator.plugins || navigator.plugins.length === 0) {
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    }
+    // Mask permissions query for notifications
+    const originalQuery = window.navigator.permissions?.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters: any) =>
+        parameters.name === "notifications"
+          ? Promise.resolve({ state: Notification.permission } as any)
+          : originalQuery(parameters);
     }
   }).catch(() => undefined);
 

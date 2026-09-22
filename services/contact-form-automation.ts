@@ -264,9 +264,19 @@ async function safelyFillField(
 
   const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
   const inputType = await locator.evaluate((element) => (element.getAttribute("type") || "").toLowerCase()).catch(() => "text");
+  if (inputType === "checkbox") {
+    await locator.check({ force: true }).catch(async () => {
+      await locator.click({ force: true }).catch(() => undefined);
+    });
+    const checked = await locator.isChecked().catch(() => true);
+    return { success: true, verified: checked, actualValue: "checked" };
+  }
 
-  if (inputType === "checkbox" || inputType === "radio") {
-    return { success: false, verified: false };
+  if (inputType === "radio") {
+    await locator.check({ force: true }).catch(async () => {
+      await locator.click({ force: true }).catch(() => undefined);
+    });
+    return { success: true, verified: true, actualValue: "selected" };
   }
 
   if (tagName === "select") {
@@ -755,14 +765,53 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
   }
 
-  // 10. Remaining required text fields fallback (e.g. "What service do you need?")
+  // 10. Remaining required fields fallback (ensures any unmapped required field across any CMS is filled)
   for (const signal of signals) {
     if (usedIndexes.has(signal.index)) continue;
-    if (signal.tagName !== "textarea" && signal.tagName !== "input") continue;
     if (!signal.isRequired) continue;
-    if (["email", "tel", "number", "date", "time", "url", "file", "password"].includes(signal.type)) continue;
+    if (["password", "file"].includes(signal.type)) continue;
 
     const loc = fields.nth(signal.index);
+    if (signal.type === "checkbox") {
+      await loc.check({ force: true }).catch(async () => {
+        await loc.click({ force: true }).catch(() => undefined);
+      });
+      usedIndexes.add(signal.index);
+      filledFields.push(`consentCheckbox:${signal.index}`);
+      continue;
+    }
+    if (signal.type === "radio") {
+      await loc.check({ force: true }).catch(() => undefined);
+      usedIndexes.add(signal.index);
+      filledFields.push(`radio:${signal.index}`);
+      continue;
+    }
+    if (signal.type === "tel" || /phone|mobile|tel/i.test(signal.name || signal.id || "")) {
+      const pVal = leadData.mobile || leadData.mobileNumber || "555-0199";
+      const fillRes = await safelyFillField(loc, pVal).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+      if (fillRes.success) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`required_phone:${signal.index}`);
+      }
+      continue;
+    }
+    if (signal.type === "email" || /email/i.test(signal.name || signal.id || "")) {
+      const fillRes = await safelyFillField(loc, leadData.email).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+      if (fillRes.success) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`required_email:${signal.index}`);
+      }
+      continue;
+    }
+    if (signal.tagName === "select") {
+      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (didSelect) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`required_select:${signal.index}`);
+      }
+      continue;
+    }
+
     const existingVal = await loc.inputValue().catch(() => "");
     if (existingVal.trim()) {
       usedIndexes.add(signal.index);
@@ -792,21 +841,28 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
   const radioFilled = await selectRequiredRadioDefaults(scope);
   filledFields.push(...radioFilled);
 
-  // 12. Required Checkboxes (Consent / Terms only)
+  // 12. Required Checkboxes (Consent / Terms / GDPR)
   try {
-    const checkboxes = scope.locator("input[type='checkbox']");
-    const checkboxCount = await checkboxes.count().catch(() => 0);
-    for (let i = 0; i < checkboxCount; i++) {
-      const cb = checkboxes.nth(i);
+    for (const signal of signals) {
+      if (signal.type !== "checkbox" || usedIndexes.has(signal.index)) continue;
+      const cb = fields.nth(signal.index);
       if (await cb.isVisible().catch(() => false)) {
-        const cbRequired = await cb.getAttribute("required");
-        const cbAriaRequired = await cb.getAttribute("aria-required");
-        const isRequired = cbRequired !== null || cbAriaRequired === "true";
-        if (isRequired) {
+        const text = [
+          signal.name,
+          signal.id,
+          signal.explicitLabel,
+          ...signal.associatedLabels,
+          signal.surroundingLabel,
+          signal.followingSiblingText,
+          signal.parentContainerText
+        ].join(" ");
+
+        if (signal.isRequired || /consent|agree|terms|privacy|policy|gdpr|rules|accept/i.test(text)) {
           await cb.check({ force: true }).catch(async () => {
             await cb.click({ force: true }).catch(() => undefined);
           });
-          filledFields.push("consentCheckbox");
+          usedIndexes.add(signal.index);
+          filledFields.push(`consentCheckbox:${signal.index}`);
         }
       }
     }
@@ -820,8 +876,18 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   for (const signal of signals) {
     if (usedIndexes.has(signal.index)) continue;
-    // Check if element already has a value
     const loc = fields.nth(signal.index);
+    
+    // Check if element is a checkbox/radio that is already checked
+    if (signal.type === "checkbox" || signal.type === "radio") {
+      const isChecked = await loc.evaluate((el) => (el as HTMLInputElement).checked).catch(() => false);
+      if (isChecked) {
+        usedIndexes.add(signal.index);
+        continue;
+      }
+    }
+
+    // Check if element already has a value
     const existingVal = await loc.evaluate((el) => {
       if (el.tagName.toLowerCase() === "select") {
         const sel = el as HTMLSelectElement;

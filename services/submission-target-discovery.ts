@@ -204,7 +204,16 @@ function normalizeText(value: string) {
 }
 
 function ensureUrl(value: string) {
-  const trimmed = value.trim();
+  let trimmed = value.trim().replace(/^["']|["']$/g, "");
+  // If mailto: is present at the beginning
+  if (/^mailto:/i.test(trimmed)) {
+    const email = trimmed.replace(/^mailto:/i, "").split("?")[0].trim();
+    const domain = email.split("@")[1];
+    if (domain) return `https://${domain}`;
+  }
+  // Strip embedded /mailto:... or /emailto:... from URL paths
+  trimmed = trimmed.replace(/\/+mailto:.*$/i, "");
+  trimmed = trimmed.replace(/\/+emailto:.*$/i, "");
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 

@@ -24,8 +24,8 @@ export const config = {
     endpoint: process.env.AWS_ENDPOINT_URL || "", // For Custom S3 (like Cloudflare R2)
   },
   worker: {
-    maxWorkers: positiveInteger(process.env.MAX_WORKERS ?? process.env.WORKER_CONCURRENCY, 4, 12),
-    concurrency: positiveInteger(process.env.MAX_WORKERS ?? process.env.WORKER_CONCURRENCY, 4, 12),
+    maxWorkers: positiveInteger(process.env.MAX_WORKERS ?? process.env.WORKER_CONCURRENCY, 8, 16),
+    concurrency: positiveInteger(process.env.MAX_WORKERS ?? process.env.WORKER_CONCURRENCY, 8, 16),
     maxRetries: nonNegativeInteger(process.env.MAX_RETRIES, 3, 10),
     navigationTimeoutMs: positiveInteger(process.env.NAVIGATION_TIMEOUT_MS, 25000, 60000),
     actionTimeoutMs: positiveInteger(process.env.ACTION_TIMEOUT_MS, 12000, 30000),

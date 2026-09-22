@@ -41,7 +41,7 @@ export type MultiTargetCallbacks = {
 
 const MAX_TARGET_ATTEMPTS_PER_WEBSITE = 5;
 const MAX_CONSECUTIVE_FAILURES = 3;
-const MAX_ATTEMPT_TIMEOUT_MS = 90_000;
+const MAX_ATTEMPT_TIMEOUT_MS = 120_000;
 
 function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
   if (target.targetType !== "calendly") return true;

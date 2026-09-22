@@ -190,15 +190,63 @@ async function blockHeavyAssets(page: Page) {
     const request = route.request();
     const resourceType = request.resourceType();
     const url = request.url().toLowerCase();
-    const shouldBlock =
-      ["image", "font", "media"].includes(resourceType) ||
+
+    // Always allow critical CAPTCHA and verification services
+    if (
+      url.includes("recaptcha") ||
+      url.includes("hcaptcha") ||
+      url.includes("turnstile") ||
+      url.includes("challenges.cloudflare") ||
+      url.includes("gstatic.com/recaptcha") ||
+      url.includes("2captcha") ||
+      url.includes("anticaptcha") ||
+      url.includes("capmonster")
+    ) {
+      await route.continue().catch(() => undefined);
+      return;
+    }
+
+    // Preserve necessary CRM, form endpoints, and booking widgets
+    if (
+      url.includes("hubspot") ||
+      url.includes("hsforms") ||
+      url.includes("calendly") ||
+      url.includes("leadconnector") ||
+      url.includes("typeform") ||
+      url.includes("pardot") ||
+      url.includes("marketo") ||
+      url.includes("wp-json") ||
+      url.includes("admin-ajax")
+    ) {
+      await route.continue().catch(() => undefined);
+      return;
+    }
+
+    // Abort heavy media, video streams, fonts, and third-party trackers
+    const isHeavyMedia = ["media", "font"].includes(resourceType) ||
+      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url);
+
+    const isTrackerOrAd =
       url.includes("google-analytics") ||
       url.includes("googletagmanager") ||
-      url.includes("facebook") ||
+      url.includes("googleadservices") ||
       url.includes("doubleclick") ||
-      url.includes("hotjar");
+      url.includes("facebook.net") ||
+      url.includes("connect.facebook") ||
+      url.includes("hotjar") ||
+      url.includes("clarity.ms") ||
+      url.includes("crazyegg") ||
+      url.includes("linkedin.com/tag") ||
+      url.includes("snapchat.com") ||
+      url.includes("tiktok.com") ||
+      url.includes("intercom.io") ||
+      url.includes("drift.com") ||
+      url.includes("fullstory") ||
+      url.includes("criteo.net") ||
+      url.includes("taboola") ||
+      url.includes("outbrain");
 
-    if (shouldBlock) {
+    if (isHeavyMedia || isTrackerOrAd) {
       await route.abort().catch(() => undefined);
       return;
     }

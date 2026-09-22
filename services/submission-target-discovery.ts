@@ -269,6 +269,21 @@ async function blockHeavyAssets(page: Page) {
     const resourceType = request.resourceType();
     const url = request.url().toLowerCase();
 
+    // Always allow critical CAPTCHA and verification services
+    if (
+      url.includes("recaptcha") ||
+      url.includes("hcaptcha") ||
+      url.includes("turnstile") ||
+      url.includes("challenges.cloudflare") ||
+      url.includes("gstatic.com/recaptcha") ||
+      url.includes("2captcha") ||
+      url.includes("anticaptcha") ||
+      url.includes("capmonster")
+    ) {
+      await route.continue().catch(() => undefined);
+      return;
+    }
+
     // Preserve necessary CRM, form, and widget resources
     if (
       url.includes("hubspot") ||
@@ -285,7 +300,9 @@ async function blockHeavyAssets(page: Page) {
       return;
     }
 
-    const isHeavyMedia = ["image", "font", "media"].includes(resourceType);
+    const isHeavyMedia = ["media", "font"].includes(resourceType) ||
+      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url);
+
     const isTrackerOrAd =
       url.includes("google-analytics") ||
       url.includes("googletagmanager") ||
@@ -301,7 +318,10 @@ async function blockHeavyAssets(page: Page) {
       url.includes("tiktok.com") ||
       url.includes("intercom.io") ||
       url.includes("drift.com") ||
-      url.includes("fullstory");
+      url.includes("fullstory") ||
+      url.includes("criteo.net") ||
+      url.includes("taboola") ||
+      url.includes("outbrain");
 
     if (isHeavyMedia || isTrackerOrAd) {
       await route.abort().catch(() => undefined);
@@ -648,7 +668,7 @@ export async function navigateForDiscovery(
   let timedOut = false;
   let timeoutStage: DiscoveryTimeoutStage | undefined = undefined;
 
-  const commitTimeout = Math.max(1500, Math.min(6000, budgetMs - 1000));
+  const commitTimeout = Math.max(2500, Math.min(10000, budgetMs - 1000));
 
   try {
     navResponse = await page.goto(url, {
@@ -665,7 +685,7 @@ export async function navigateForDiscovery(
     try {
       navResponse = await page.goto(url, {
         waitUntil: "commit",
-        timeout: Math.max(1000, Math.min(3000, budgetMs - (Date.now() - tStart)))
+        timeout: Math.max(2000, Math.min(8000, budgetMs - (Date.now() - tStart)))
       });
       committed = true;
       responseStatus = navResponse?.status() ?? 200;
@@ -2357,7 +2377,7 @@ export async function discoverSubmissionTargets(
   input: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }
 ): Promise<DiscoverSubmissionTargetsResult> {
   const timeoutMs = input.timeoutMs ?? 8000;
-  const overallBudgetMs = Math.min(Math.max(timeoutMs * 3, 20000), 28000);
+  const overallBudgetMs = Math.min(Math.max(timeoutMs * 3, 20000), 45000);
   let timer: NodeJS.Timeout | null = null;
   const timeoutPromise = new Promise<DiscoverSubmissionTargetsResult>((resolve) => {
     timer = setTimeout(() => {

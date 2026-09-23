@@ -877,7 +877,7 @@ export async function submitCalendlyBooking({
     }
 
     const verification = await detectUnsupportedVerification(page, websiteUrl);
-    if (verification) {
+    if (verification && verification.blocking === true) {
       if (verification.screenshotPath) screenshotPaths.push(verification.screenshotPath);
       return finish("failed", verification.reason);
     }

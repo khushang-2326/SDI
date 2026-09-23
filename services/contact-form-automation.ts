@@ -1889,20 +1889,34 @@ export async function submitContactForm({
 
     const verification = await detectUnsupportedVerification(page, websiteUrl);
     if (verification) {
-      if (canSolveCaptcha) {
+      if (verification.blocking === true) {
+        // Blocking full-screen challenge (e.g. Cloudflare interstitial, 202 robot challenge)
+        if (canSolveCaptcha) {
+          const solveRes = await handleCaptchaSolvingForTarget({
+            page,
+            websiteUrl,
+            userId,
+            timeoutMs: Math.max(timeoutMs, 90000)
+          });
+          if (!solveRes.solved) {
+            if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
+            throw new Error(solveRes.errorMessage || verification.reason);
+          }
+        } else {
+          if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
+          throw new Error(verification.reason);
+        }
+      } else if (canSolveCaptcha) {
+        // Inline CAPTCHA widget on contact form - attempt solver if enabled
         const solveRes = await handleCaptchaSolvingForTarget({
           page,
           websiteUrl,
           userId,
           timeoutMs: Math.max(timeoutMs, 90000)
-        });
-        if (!solveRes.solved) {
-          if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
-          throw new Error(solveRes.errorMessage || verification.reason);
+        }).catch((err) => ({ solved: false, reason: err.message }));
+        if (solveRes.solved) {
+          console.log(`[contact-form-automation] CAPTCHA solved and applied for ${websiteUrl}`);
         }
-      } else {
-        if (verification.screenshotPath) screenshotPath = verification.screenshotPath;
-        throw new Error(verification.reason);
       }
     }
 
@@ -1940,9 +1954,9 @@ export async function submitContactForm({
     // Dismiss any newly popped cookie consent banners
     await dismissCookieBanners(activePage).catch(() => undefined);
 
-    // Check once more after form fill for late bot challenges
+    // Check once more after form fill for late bot challenges (only blocking screens)
     const postFillVerification = await detectUnsupportedVerification(page, websiteUrl);
-    if (postFillVerification) {
+    if (postFillVerification && postFillVerification.blocking === true) {
       if (canSolveCaptcha) {
         const solveRes = await handleCaptchaSolvingForTarget({
           page,

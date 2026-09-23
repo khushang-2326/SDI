@@ -357,7 +357,7 @@ export async function getBackgroundAutomationAction(jobId?: string) {
       const staleResultBefore = new Date(
         Date.now() - config.worker.websiteTimeoutMs - 30_000
       );
-      const recovered = await prisma.submissionResult.updateMany({
+      await prisma.submissionResult.updateMany({
         where: {
           jobId,
           status: { in: ["Discovering", "Running"] },
@@ -370,7 +370,6 @@ export async function getBackgroundAutomationAction(jobId?: string) {
           submittedAt: new Date()
         }
       });
-      if (recovered.count > 0) localAutomationLocks.delete(jobId);
     }
 
     const dbJob = await prisma.submissionJob.findFirst({
@@ -388,22 +387,28 @@ export async function getBackgroundAutomationAction(jobId?: string) {
     return mapJobToBackgroundJob(dbJob);
   }
 
-  const staleBefore = new Date(Date.now() - 30 * 60 * 1000);
+  // When called without jobId (e.g. user reloaded page or opened new window),
+  // do NOT cancel running jobs after 30 minutes!
+  // Only clean up truly abandoned runs if they have been inactive for > 12 hours AND are not in memory.
+  const staleBefore = new Date(Date.now() - 12 * 60 * 60 * 1000);
   const staleJobs = await prisma.submissionJob.findMany({
     where: { userId: user.id, status: "Running", updatedAt: { lt: staleBefore } },
     select: { id: true }
   });
 
-  if (staleJobs.length > 0) {
-    const staleJobIds = staleJobs.map((job) => job.id);
+  const trulyStaleJobIds = staleJobs
+    .map((job) => job.id)
+    .filter((id) => !localAutomationLocks.has(id));
+
+  if (trulyStaleJobIds.length > 0) {
     await prisma.$transaction([
       prisma.submissionJob.updateMany({
-        where: { id: { in: staleJobIds }, userId: user.id, status: "Running" },
+        where: { id: { in: trulyStaleJobIds }, userId: user.id, status: "Running" },
         data: { status: "Cancelled", completedAt: new Date() }
       }),
       prisma.submissionResult.updateMany({
         where: {
-          jobId: { in: staleJobIds },
+          jobId: { in: trulyStaleJobIds },
           status: { in: ["Pending", "Discovering", "Running"] }
         },
         data: { status: "Cancelled", message: "Stale run cleared automatically" }

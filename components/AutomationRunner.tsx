@@ -687,7 +687,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
-  const [workerCount, setWorkerCount] = useState<number>(6);
+  const [workerCount, setWorkerCount] = useState<number>(8);
   const [activeWorkers, setActiveWorkers] = useState<any[]>([]);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
   const [clock, setClock] = useState(() => Date.now());
@@ -901,8 +901,17 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   }
 
   useEffect(() => {
-    void getBackgroundAutomationAction().then(applyBackgroundJob);
-  }, [applyBackgroundJob]);
+    void getBackgroundAutomationAction().then((job) => {
+      applyBackgroundJob(job);
+      if (job && job.status === "running") {
+        void processLocalBackgroundAutomationAction(job.id, workerCount)
+          .then((resumedJob) => {
+            if (resumedJob) applyBackgroundJob(resumedJob);
+          })
+          .catch(() => undefined);
+      }
+    });
+  }, [applyBackgroundJob, workerCount]);
 
   useEffect(() => {
     if (!currentJobId || !isBatchRunning) return;
@@ -1147,7 +1156,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
               </span>
             </div>
             <div className="mt-2.5 flex items-center gap-2">
-              {[3, 4, 5, 6].map((count) => (
+              {[4, 6, 8, 10, 12, 16].map((count) => (
                 <button
                   key={count}
                   type="button"
@@ -1158,12 +1167,12 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                       : "bg-white text-slate-700 border border-slate-200 hover:bg-slate-100"
                   }`}
                 >
-                  {count} Workers
+                  {count}
                 </button>
               ))}
             </div>
             <p className="mt-2 text-[11px] text-muted leading-relaxed">
-              Processes {workerCount} websites simultaneously in parallel with dynamic queue load balancing (Recommended: 4).
+              Processes {workerCount} websites simultaneously in parallel with dynamic queue load balancing (Recommended: 8).
             </p>
             <input type="hidden" name="workerCount" value={workerCount} />
           </div>

@@ -613,7 +613,7 @@ export async function runParallelWorkerPool(options: WorkerPoolOptions): Promise
   totalTargets: number;
 }> {
   const { jobId, userId, onProgress } = options;
-  const workerCount = Math.max(1, Math.min(12, options.workerCount ?? config.worker.maxWorkers));
+  const workerCount = Math.max(1, Math.min(16, options.workerCount ?? config.worker.maxWorkers));
 
   // Initialize registry for this job
   const jobWorkers = new Map<string, WorkerStatusInfo>();
@@ -659,10 +659,14 @@ export async function runParallelWorkerPool(options: WorkerPoolOptions): Promise
     return runWorkerLoop(jobId, workerId, userId, payload, onProgress);
   });
 
-  // Background watchdog timer for recovering stale items during execution
+  // Background watchdog timer for recovering stale items and keeping parent job heartbeat fresh
   const watchdog = setInterval(() => {
     void recoverStaleTargets(jobId, userId);
-  }, 20_000);
+    void prisma.submissionJob.updateMany({
+      where: { id: jobId, status: "Running" },
+      data: { updatedAt: new Date() }
+    }).catch(() => undefined);
+  }, 10_000);
 
   // Execute all workers concurrently
   try {

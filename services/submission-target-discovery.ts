@@ -2020,16 +2020,6 @@ async function discoverSubmissionTargetsInternal({
       };
     }
 
-    if (statusCode === 202 && (/robot challenge/i.test(pageTitle) || /security/i.test(pageBodyText))) {
-      return {
-        websiteUrl: normalizedWebsiteUrl,
-        targets: [],
-        checkedUrls: [normalizedWebsiteUrl],
-        reason: "Unsupported verification: Robot Challenge Screen detected. Manual verification required.",
-        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "robot-challenge-202").catch(() => null)
-      };
-    }
-
     // Check for CAPTCHA, Cloudflare managed challenge, or bot-detection screens
     const verification = await detectUnsupportedVerification(page, normalizedWebsiteUrl);
     if (verification && verification.blocking !== false && !isAuthorizedCaptchaTestTarget(normalizedWebsiteUrl)) {

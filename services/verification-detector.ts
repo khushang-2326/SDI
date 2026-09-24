@@ -214,19 +214,27 @@ export async function detectUnsupportedVerification(
   }
 
   // 6. Generic full-screen human-verification or bot-detection challenge screens
-  // Strong indicators: Title explicitly calls out security/bot challenge AND page has short interstitial body
+  // Strong indicators: Title explicitly calls out security/bot challenge OR explicit challenge directive
+  // AND the page does NOT have a visible interactive contact form with normal inputs.
   const isDedicatedChallengeTitle = /robot challenge|attention required!|just a moment\.\.\.|security check to proceed/i.test(title);
-  const hasChallengeText =
-    /(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot|checking (?:your browser|the site connection security)|unusual traffic from your computer network|automated traffic detected|access denied.*(?:bot|automated|cloudflare|perimeterx)/i.test(
+  const hasExplicitChallengeDirective =
+    /(?:please\s+)?(?:verify|confirm|prove)\s+(?:that\s+)?(?:you(?:'re| are)|i(?:'m| am))\s+(?:a\s+)?human|are you (?:a )?robot\??|checking (?:your browser|the site connection security)|unusual traffic from your computer network|automated traffic detected.*(?:please verify|solve challenge)|access denied.*(?:bot protection|security check)/i.test(
       pageText
     );
 
-  // Guard against false positives: If the page has rich navigational links or a full content body,
-  // the phrase "automated traffic" in a privacy policy or FAQ must NOT trigger a verification failure.
+  // Guard against false positives: If the page has interactive contact inputs (text, email, textarea)
+  // or rich content length, mentions of "automated traffic" in privacy policies/footers must NOT trigger verification.
   const pageTextLength = pageText.trim().length;
+  const hasInteractiveFormFields = await page
+    .locator("input:not([type=hidden]):not([type=search]):not([type=checkbox]):not([type=radio]), textarea")
+    .count()
+    .then((c) => c >= 2)
+    .catch(() => false);
+
   const isInterstitialChallengeScreen =
-    (isDedicatedChallengeTitle && pageTextLength < 2500) ||
-    (hasChallengeText && pageTextLength < 1800);
+    !hasInteractiveFormFields &&
+    ((isDedicatedChallengeTitle && pageTextLength < 2500) ||
+     (hasExplicitChallengeDirective && pageTextLength < 1800));
 
   if (isInterstitialChallengeScreen) {
     const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, "Human Verification Challenge");

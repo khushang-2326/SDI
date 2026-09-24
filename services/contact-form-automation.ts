@@ -1873,11 +1873,6 @@ export async function submitContactForm({
       throw new Error("Website blocked access (HTTP 403 Forbidden).");
     }
 
-    if (statusCode === 202 && (/robot challenge/i.test(pageTitle) || /security/i.test(pageBodyText))) {
-      screenshotPath = await takeScreenshot(page, websiteUrl, "robot-challenge-202").catch(() => null);
-      throw new Error("Unsupported verification: Robot Challenge Screen detected. Manual verification required.");
-    }
-
     // Progressive Dynamic Page Readiness
     const tReadinessStart = Date.now();
     await dismissCookieBanners(activePage).catch(() => undefined);

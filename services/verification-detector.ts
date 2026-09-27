@@ -152,19 +152,19 @@ export async function detectUnsupportedVerification(
   const otherChallenges = [
     {
       name: "Arkose Labs FunCaptcha",
-      selector: "iframe[src*='arkoselabs']:visible, [data-pkey][class*='funcaptcha' i]:visible, [class*='funcaptcha' i]:visible"
+      selector: "iframe[src*='arkoselabs'], [data-pkey][class*='funcaptcha' i], [class*='funcaptcha' i]"
     },
     {
       name: "GeeTest",
-      selector: "iframe[src*='geetest']:visible, [class*='geetest' i]:visible"
+      selector: "iframe[src*='geetest'], [class*='geetest' i]"
     },
     {
       name: "Friendly Captcha",
-      selector: "iframe[src*='friendlycaptcha']:visible, [class*='frc-captcha' i]:visible, [data-sitekey][class*='friendly' i]:visible"
+      selector: "iframe[src*='friendlycaptcha'], [class*='frc-captcha' i], [data-sitekey][class*='friendly' i]"
     },
     {
       name: "MTCaptcha",
-      selector: "iframe[src*='mtcaptcha']:visible, [class*='mtcaptcha' i]:visible"
+      selector: "iframe[src*='mtcaptcha'], [class*='mtcaptcha' i]"
     },
     {
       name: "AWS WAF Captcha",
@@ -181,16 +181,26 @@ export async function detectUnsupportedVerification(
   ];
 
   for (const challenge of otherChallenges) {
-    const found = await page.locator(challenge.selector).count().then((c) => c > 0).catch(() => false);
-    if (found) {
-      const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, challenge.name);
-      return {
-        name: challenge.name,
-        reason: `Unsupported verification: ${challenge.name} detected. Manual verification required.`,
-        screenshotPath,
-        confidence: 0.95,
-        blocking: true
-      };
+    const loc = page.locator(challenge.selector);
+    const count = await loc.count().catch(() => 0);
+    if (count > 0) {
+      let isVisible = false;
+      for (let i = 0; i < Math.min(count, 3); i++) {
+        if (await loc.nth(i).isVisible().catch(() => false)) {
+          isVisible = true;
+          break;
+        }
+      }
+      if (isVisible) {
+        const screenshotPath = await captureFullPageVerificationScreenshot(page, websiteUrl, challenge.name);
+        return {
+          name: challenge.name,
+          reason: `Unsupported verification: ${challenge.name} detected. Manual verification required.`,
+          screenshotPath,
+          confidence: 0.95,
+          blocking: true
+        };
+      }
     }
   }
 

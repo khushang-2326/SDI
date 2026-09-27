@@ -677,7 +677,7 @@ export async function navigateForDiscovery(
   let timedOut = false;
   let timeoutStage: DiscoveryTimeoutStage | undefined = undefined;
 
-  const commitTimeout = Math.max(2500, Math.min(10000, budgetMs - 1000));
+  const commitTimeout = Math.max(3000, Math.min(15000, budgetMs - 1000));
 
   try {
     navResponse = await page.goto(url, {
@@ -690,11 +690,34 @@ export async function navigateForDiscovery(
     if (isProxyAuthenticationFailure(err)) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
     }
+    const errStr = err?.message || String(err);
+    if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
+      navError = err;
+      return {
+        success: false,
+        committed: false,
+        status: 0,
+        responseStatus: 0,
+        finalUrl: url,
+        navigationMs: Date.now() - tStart,
+        readinessMs: 0,
+        hydrationMs: 0,
+        redirectCount: 0,
+        timeoutStage: stage,
+        readinessState: "DEAD_SITE_FAST_FAIL",
+        hasForms: false,
+        hasBooking: false,
+        interactiveCount: 0,
+        timedOut: false,
+        navResponse: null,
+        navError: err
+      };
+    }
     // If domcontentloaded timed out or was delayed by media/trackers, try commit fallback
     try {
       navResponse = await page.goto(url, {
         waitUntil: "commit",
-        timeout: Math.max(2000, Math.min(8000, budgetMs - (Date.now() - tStart)))
+        timeout: Math.max(3000, Math.min(10000, budgetMs - (Date.now() - tStart)))
       });
       committed = true;
       responseStatus = navResponse?.status() ?? 200;
@@ -708,10 +731,32 @@ export async function navigateForDiscovery(
   }
 
   const tNavDone = Date.now();
+  if (!committed) {
+    return {
+      success: false,
+      committed: false,
+      status: responseStatus,
+      responseStatus,
+      finalUrl: page.url() || url,
+      navigationMs: tNavDone - tStart,
+      readinessMs: 0,
+      hydrationMs: 0,
+      redirectCount: 0,
+      timeoutStage: timedOut ? timeoutStage : undefined,
+      readinessState: "DEAD_SITE_FAST_FAIL",
+      hasForms: false,
+      hasBooking: false,
+      interactiveCount: 0,
+      timedOut,
+      navResponse,
+      navError
+    };
+  }
+
   const remainingBudget = Math.max(800, budgetMs - (tNavDone - tStart));
   const readiness = await waitForUniversalPageReadiness(page, {
-    maxWaitMs: Math.min(remainingBudget, 3000),
-    pollIntervalMs: 150,
+    maxWaitMs: Math.min(remainingBudget, 45000),
+    pollIntervalMs: 200,
     targetPurpose: purpose
   }).catch(() => ({
     ready: false,

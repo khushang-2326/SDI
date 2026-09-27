@@ -72,12 +72,21 @@ export interface FieldVerificationItem {
   finalValue?: string;
 }
 
+export interface UnmappedRequiredFieldDetail {
+  fieldName: string;
+  fieldLabel: string;
+  fieldType: string;
+  availableOptions?: string[];
+  reason: string;
+}
+
 export interface FormFillMetrics {
   fieldsDetected?: number;
   fieldsClassified?: number;
   filledFieldsCount: number;
   verifiedFieldsCount: number;
   unmappedRequiredFields: string[];
+  unmappedRequiredDetails?: UnmappedRequiredFieldDetail[];
   unmappedOptionalFields: string[];
   items: FieldVerificationItem[];
 }

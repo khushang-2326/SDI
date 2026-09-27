@@ -231,10 +231,131 @@ async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> 
   return dismissed;
 }
 
+/**
+ * Safe Obstruction & Popup Dismissal Engine.
+ * Detects and dismisses newsletters, promotional modals, chat popups, and marketing overlays
+ * that physically obstruct page contact forms, while strictly protecting contact/booking modals.
+ */
+export async function dismissBlockingPopups(page: Page): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      // 1. Identify candidate overlay containers
+      const candidates = Array.from(
+        document.querySelectorAll(
+          "[role='dialog'], [aria-modal='true'], .modal, .popup, .overlay, [class*='newsletter' i], [class*='promo' i], [class*='popup' i], [class*='lightbox' i], [class*='announcement' i], [class*='intercom' i], [class*='drift' i]"
+        )
+      ) as HTMLElement[];
+
+      let dismissedAny = false;
+
+      for (const el of candidates) {
+        // Must be visible and covering a significant part of the screen
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          style.opacity === "0" ||
+          rect.width < 100 ||
+          rect.height < 100
+        ) {
+          continue;
+        }
+
+        // CRITICAL PROTECTION: If this container contains a full contact form (name, email, message, etc.), DO NOT CLOSE IT!
+        const formInputs = el.querySelectorAll(
+          "input:not([type='hidden']):not([type='search']):not([type='submit']):not([type='button']), textarea, select"
+        );
+        const hasEmail = Boolean(el.querySelector("input[type='email'], input[name*='email' i], input[id*='email' i]"));
+        const hasMessage = Boolean(el.querySelector("textarea, input[name*='message' i], input[name*='comment' i]"));
+        const hasName = Boolean(el.querySelector("input[name*='name' i], input[id*='name' i]"));
+        
+        // If it's a contact or booking form modal, keep it open
+        if ((hasEmail && (hasMessage || hasName)) || formInputs.length >= 3) {
+          continue;
+        }
+
+        // Check if container is an obstruction (newsletter, promo, discount, announcement, chat, cookies)
+        const containerText = (el.textContent ?? "").toLowerCase();
+        const isSafeObstruction =
+          /newsletter|subscribe|discount|offer|coupon|special|promo|save\s+\d+%|join\s+our|announcement|welcome|chat\s+with\s+us|need\s+help\??|cookie|consent/i.test(
+            containerText
+          ) ||
+          el.classList.contains("modal") ||
+          el.getAttribute("role") === "dialog";
+
+        if (!isSafeObstruction) continue;
+
+        // Search for close button inside this obstruction
+        const closeSelectors = [
+          "button[aria-label*='close' i]",
+          "button[aria-label*='dismiss' i]",
+          "[title*='close' i]",
+          "[data-dismiss]",
+          "[data-bs-dismiss]",
+          ".close",
+          ".modal-close",
+          ".popup-close",
+          "[class*='close-btn' i]",
+          "[class*='btn-close' i]",
+          "[class*='close' i]",
+          "[class*='dismiss' i]",
+          "svg[class*='close' i]",
+          "button",
+          "a"
+        ];
+
+        let closeBtn: HTMLElement | null = null;
+        for (const sel of closeSelectors) {
+          const matching = Array.from(el.querySelectorAll(sel)) as HTMLElement[];
+          for (const btn of matching) {
+            const btnText = (btn.textContent ?? "").trim().toLowerCase();
+            const btnAria = (btn.getAttribute("aria-label") ?? "").toLowerCase();
+            const btnTitle = (btn.getAttribute("title") ?? "").toLowerCase();
+            const btnClass = (btn.className ?? "").toLowerCase();
+
+            if (
+              btnAria.includes("close") ||
+              btnAria.includes("dismiss") ||
+              btnTitle.includes("close") ||
+              btnClass.includes("close") ||
+              btnClass.includes("dismiss") ||
+              btn.hasAttribute("data-dismiss") ||
+              btn.hasAttribute("data-bs-dismiss") ||
+              /^(x|✕|✖|close|dismiss|no thanks|no thank you|not now|maybe later|skip|close window)$/i.test(btnText)
+            ) {
+              const bRect = btn.getBoundingClientRect();
+              const bStyle = window.getComputedStyle(btn);
+              if (bStyle.display !== "none" && bStyle.visibility !== "hidden" && bRect.width > 0) {
+                closeBtn = btn;
+                break;
+              }
+            }
+          }
+          if (closeBtn) break;
+        }
+
+        if (closeBtn) {
+          try {
+            closeBtn.click();
+            dismissedAny = true;
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      return dismissedAny;
+    }).catch(() => false);
+  } catch {
+    return false;
+  }
+}
+
 async function dismissCookieBannersInternal(page: Page): Promise<boolean> {
   let dismissed = false;
 
-  // 1. Process main page
+  // 1. Process main page cookie banners
   try {
     const mainDismissed = await dismissScopeCookieBanners(page);
     if (mainDismissed) dismissed = true;
@@ -242,7 +363,15 @@ async function dismissCookieBannersInternal(page: Page): Promise<boolean> {
     // Continue
   }
 
-  // 2. Process only explicit consent/CMP child iframes (max 2)
+  // 2. Process blocking marketing overlays / popups
+  try {
+    const popupDismissed = await dismissBlockingPopups(page);
+    if (popupDismissed) dismissed = true;
+  } catch {
+    // Continue
+  }
+
+  // 3. Process only explicit consent/CMP child iframes (max 2)
   try {
     const frames = page.frames().filter((f) => {
       if (f === page.mainFrame()) return false;
@@ -264,6 +393,7 @@ async function dismissCookieBannersInternal(page: Page): Promise<boolean> {
 export async function dismissCookieBanners(page: Page): Promise<boolean> {
   return await Promise.race([
     dismissCookieBannersInternal(page),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1500))
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2000))
   ]);
 }
+

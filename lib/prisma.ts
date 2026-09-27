@@ -4,12 +4,13 @@ import fs from "node:fs";
 
 function getSqliteUrl(): string {
   if (process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith("file:/")) {
-    return process.env.DATABASE_URL;
+    const raw = process.env.DATABASE_URL;
+    return raw.includes("?") ? raw : `${raw}?connection_limit=1&timeout=30`;
   }
   const prismaDb = path.join(process.cwd(), "prisma", "dev.db");
   const rootDb = path.join(process.cwd(), "dev.db");
   const chosen = fs.existsSync(prismaDb) ? prismaDb : rootDb;
-  return `file:${chosen.replace(/\\/g, "/")}`;
+  return `file:${chosen.replace(/\\/g, "/")}?connection_limit=1&timeout=30`;
 }
 
 const globalForPrisma = globalThis as unknown as {
@@ -30,7 +31,7 @@ function createPrismaClient(): PrismaClient {
   void (async () => {
     try {
       await client.$queryRawUnsafe("PRAGMA journal_mode = WAL;");
-      await client.$queryRawUnsafe("PRAGMA busy_timeout = 10000;");
+      await client.$queryRawUnsafe("PRAGMA busy_timeout = 30000;");
       await client.$queryRawUnsafe("PRAGMA synchronous = NORMAL;");
     } catch {
       // Ignore in environments where raw pragmas are restricted

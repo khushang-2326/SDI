@@ -98,24 +98,36 @@ export async function waitForUniversalPageReadiness(
         }
 
         // 3. Form elements (main frame & open shadow DOM)
-        const findInputsRecursive = (root: Document | ShadowRoot | Element): Element[] => {
-          const res: Element[] = [];
-          try {
-            const inputs = root.querySelectorAll(
-              "input:not([type='hidden']):not([type='search']):not([type='button']):not([type='submit']), textarea, select, [role='textbox'], [contenteditable='true'], [role='form'], form, [data-form-submit], .hs-form, .form-container, [class*='form']"
-            );
-            res.push(...Array.from(inputs));
-            root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot) res.push(...findInputsRecursive(el.shadowRoot));
-            });
-          } catch {
-            // ignore traversal errors
+        let hasForms = false;
+        try {
+          const directInputs = document.querySelectorAll(
+            "input:not([type='hidden']):not([type='search']):not([type='button']):not([type='submit']), textarea, select, [role='textbox'], [contenteditable='true'], [role='form'], form, [data-form-submit], .hs-form, .form-container, [class*='form']"
+          );
+          if (directInputs.length >= 1) {
+            hasForms = true;
+          } else if (document.body) {
+            const queue: Element[] = [document.body];
+            while (queue.length > 0 && !hasForms) {
+              const curr = queue.shift();
+              if (!curr) continue;
+              if (curr.shadowRoot) {
+                const shadowInputs = curr.shadowRoot.querySelectorAll(
+                  "input:not([type='hidden']):not([type='search']):not([type='button']):not([type='submit']), textarea, select, [role='textbox'], [contenteditable='true'], [role='form'], form, [data-form-submit], .hs-form, .form-container, [class*='form']"
+                );
+                if (shadowInputs.length >= 1) {
+                  hasForms = true;
+                  break;
+                }
+                const shadowChildren = Array.from(curr.shadowRoot.querySelectorAll("*"));
+                for (let i = 0; i < shadowChildren.length; i++) {
+                  if (shadowChildren[i].shadowRoot) queue.push(shadowChildren[i]);
+                }
+              }
+            }
           }
-          return res;
-        };
-
-        const inputs = findInputsRecursive(document);
-        const hasForms = inputs.length >= 1;
+        } catch {
+          // ignore traversal errors
+        }
 
         // 4. Booking elements
         const bookingSelectors = [

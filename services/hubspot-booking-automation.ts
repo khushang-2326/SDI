@@ -9,6 +9,7 @@ import {
   SubmitContactFormResult
 } from "@/types/automation";
 import { dismissCookieBanners } from "./cookie-consent-helper";
+import { waitForUniversalPageReadiness } from "./page-readiness";
 import {
   isProxyAuthenticationFailure,
   ProxyAuthenticationError,
@@ -522,7 +523,7 @@ export async function submitHubSpotBooking({
     }
 
     await dismissCookieBanners(page).catch(() => undefined);
-    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => undefined);
+    await waitForUniversalPageReadiness(page, { maxWaitMs: Math.min(timeoutMs, 10000), targetPurpose: "booking" }).catch(() => undefined);
     await dismissCookieBanners(page).catch(() => undefined);
     await page.locator("body").waitFor({ state: "visible", timeout: 12000 });
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "hubspot-loaded"));

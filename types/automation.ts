@@ -1,11 +1,26 @@
 export type LeadData = {
   fullName: string;
+  firstName?: string;
+  lastName?: string;
   email: string;
   mobile?: string;
   mobileNumber?: string;
+  phone?: string;
+  city?: string;
+  state?: string;
+  country?: string;
   address?: string;
+  zip?: string;
+  postalCode?: string;
   message?: string;
+  inquiry?: string;
   companyName?: string;
+  company?: string;
+  website?: string;
+  jobTitle?: string;
+  role?: string;
+  subject?: string;
+  [key: string]: any;
 };
 
 export type StageTimingMetrics = {

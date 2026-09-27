@@ -27,6 +27,7 @@ import {
   type FieldClassification,
   type FieldVerificationItem,
   type FormFillMetrics,
+  type UnmappedRequiredFieldDetail,
   extractFieldSignals,
   classifyField,
   classifyAllFormFields,
@@ -338,28 +339,115 @@ async function safelyFillField(
   return { success: true, verified, actualValue: currentValue };
 }
 
-async function safelyFillCityField(locator: Locator): Promise<{ success: boolean; verified: boolean }> {
+async function safelyFillCityField(
+  locator: Locator,
+  userCity?: string
+): Promise<{ success: boolean; verified: boolean; actualValue?: string }> {
   if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
   if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
 
-  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
-  if (tagName !== "select") return safelyFillField(locator, "New York");
+  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
+  const targetVal = (userCity && userCity.trim()) ? userCity.trim() : "New York";
 
-  const matchingOptionIndex = await locator.evaluate((element) => {
+  if (tagName !== "select") {
+    return safelyFillField(locator, targetVal);
+  }
+
+  // For native <select>, match option by value/label or select first real option
+  const matchingOptionIndex = await locator.evaluate((element, val) => {
     const select = element as HTMLSelectElement;
+    const targetNorm = val.toLowerCase();
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
       const value = option.value.trim().toLowerCase();
-      return label === "new york" || label === "new york city" || value === "new york" || value === "ny";
+      return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
-  }).catch(() => -1);
+  }, targetVal).catch(() => -1);
 
-  if (matchingOptionIndex < 0) return { success: false, verified: false };
-  await locator.selectOption({ index: matchingOptionIndex }).catch(() => undefined);
-  return { success: true, verified: true };
+  if (matchingOptionIndex >= 0) {
+    await locator.selectOption({ index: matchingOptionIndex }).catch(() => undefined);
+    const selectVal = await locator.inputValue().catch(() => "");
+    return { success: true, verified: true, actualValue: selectVal };
+  }
+
+  const didSelect = await selectFirstRealOption(locator);
+  const selectVal = await locator.inputValue().catch(() => "");
+  return { success: didSelect, verified: didSelect, actualValue: selectVal };
 }
 
-async function selectFirstRealOption(locator: Locator) {
+async function safelyFillStateField(
+  locator: Locator,
+  userState?: string
+): Promise<{ success: boolean; verified: boolean; actualValue?: string }> {
+  if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
+  if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
+
+  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
+  const targetVal = (userState && userState.trim()) ? userState.trim() : "New York";
+
+  if (tagName !== "select") {
+    return safelyFillField(locator, targetVal);
+  }
+
+  // For native <select>, match option by value/label or select first real option
+  const matchingOptionIndex = await locator.evaluate((element, val) => {
+    const select = element as HTMLSelectElement;
+    const targetNorm = val.toLowerCase();
+    return Array.from(select.options).findIndex((option) => {
+      const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      const value = option.value.trim().toLowerCase();
+      return label === targetNorm || value === targetNorm || label.includes(targetNorm);
+    });
+  }, targetVal).catch(() => -1);
+
+  if (matchingOptionIndex >= 0) {
+    await locator.selectOption({ index: matchingOptionIndex }).catch(() => undefined);
+    const selectVal = await locator.inputValue().catch(() => "");
+    return { success: true, verified: true, actualValue: selectVal };
+  }
+
+  const didSelect = await selectFirstRealOption(locator);
+  const selectVal = await locator.inputValue().catch(() => "");
+  return { success: didSelect, verified: didSelect, actualValue: selectVal };
+}
+
+async function safelyFillCountryField(
+  locator: Locator,
+  userCountry?: string
+): Promise<{ success: boolean; verified: boolean; actualValue?: string }> {
+  if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
+  if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
+
+  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
+  const targetVal = (userCountry && userCountry.trim()) ? userCountry.trim() : "United States";
+
+  if (tagName !== "select") {
+    return safelyFillField(locator, targetVal);
+  }
+
+  // For native <select>, match option by value/label or select first real option
+  const matchingOptionIndex = await locator.evaluate((element, val) => {
+    const select = element as HTMLSelectElement;
+    const targetNorm = val.toLowerCase();
+    return Array.from(select.options).findIndex((option) => {
+      const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      const value = option.value.trim().toLowerCase();
+      return label === targetNorm || value === targetNorm || label.includes(targetNorm);
+    });
+  }, targetVal).catch(() => -1);
+
+  if (matchingOptionIndex >= 0) {
+    await locator.selectOption({ index: matchingOptionIndex }).catch(() => undefined);
+    const selectVal = await locator.inputValue().catch(() => "");
+    return { success: true, verified: true, actualValue: selectVal };
+  }
+
+  const didSelect = await selectFirstRealOption(locator);
+  const selectVal = await locator.inputValue().catch(() => "");
+  return { success: didSelect, verified: didSelect, actualValue: selectVal };
+}
+
+async function selectFirstRealOption(locator: Locator): Promise<boolean> {
   const result = await locator
     .evaluate((element) => {
       const select = element as HTMLSelectElement;
@@ -540,7 +628,8 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     sourceKey: string,
     value: string,
     confidence: number,
-    evidence: string[]
+    evidence: string[],
+    telemetrySource: "USER_DATA" | "FALLBACK_DATA" | "SELECT_FIRST_VALID_OPTION" = "USER_DATA"
   ): Promise<boolean> => {
     if (usedIndexes.has(signal.index)) return false;
     const locator = fields.nth(signal.index);
@@ -551,9 +640,9 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       verificationItems.push({
         fieldIndex: signal.index,
         fieldType,
-        mappedSource: sourceKey,
+        mappedSource: `${sourceKey} [${telemetrySource}]`,
         confidence,
-        evidence,
+        evidence: [...evidence, `source:${telemetrySource}`],
         filled: true,
         verified: result.verified,
         finalValue: result.actualValue
@@ -572,7 +661,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   if (emailCandidates.length > 0) {
     const best = emailCandidates[0];
-    await fillSignal(best.signal, "email", "email", leadData.email, best.cls.confidence, best.cls.evidence);
+    await fillSignal(best.signal, "email", "email", leadData.email, best.cls.confidence, best.cls.evidence, "USER_DATA");
   } else {
     skippedFields.push("email");
   }
@@ -599,39 +688,41 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   if (firstNameCandidates.length > 0) {
     const bestFirst = firstNameCandidates[0];
-    await fillSignal(bestFirst.signal, "first_name", "firstName", nameParts.firstName, bestFirst.cls.confidence, bestFirst.cls.evidence);
+    const fVal = nameParts.firstName || "John";
+    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
   }
 
   if (lastNameCandidates.length > 0) {
     const bestLast = lastNameCandidates[0];
-    await fillSignal(bestLast.signal, "last_name", "lastName", nameParts.lastName, bestLast.cls.confidence, bestLast.cls.evidence);
+    const lVal = nameParts.lastName || "Miller";
+    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
   }
 
   // If first and last name were NOT both present/filled, and a full_name candidate exists:
   if (!filledFields.includes("firstName") && !filledFields.includes("lastName")) {
     if (fullNameCandidates.length > 0) {
       const bestFull = fullNameCandidates[0];
-      await fillSignal(bestFull.signal, "full_name", "fullName", leadData.fullName, bestFull.cls.confidence, bestFull.cls.evidence);
+      const fnVal = leadData.fullName || "John Miller";
+      await fillSignal(bestFull.signal, "full_name", "fullName", fnVal, bestFull.cls.confidence, bestFull.cls.evidence, leadData.fullName ? "USER_DATA" : "FALLBACK_DATA");
     } else {
       skippedFields.push("fullName");
     }
   }
 
   // 3. Phone / Mobile
-  const phoneValue = leadData.mobile ?? leadData.mobileNumber;
-  if (phoneValue) {
-    const phoneCandidates = signals
-      .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
-      .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
-      .filter((item) => !item.cls.isNegative && item.cls.fieldType === "phone")
-      .sort((a, b) => b.cls.confidence - a.cls.confidence);
+  const phoneValue = leadData.mobile ?? leadData.mobileNumber ?? "2125550199";
+  const phoneCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "phone")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-    if (phoneCandidates.length > 0) {
-      const best = phoneCandidates[0];
-      await fillSignal(best.signal, "phone", "mobile", phoneValue, best.cls.confidence, best.cls.evidence);
-    } else {
-      skippedFields.push("mobile");
-    }
+  if (phoneCandidates.length > 0) {
+    const best = phoneCandidates[0];
+    const isUserVal = Boolean(leadData.mobile || leadData.mobileNumber);
+    await fillSignal(best.signal, "phone", "mobile", phoneValue, best.cls.confidence, best.cls.evidence, isUserVal ? "USER_DATA" : "FALLBACK_DATA");
+  } else {
+    skippedFields.push("mobile");
   }
 
   // 4. Message / Inquiry
@@ -641,28 +732,27 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .filter((item) => !item.cls.isNegative && (item.cls.fieldType === "message" || item.cls.fieldType === "inquiry"))
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  const messageValue = leadData.message || "Hello, I would like to inquire about your services. Thank you.";
+  const messageValue = leadData.message || "Hello, I would like to inquire about your professional services and availability. Thank you.";
   if (messageCandidates.length > 0) {
     const best = messageCandidates[0];
-    await fillSignal(best.signal, "message", "message", messageValue, best.cls.confidence, best.cls.evidence);
+    await fillSignal(best.signal, "message", "message", messageValue, best.cls.confidence, best.cls.evidence, leadData.message ? "USER_DATA" : "FALLBACK_DATA");
   } else {
     skippedFields.push("message");
   }
 
   // 5. Company Name
-  if (leadData.companyName) {
-    const companyCandidates = signals
-      .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
-      .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
-      .filter((item) => !item.cls.isNegative && item.cls.fieldType === "company")
-      .sort((a, b) => b.cls.confidence - a.cls.confidence);
+  const companyValue = leadData.companyName || "Test Company";
+  const companyCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "company")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-    if (companyCandidates.length > 0) {
-      const best = companyCandidates[0];
-      await fillSignal(best.signal, "company", "companyName", leadData.companyName, best.cls.confidence, best.cls.evidence);
-    } else {
-      skippedFields.push("companyName");
-    }
+  if (companyCandidates.length > 0) {
+    const best = companyCandidates[0];
+    await fillSignal(best.signal, "company", "companyName", companyValue, best.cls.confidence, best.cls.evidence, leadData.companyName ? "USER_DATA" : "FALLBACK_DATA");
+  } else {
+    skippedFields.push("companyName");
   }
 
   // 6. Website
@@ -676,7 +766,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   if (websiteCandidates.length > 0) {
     const best = websiteCandidates[0];
-    await fillSignal(best.signal, "website", "website", websiteValue, best.cls.confidence, best.cls.evidence);
+    await fillSignal(best.signal, "website", "website", websiteValue, best.cls.confidence, best.cls.evidence, "FALLBACK_DATA");
   }
 
   // 7. Subject
@@ -688,10 +778,11 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   if (subjectCandidates.length > 0) {
     const best = subjectCandidates[0];
-    await fillSignal(best.signal, "subject", "subject", "Partnership / Inquiry", best.cls.confidence, best.cls.evidence);
+    await fillSignal(best.signal, "subject", "subject", "General Inquiry", best.cls.confidence, best.cls.evidence, "FALLBACK_DATA");
   }
 
-  // 8. City / Address
+  // 8. City
+  const userCity = leadData.city || leadData.town;
   const cityCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -702,37 +793,109 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     const best = cityCandidates[0];
     const loc = fields.nth(best.signal.index);
     if (best.signal.tagName === "select") {
-      await safelyFillCityField(loc);
-      usedIndexes.add(best.signal.index);
-      filledFields.push("city");
-      verificationItems.push({
-        fieldIndex: best.signal.index,
-        fieldType: "city",
-        mappedSource: "city",
-        confidence: best.cls.confidence,
-        evidence: best.cls.evidence,
-        filled: true,
-        verified: true
-      });
+      const fillRes = await safelyFillCityField(loc, userCity);
+      if (fillRes.success) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("city");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "city",
+          mappedSource: `city [${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: fillRes.verified,
+          finalValue: fillRes.actualValue
+        });
+      }
     } else {
-      await fillSignal(best.signal, "city", "city", "New York", best.cls.confidence, best.cls.evidence);
+      const cityVal = userCity || "New York";
+      await fillSignal(best.signal, "city", "city", cityVal, best.cls.confidence, best.cls.evidence, userCity ? "USER_DATA" : "FALLBACK_DATA");
     }
   }
 
-  if (leadData.address) {
-    const addrCandidates = signals
-      .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
-      .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
-      .filter((item) => !item.cls.isNegative && item.cls.fieldType === "address")
-      .sort((a, b) => b.cls.confidence - a.cls.confidence);
+  // 8b. State / Region
+  const userState = leadData.state || leadData.province || leadData.region;
+  const stateCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "state")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-    if (addrCandidates.length > 0) {
-      const best = addrCandidates[0];
-      await fillSignal(best.signal, "address", "address", leadData.address, best.cls.confidence, best.cls.evidence);
+  if (stateCandidates.length > 0) {
+    const best = stateCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const fillRes = await safelyFillStateField(loc, userState);
+      if (fillRes.success) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("state");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "state",
+          mappedSource: `state [${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: fillRes.verified,
+          finalValue: fillRes.actualValue
+        });
+      }
+    } else {
+      const stateVal = userState || "New York";
+      await fillSignal(best.signal, "state", "state", stateVal, best.cls.confidence, best.cls.evidence, userState ? "USER_DATA" : "FALLBACK_DATA");
     }
   }
 
-  // 8b. Postal / ZIP code field
+  // 8c. Country
+  const userCountry = leadData.country || leadData.nation;
+  const countryCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "country")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (countryCandidates.length > 0) {
+    const best = countryCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const fillRes = await safelyFillCountryField(loc, userCountry);
+      if (fillRes.success) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("country");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "country",
+          mappedSource: `country [${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: fillRes.verified,
+          finalValue: fillRes.actualValue
+        });
+      }
+    } else {
+      const countryVal = userCountry || "United States";
+      await fillSignal(best.signal, "country", "country", countryVal, best.cls.confidence, best.cls.evidence, userCountry ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
+  // 8d. Address
+  const userAddress = leadData.address || leadData.street;
+  const addrCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "address")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (addrCandidates.length > 0) {
+    const best = addrCandidates[0];
+    const addrVal = userAddress || "123 Main Street";
+    await fillSignal(best.signal, "address", "address", addrVal, best.cls.confidence, best.cls.evidence, userAddress ? "USER_DATA" : "FALLBACK_DATA");
+  }
+
+  // 8e. Postal / ZIP code field
+  const userPostal = leadData.postalCode || leadData.zip || leadData.postal_code || leadData.address?.match(/\b\d{5}(-\d{4})?\b/)?.[0];
   const zipCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -741,12 +904,32 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   if (zipCandidates.length > 0) {
     const best = zipCandidates[0];
-    const zipMatch = leadData.address?.match(/\b\d{5}(-\d{4})?\b/)?.[0];
-    const zipValue = zipMatch || "94105";
-    await fillSignal(best.signal, "postal_code", "postalCode", zipValue, best.cls.confidence, best.cls.evidence);
+    const zipVal = userPostal || "10001";
+    await fillSignal(best.signal, "postal_code", "postalCode", zipVal, best.cls.confidence, best.cls.evidence, userPostal ? "USER_DATA" : "FALLBACK_DATA");
   }
 
-  // 9. Dropdowns: Select first real option for unmapped selects
+  // 8f. Job Title / Role
+  const userJob = leadData.jobTitle || leadData.job_title || leadData.role || leadData.position;
+  const jobCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "job_title")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (jobCandidates.length > 0) {
+    const best = jobCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      await selectFirstRealOption(loc).catch(() => undefined);
+      usedIndexes.add(best.signal.index);
+      filledFields.push("job_title");
+    } else {
+      const jobVal = userJob || "Manager";
+      await fillSignal(best.signal, "job_title", "jobTitle", jobVal, best.cls.confidence, best.cls.evidence, userJob ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
+  // 9. Dropdowns: Select first real option for unmapped selects (Categorical fields like Industry, Service, Budget)
   for (const signal of signals) {
     if (signal.tagName !== "select" || usedIndexes.has(signal.index)) continue;
     const didSelect = await selectFirstRealOption(fields.nth(signal.index)).catch(() => false);
@@ -756,16 +939,17 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       verificationItems.push({
         fieldIndex: signal.index,
         fieldType: "unknown",
-        mappedSource: `dropdown:${signal.index}`,
+        mappedSource: `dropdown:${signal.index} [SELECT_FIRST_VALID_OPTION]`,
         confidence: 0.8,
-        evidence: ["select first real option"],
+        evidence: ["select first real option", "source:SELECT_FIRST_VALID_OPTION"],
         filled: true,
         verified: true
       });
     }
   }
 
-  // 10. Remaining required fields fallback (ensures any unmapped required field across any CMS is filled)
+  // 10. Remaining required fields handling
+  // If a field cannot be safely classified as generic text, location, contact info, or categorical selection, DO NOT INVENT A VALUE.
   for (const signal of signals) {
     if (usedIndexes.has(signal.index)) continue;
     if (!signal.isRequired) continue;
@@ -787,7 +971,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       continue;
     }
     if (signal.type === "tel" || /phone|mobile|tel/i.test(signal.name || signal.id || "")) {
-      const pVal = leadData.mobile || leadData.mobileNumber || "555-0199";
+      const pVal = leadData.mobile || leadData.mobileNumber || leadData.phone || "2125550199";
       const fillRes = await safelyFillField(loc, pVal).catch(() => ({ success: false, verified: false, actualValue: undefined }));
       if (fillRes.success) {
         usedIndexes.add(signal.index);
@@ -818,20 +1002,56 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       continue;
     }
 
-    const fillRes = await safelyFillField(loc, REQUIRED_TEXT_FALLBACK).catch(() => ({ success: false, verified: false, actualValue: undefined }));
-    if (fillRes.success) {
-      usedIndexes.add(signal.index);
-      filledFields.push(`required:${signal.index}`);
-      verificationItems.push({
-        fieldIndex: signal.index,
-        fieldType: "unknown",
-        mappedSource: `required:${signal.index}`,
-        confidence: 0.7,
-        evidence: ["fallback required text"],
-        filled: true,
-        verified: fillRes.verified,
-        finalValue: fillRes.actualValue
-      });
+    // Semantic check: check if the unmapped required text field can be safely mapped to a known semantic category
+    const fieldDescriptor = `${signal.name} ${signal.id} ${signal.placeholder} ${signal.explicitLabel} ${signal.ariaLabel}`.toLowerCase();
+    
+    let safeValue: string | null = null;
+    let telemetrySource: "USER_DATA" | "FALLBACK_DATA" = "FALLBACK_DATA";
+
+    if (/\b(name|first|last|fname|lname|your-name)\b/i.test(fieldDescriptor)) {
+      safeValue = nameParts.firstName || leadData.firstName || leadData.fullName || "John";
+      telemetrySource = (nameParts.firstName || leadData.firstName || leadData.fullName) ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(city|town)\b/i.test(fieldDescriptor)) {
+      safeValue = userCity || "New York";
+      telemetrySource = userCity ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(zip|postal)\b/i.test(fieldDescriptor) || signal.type === "number") {
+      safeValue = userPostal || "10001";
+      telemetrySource = userPostal ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(state|province|region)\b/i.test(fieldDescriptor)) {
+      safeValue = userState || "New York";
+      telemetrySource = userState ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(country|nation)\b/i.test(fieldDescriptor)) {
+      safeValue = userCountry || "United States";
+      telemetrySource = userCountry ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(company|business|organization)\b/i.test(fieldDescriptor)) {
+      safeValue = leadData.companyName || leadData.company || "Test Company";
+      telemetrySource = (leadData.companyName || leadData.company) ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(title|role|position)\b/i.test(fieldDescriptor)) {
+      safeValue = userJob || "Manager";
+      telemetrySource = userJob ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(message|comment|note|details|inquiry|subject|feedback|description|question|brief)\b/i.test(fieldDescriptor) || signal.tagName === "textarea") {
+      safeValue = leadData.message || leadData.subject || "General Inquiry";
+      telemetrySource = (leadData.message || leadData.subject) ? "USER_DATA" : "FALLBACK_DATA";
+    }
+
+    // If safeValue could not be safely derived from generic text, location, or contact info:
+    // DO NOT INVENT A VALUE. Let it remain unmapped so it is audited accurately.
+    if (safeValue !== null) {
+      const fillRes = await safelyFillField(loc, safeValue).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+      if (fillRes.success) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`required:${signal.index}`);
+        verificationItems.push({
+          fieldIndex: signal.index,
+          fieldType: "unknown",
+          mappedSource: `required:${signal.index} [${telemetrySource}]`,
+          confidence: 0.7,
+          evidence: ["semantic required text fallback", `source:${telemetrySource}`],
+          filled: true,
+          verified: fillRes.verified,
+          finalValue: fillRes.actualValue
+        });
+      }
     }
   }
 
@@ -872,6 +1092,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   // 13. Audit Required vs Unmapped Fields
   const unmappedRequiredFields: string[] = [];
+  const unmappedRequiredDetails: UnmappedRequiredFieldDetail[] = [];
   const unmappedOptionalFields: string[] = [];
 
   for (const signal of signals) {
@@ -904,6 +1125,18 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     const identifier = signal.name || signal.id || signal.placeholder || signal.explicitLabel || `field_${signal.index}`;
     if (signal.isRequired && signal.isVisible && !signal.isDisabled) {
       unmappedRequiredFields.push(identifier);
+      
+      const optionsList = signal.selectOptions?.map((o) => o.text).filter(Boolean);
+      const detail: UnmappedRequiredFieldDetail = {
+        fieldName: signal.name || signal.id || `field_${signal.index}`,
+        fieldLabel: signal.explicitLabel || signal.ariaLabel || signal.placeholder || signal.name || `field_${signal.index}`,
+        fieldType: signal.type || signal.tagName,
+        availableOptions: optionsList && optionsList.length > 0 ? optionsList : undefined,
+        reason: "Required field cannot safely be mapped to generic text, location, contact info, or ordinary categorical selection without domain knowledge"
+      };
+      unmappedRequiredDetails.push(detail);
+
+      console.warn(`[contact-form-automation] REQUIRED_FIELD_UNMAPPED: fieldName="${detail.fieldName}", label="${detail.fieldLabel}", type="${detail.fieldType}", options=${optionsList?.length ?? 0}`);
     } else {
       unmappedOptionalFields.push(identifier);
     }
@@ -922,6 +1155,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     filledFieldsCount: filledFields.length,
     verifiedFieldsCount: verificationItems.filter((v) => v.verified).length,
     unmappedRequiredFields,
+    unmappedRequiredDetails,
     unmappedOptionalFields,
     items: verificationItems
   };
@@ -1022,7 +1256,7 @@ async function findPrimaryForm(page: Page) {
   return best?.form ?? null;
 }
 
-async function fillAllVisibleForms(page: Page, leadData: LeadData) {
+export async function fillAllVisibleForms(page: Page, leadData: LeadData) {
   let primaryForm = await findPrimaryForm(page);
   // A small number of sites use controls without a wrapping <form>.
   let result = await fillDetectedFields(primaryForm ?? page, leadData);
@@ -1830,11 +2064,12 @@ export async function submitContactForm({
 
     let navResponse: any = null;
     const tNavStart = Date.now();
+    const initialNavTimeout = Math.max(3000, Math.min(15000, timeoutMs));
     try {
       navResponse = await Promise.race([
         activePage.goto(websiteUrl, {
           waitUntil: "domcontentloaded",
-          timeout: timeoutMs
+          timeout: initialNavTimeout
         }),
         proxy407Promise
       ]);
@@ -1842,14 +2077,22 @@ export async function submitContactForm({
       if (isProxyAuthenticationFailure(gotoErr) || proxy407Hit) {
         throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
       }
+      const errStr = gotoErr?.message || String(gotoErr);
+      if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
+        throw gotoErr;
+      }
       try {
+        const remainingCommitTimeout = Math.max(3000, Math.min(10000, timeoutMs - (Date.now() - tNavStart)));
         navResponse = await Promise.race([
-          activePage.goto(websiteUrl, { waitUntil: "commit", timeout: timeoutMs }),
+          activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
           proxy407Promise
         ]);
       } catch (commitErr: any) {
         if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
           throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+        }
+        if (!activePage.url() || activePage.url() === "about:blank") {
+          throw commitErr;
         }
       }
     } finally {
@@ -1876,7 +2119,12 @@ export async function submitContactForm({
     // Progressive Dynamic Page Readiness
     const tReadinessStart = Date.now();
     await dismissCookieBanners(activePage).catch(() => undefined);
-    await waitForDynamicPageReadiness(activePage, Math.min(timeoutMs, 8000));
+    const readinessMaxWait = Math.max(3000, Math.min(timeoutMs - tNav, 60000));
+    await waitForUniversalPageReadiness(activePage, {
+      maxWaitMs: readinessMaxWait,
+      pollIntervalMs: 250,
+      targetPurpose: "form"
+    }).catch(() => undefined);
     await dismissCookieBanners(activePage).catch(() => undefined);
     tReadiness = Date.now() - tReadinessStart;
 
@@ -1926,7 +2174,11 @@ export async function submitContactForm({
 
     if (fillMetrics && fillMetrics.unmappedRequiredFields.length > 0) {
       const unmappedSummary = fillMetrics.unmappedRequiredFields.join(", ");
-      console.warn(`[contact-form-automation] Unmapped required fields on ${websiteUrl}: ${unmappedSummary}`);
+      const detailedLog = (fillMetrics.unmappedRequiredDetails || []).map((d) => 
+        `[name="${d.fieldName}", label="${d.fieldLabel}", type="${d.fieldType}"${d.availableOptions ? `, options=[${d.availableOptions.join(",")}]` : ""}, reason="${d.reason}"]`
+      ).join("; ");
+
+      console.warn(`[contact-form-automation] Unmapped required fields on ${websiteUrl}: ${unmappedSummary} Details: ${detailedLog}`);
       if (fillMetrics.unmappedRequiredFields.some((f) => /captcha|turnstile|recaptcha|challenge/i.test(f))) {
         if (canSolveCaptcha) {
           const solveRes = await handleCaptchaSolvingForTarget({
@@ -1942,7 +2194,7 @@ export async function submitContactForm({
           throw new Error(`Unsupported verification: CAPTCHA required field detected (${unmappedSummary}). Manual verification required.`);
         }
       } else {
-        throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}`);
+        throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}${detailedLog ? ` | ${detailedLog}` : ""}`);
       }
     }
 

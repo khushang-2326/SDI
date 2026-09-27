@@ -244,8 +244,8 @@ export async function waitForUniversalPageReadiness(
   const isSatisfied = (): boolean => {
     if (targetPurpose === "form" && evalResult.hasForms) return true;
     if (targetPurpose === "booking" && evalResult.hasBooking) return true;
-    if (targetPurpose === "discovery" && evalResult.interactiveCount > 3 && !evalResult.isLoading) return true;
-    if (targetPurpose === "any" && (evalResult.hasForms || evalResult.hasBooking || (evalResult.interactiveCount > 5 && !evalResult.isLoading))) return true;
+    if (targetPurpose === "discovery" && evalResult.interactiveCount > 0 && !evalResult.isLoading) return true;
+    if (targetPurpose === "any" && (evalResult.hasForms || evalResult.hasBooking || (evalResult.interactiveCount > 0 && !evalResult.isLoading))) return true;
     return false;
   };
 
@@ -274,7 +274,6 @@ export async function waitForUniversalPageReadiness(
   while (Date.now() - startTime < maxWaitMs) {
     await page.waitForTimeout(pollIntervalMs);
     evalResult = await evaluateState();
-
     if (isSatisfied()) {
       const elapsed = Date.now() - startTime;
       return {

@@ -571,8 +571,12 @@ function extractSitemapCandidates(document: HttpDocument): Candidate[] {
   return candidates;
 }
 
-export async function collectHttpDiscoveryCandidates(websiteUrl: string): Promise<Candidate[]> {
-  const deadline = Date.now() + HTTP_DISCOVERY_BUDGET_MS;
+export async function collectHttpDiscoveryCandidates(
+  websiteUrl: string,
+  maxBudgetMs: number = HTTP_DISCOVERY_BUDGET_MS
+): Promise<Candidate[]> {
+  const budget = Math.max(500, Math.min(HTTP_DISCOVERY_BUDGET_MS, maxBudgetMs));
+  const deadline = Date.now() + budget;
   const homepage = await fetchHttpDocument(websiteUrl, deadline);
   if (!homepage) return [];
 
@@ -1982,7 +1986,8 @@ async function discoverSubmissionTargetsInternal({
   };
 
   try {
-    const httpCandidates = await collectHttpDiscoveryCandidates(normalizedWebsiteUrl);
+    const httpBudget = Math.min(HTTP_DISCOVERY_BUDGET_MS, Math.max(800, Math.floor(timeoutMs * 0.20)));
+    const httpCandidates = await collectHttpDiscoveryCandidates(normalizedWebsiteUrl, httpBudget);
     for (const candidate of httpCandidates) {
       addResult(resultFromSupportedExternalCandidate(normalizedWebsiteUrl, candidate));
     }
@@ -2217,7 +2222,7 @@ async function discoverSubmissionTargetsInternal({
       const remainingBudget = discoveryDeadlineAt - Date.now();
       if (remainingBudget <= 500) break;
       const candTimeout = Math.min(6500, Math.max(1500, remainingBudget - 200));
-      const candNav = await navigateForDiscovery(page, candidate.url, candTimeout, "form");
+      const candNav = await navigateForDiscovery(page, candidate.url, candTimeout, "any");
 
       if (!candNav.committed) {
         console.log(`[CONTACT-DISCOVERY] Failed to load candidate: ${candidate.url}`);

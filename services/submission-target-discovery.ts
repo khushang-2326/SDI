@@ -717,19 +717,35 @@ export async function navigateForDiscovery(
         navError: err
       };
     }
-    // If domcontentloaded timed out or was delayed by media/trackers, try commit fallback
-    try {
-      navResponse = await page.goto(url, {
-        waitUntil: "commit",
-        timeout: Math.max(3000, Math.min(10000, budgetMs - (Date.now() - tStart)))
-      });
-      committed = true;
-      responseStatus = navResponse?.status() ?? 200;
-    } catch (commitErr: any) {
-      navError = commitErr;
-      if (commitErr?.message?.includes("Timeout") || commitErr?.name === "TimeoutError") {
-        timedOut = true;
-        timeoutStage = stage;
+    if (/interrupted by another navigation|net::ERR_ABORTED/i.test(errStr)) {
+      try {
+        await page.waitForLoadState("domcontentloaded", { timeout: Math.max(2000, Math.min(6000, budgetMs - (Date.now() - tStart))) });
+        committed = true;
+        responseStatus = 200;
+      } catch {
+        if (page.url() && page.url() !== "about:blank") {
+          committed = true;
+          responseStatus = 200;
+        }
+      }
+    } else {
+      // If domcontentloaded timed out or was delayed by media/trackers, try commit fallback
+      try {
+        navResponse = await page.goto(url, {
+          waitUntil: "commit",
+          timeout: Math.max(3000, Math.min(10000, budgetMs - (Date.now() - tStart)))
+        });
+        committed = true;
+        responseStatus = navResponse?.status() ?? 200;
+      } catch (commitErr: any) {
+        navError = commitErr;
+        if (page.url() && page.url() !== "about:blank") {
+          committed = true;
+          responseStatus = 200;
+        } else if (commitErr?.message?.includes("Timeout") || commitErr?.name === "TimeoutError") {
+          timedOut = true;
+          timeoutStage = stage;
+        }
       }
     }
   }

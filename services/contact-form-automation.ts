@@ -31,6 +31,7 @@ import {
   extractFieldSignals,
   classifyField,
   classifyAllFormFields,
+  isHoneypotField,
   splitFullName,
   COMMON_INPUT_SELECTOR
 } from "./field-classifier";
@@ -452,10 +453,13 @@ async function selectFirstRealOption(locator: Locator): Promise<boolean> {
     .evaluate((element) => {
       const select = element as HTMLSelectElement;
       if (!select || select.tagName.toLowerCase() !== "select") return false;
-      const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i;
+      const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
       const isRealOption = (option: HTMLOptionElement) => {
         const label = (option.textContent ?? "").replace(/\s+/g, " ").trim();
-        return !option.disabled && Boolean(option.value.trim()) && !placeholderPattern.test(label);
+        const val = (option.value ?? "").trim();
+        const hasContent = Boolean(val || label);
+        const isPlaceholder = placeholderPattern.test(label) || (val === "" && placeholderPattern.test(label));
+        return !option.disabled && hasContent && !isPlaceholder;
       };
 
       const selected = select.options[select.selectedIndex];
@@ -929,6 +933,157 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
   }
 
+  // 8g. Budget / Price Range
+  const userBudget = (leadData as any).budget || (leadData as any).projectBudget || (leadData as any).monthlyBudget;
+  const budgetCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "budget")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (budgetCandidates.length > 0) {
+    const best = budgetCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (didSelect) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("budget");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "budget",
+          mappedSource: `budget [${userBudget ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userBudget ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: true
+        });
+      }
+    } else {
+      const bVal = userBudget || "5000";
+      await fillSignal(best.signal, "budget", "budget", bVal, best.cls.confidence, best.cls.evidence, userBudget ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
+  // 8h. Service of Interest / Services Required
+  const userService = (leadData as any).service || (leadData as any).serviceInterest || (leadData as any).services;
+  const serviceCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "service_interest")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (serviceCandidates.length > 0) {
+    const best = serviceCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (didSelect) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("service_interest");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "service_interest",
+          mappedSource: `service_interest [${userService ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userService ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: true
+        });
+      }
+    } else {
+      const sVal = userService || "Web Design & Digital Marketing";
+      await fillSignal(best.signal, "service_interest", "service", sVal, best.cls.confidence, best.cls.evidence, userService ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
+  // 8i. Referral Source / How did you hear about us
+  const userSource = (leadData as any).referralSource || (leadData as any).source || (leadData as any).howHeard;
+  const sourceCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "referral_source")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (sourceCandidates.length > 0) {
+    const best = sourceCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (didSelect) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("referral_source");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "referral_source",
+          mappedSource: `referral_source [${userSource ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userSource ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: true
+        });
+      }
+    } else {
+      const refVal = userSource || "Google Search";
+      await fillSignal(best.signal, "referral_source", "referralSource", refVal, best.cls.confidence, best.cls.evidence, userSource ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
+  // 8j. Industry / Sector
+  const userIndustry = (leadData as any).industry || (leadData as any).sector;
+  const industryCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "industry")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (industryCandidates.length > 0) {
+    const best = industryCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (didSelect) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("industry");
+        verificationItems.push({
+          fieldIndex: best.signal.index,
+          fieldType: "industry",
+          mappedSource: `industry [${userIndustry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          confidence: best.cls.confidence,
+          evidence: [...best.cls.evidence, `source:${userIndustry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          filled: true,
+          verified: true
+        });
+      }
+    } else {
+      const indVal = userIndustry || "Technology";
+      await fillSignal(best.signal, "industry", "industry", indVal, best.cls.confidence, best.cls.evidence, userIndustry ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
+  // 8k. Company Size
+  const userCompSize = (leadData as any).companySize || (leadData as any).employees;
+  const sizeCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "company_size")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (sizeCandidates.length > 0) {
+    const best = sizeCandidates[0];
+    const loc = fields.nth(best.signal.index);
+    if (best.signal.tagName === "select") {
+      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (didSelect) {
+        usedIndexes.add(best.signal.index);
+        filledFields.push("company_size");
+      }
+    } else {
+      const sizeVal = userCompSize || "1-10 Employees";
+      await fillSignal(best.signal, "company_size", "companySize", sizeVal, best.cls.confidence, best.cls.evidence, userCompSize ? "USER_DATA" : "FALLBACK_DATA");
+    }
+  }
+
   // 9. Dropdowns: Select first real option for unmapped selects (Categorical fields like Industry, Service, Budget)
   for (const signal of signals) {
     if (signal.tagName !== "select" || usedIndexes.has(signal.index)) continue;
@@ -1008,7 +1163,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     let safeValue: string | null = null;
     let telemetrySource: "USER_DATA" | "FALLBACK_DATA" = "FALLBACK_DATA";
 
-    if (/\b(name|first|last|fname|lname|your-name)\b/i.test(fieldDescriptor)) {
+    if (/\b(name|first|last|fname|lname|your-name|surname)\b/i.test(fieldDescriptor)) {
       safeValue = nameParts.firstName || leadData.firstName || leadData.fullName || "John";
       telemetrySource = (nameParts.firstName || leadData.firstName || leadData.fullName) ? "USER_DATA" : "FALLBACK_DATA";
     } else if (/\b(city|town)\b/i.test(fieldDescriptor)) {
@@ -1023,13 +1178,25 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     } else if (/\b(country|nation)\b/i.test(fieldDescriptor)) {
       safeValue = userCountry || "United States";
       telemetrySource = userCountry ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(company|business|organization)\b/i.test(fieldDescriptor)) {
-      safeValue = leadData.companyName || leadData.company || "Test Company";
-      telemetrySource = (leadData.companyName || leadData.company) ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(title|role|position)\b/i.test(fieldDescriptor)) {
+    } else if (/\b(company|business|organization|organisation|firm|agency|enterprise)\b/i.test(fieldDescriptor)) {
+      safeValue = leadData.companyName || (leadData as any).company || "Test Company";
+      telemetrySource = (leadData.companyName || (leadData as any).company) ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(budget|monthly[ _-]?budget|project[ _-]?budget|price|investment)\b/i.test(fieldDescriptor)) {
+      safeValue = userBudget || "5000";
+      telemetrySource = userBudget ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(service|services|interest|interested|services?[ _-]?of[ _-]?interest|preferred[ _-]?service)\b/i.test(fieldDescriptor)) {
+      safeValue = userService || "Web Design & Digital Marketing";
+      telemetrySource = userService ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(hear|find|source|referral|how[ _-]?did[ _-]?you)\b/i.test(fieldDescriptor)) {
+      safeValue = userSource || "Google Search";
+      telemetrySource = userSource ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(industry|sector|vertical)\b/i.test(fieldDescriptor)) {
+      safeValue = userIndustry || "Technology";
+      telemetrySource = userIndustry ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(title|role|position|occupation)\b/i.test(fieldDescriptor)) {
       safeValue = userJob || "Manager";
       telemetrySource = userJob ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(message|comment|note|details|inquiry|subject|feedback|description|question|brief)\b/i.test(fieldDescriptor) || signal.tagName === "textarea") {
+    } else if (/\b(message|comment|note|details|inquiry|subject|feedback|description|question|brief|help|needs)\b/i.test(fieldDescriptor) || signal.tagName === "textarea") {
       safeValue = leadData.message || leadData.subject || "General Inquiry";
       telemetrySource = (leadData.message || leadData.subject) ? "USER_DATA" : "FALLBACK_DATA";
     }
@@ -1097,6 +1264,12 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
 
   for (const signal of signals) {
     if (usedIndexes.has(signal.index)) continue;
+    
+    // Honeypot protection: skip honeypot fields so they are neither filled nor trigger required errors
+    if (isHoneypotField(signal)) {
+      usedIndexes.add(signal.index);
+      continue;
+    }
     const loc = fields.nth(signal.index);
     
     // Check if element is a checkbox/radio that is already checked
@@ -2081,18 +2254,26 @@ export async function submitContactForm({
       if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
         throw gotoErr;
       }
-      try {
-        const remainingCommitTimeout = Math.max(3000, Math.min(10000, timeoutMs - (Date.now() - tNavStart)));
-        navResponse = await Promise.race([
-          activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
-          proxy407Promise
-        ]);
-      } catch (commitErr: any) {
-        if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
-          throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+      if (/interrupted by another navigation|net::ERR_ABORTED/i.test(errStr)) {
+        try {
+          await activePage.waitForLoadState("domcontentloaded", { timeout: 4000 });
+        } catch {
+          // ignore if already committed
         }
-        if (!activePage.url() || activePage.url() === "about:blank") {
-          throw commitErr;
+      } else {
+        try {
+          const remainingCommitTimeout = Math.max(3000, Math.min(10000, timeoutMs - (Date.now() - tNavStart)));
+          navResponse = await Promise.race([
+            activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
+            proxy407Promise
+          ]);
+        } catch (commitErr: any) {
+          if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
+            throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+          }
+          if (!activePage.url() || activePage.url() === "about:blank") {
+            throw commitErr;
+          }
         }
       }
     } finally {

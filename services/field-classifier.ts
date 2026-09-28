@@ -18,12 +18,17 @@ export type SemanticFieldType =
   | "message"
   | "inquiry"
   | "budget"
+  | "service_interest"
+  | "referral_source"
+  | "industry"
+  | "company_size"
   | "date"
   | "time"
   | "preferred_contact_method"
   | "consent"
   | "newsletter"
   | "attachment"
+  | "honeypot"
   | "unknown";
 
 export interface FieldSignals {
@@ -123,12 +128,12 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /(^|[ _-])(email|work-email|business-email|user-email)([ _-]|$)/i
   ],
   phone: [
-    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number)\b/i,
+    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no)\b/i,
     /\b(telefon|telephone|telefono|numero[ _-]?telefono|celular|telefone|telefoonnummer)\b/i
   ],
   company: [
-    /\b(company|business|organization|organisation|brand|firm|agency|enterprise)\b/i,
-    /\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name)\b/i,
+    /\b(company|business|organization|organisation|brand|firm|agency|enterprise|compañía|compania)\b/i,
+    /\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name|organization[ _-]?name)\b/i,
     /\b(societe|entreprise|unternehmen|firma|empresa|azienda|bedrijf|bedrijfsnaam)\b/i
   ],
   job_title: [
@@ -160,7 +165,7 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(code[ _-]?postal|plz|postleitzahl|codigo[ _-]?postal|cap|postcode)\b/i
   ],
   subject: [
-    /\b(subject|regarding|topic|reason[ _-]?for[ _-]?contact)\b/i,
+    /\b(subject|regarding|topic|reason[ _-]?for[ _-]?contact|how[ _-]?can[ _-]?we[ _-]?help|describe[ _-]?your[ _-]?needs)\b/i,
     /\b(sujet|betreff|asunto|oggetto|assunto|onderwerp)\b/i
   ],
   message: [
@@ -171,8 +176,23 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(enquiry|inquiry|consultation|request|question|demande|anfrage|consulta|richiesta)\b/i
   ],
   budget: [
-    /\b(budget|estimated[ _-]?budget|price[ _-]?range|investment)\b/i,
+    /\b(budget|estimated[ _-]?budget|price[ _-]?range|investment|monthly[ _-]?budget|project[ _-]?budget|current[ _-]?budget|marketing[ _-]?budget|approximate[ _-]?budget)\b/i,
     /\b(tarif|kosten|presupuesto|preventivo|orcamento)\b/i
+  ],
+  service_interest: [
+    /\b(services?[ _-]?interested[ _-]?in|services?[ _-]?of[ _-]?interest|preferred[ _-]?services?|services?[ _-]?required|select[ _-]?services?|interested[ _-]?in|area[ _-]?of[ _-]?service|service|services)\b/i,
+    /\b(dienstleistung|servicio|servicios|prestation|servizi|diensten)\b/i
+  ],
+  referral_source: [
+    /\b(how[ _-]?did[ _-]?you[ _-]?(hear|find|know)[ _-]?(about)?[ _-]?us|where[ _-]?did[ _-]?you[ _-]?(hear|find)|referral[ _-]?source|referral|source|self[ _-]?reported[ _-]?source|how[ _-]?you[ _-]?heard)\b/i,
+    /\b(comment[ _-]?nous[ _-]?avez[ _-]?vous[ _-]?connu|como[ _-]?nos[ _-]?conocio|come[ _-]?ci[ _-]?hai[ _-]?conosciuto|hoe[ _-]?heeft[ _-]?u[ _-]?ons[ _-]?gevonden|woher[ _-]?kennen[ _-]?sie[ _-]?uns)\b/i
+  ],
+  industry: [
+    /\b(industry|sector|business[ _-]?sector|vertical|business[ _-]?type|domain)\b/i,
+    /\b(branche|secteur|industria|sector[ _-]?empresarial|bedrijfstak)\b/i
+  ],
+  company_size: [
+    /\b(company[ _-]?size|employees?|number[ _-]?of[ _-]?employees|team[ _-]?size|organization[ _-]?size)\b/i
   ],
   date: [
     /\b(date|preferred[ _-]?date|booking[ _-]?date|meeting[ _-]?date|appointment[ _-]?date)\b/i,
@@ -196,6 +216,9 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
   attachment: [
     /\b(attachment|attach|upload|file|resume|cv|document)\b/i,
     /\b(fichier|datei|anhang|archivo|allegato|bestand)\b/i
+  ],
+  honeypot: [
+    /\b(honeypot|leave[ _-]?this[ _-]?field[ _-]?(blank|empty)|if[ _-]?you[ _-]?are[ _-]?human|do[ _-]?not[ _-]?fill|please[ _-]?leave[ _-]?empty)\b/i
   ]
 };
 
@@ -340,7 +363,13 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
         style.visibility !== "hidden" &&
         style.opacity !== "0" &&
         rect.width > 0 &&
-        rect.height > 0;
+        rect.height > 0 &&
+        rect.right > 0 &&
+        rect.bottom > 0 &&
+        rect.left < 5000 &&
+        rect.top < 5000 &&
+        rect.left > -500 &&
+        rect.top > -500;
 
       // Select options
       let selectOptions: Array<{ text: string; value: string; disabled: boolean }> | undefined;
@@ -383,6 +412,34 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
   });
 }
 
+export function isHoneypotField(signals: FieldSignals): boolean {
+  const combinedText = [
+    signals.explicitLabel,
+    ...signals.associatedLabels,
+    signals.surroundingLabel,
+    signals.placeholder,
+    signals.ariaLabel,
+    signals.title
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  // Explicit honeypot instructions (e.g. "If you are human, leave this field blank", "Please leave this field empty")
+  if (/\b(leave\s+this\s+(field\s+)?(blank|empty)|if\s+you\s+are\s+human|do\s+not\s+fill|please\s+leave\s+(this\s+field\s+)?empty|human\s+check\s+leave\s+blank|honeypot)\b/i.test(combinedText)) {
+    return true;
+  }
+
+  const technical = [signals.name, signals.id, signals.dataAttributes].filter(Boolean).join(" ").toLowerCase();
+  if (/(honeypot|hp_|_hp|botcheck|fake_field|item_meta\[\d+\]_hp|gform_validation_container|wpforms-field-hp|gform_hp)/i.test(technical)) {
+    return true;
+  }
+
+  // Hidden off-screen / CSS invisible with trap-like names or any invisible required input that isn't a known field
+  if (!signals.isVisible) {
+    return true;
+  }
+
+  return false;
+}
+
 function matchSynonyms(text: string, patterns: RegExp[]): boolean {
   if (!text) return false;
   return patterns.some((regex) => regex.test(text));
@@ -390,6 +447,17 @@ function matchSynonyms(text: string, patterns: RegExp[]): boolean {
 
 export function classifyField(signals: FieldSignals, allFormSignals: FieldSignals[] = []): FieldClassification {
   const evidence: string[] = [];
+
+  // 0. Honeypot check
+  if (isHoneypotField(signals)) {
+    return {
+      fieldType: "honeypot",
+      confidence: 0.99,
+      evidence: ["detected honeypot field"],
+      isNegative: true,
+      negativeReason: "honeypot trap"
+    };
+  }
 
   // 1. Negative control check (Passwords, search bars, coupons, CAPTCHA)
   if (signals.type === "password") {
@@ -569,6 +637,30 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
       return { fieldType: "budget", confidence: 0.92, evidence, isNegative: false };
     }
 
+    // Service / Interest detection
+    if (
+      /\b(seo|web design|marketing|ppc|advertising|consulting|development|branding|social media|audit|software|design)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain services of interest");
+      return { fieldType: "service_interest", confidence: 0.90, evidence, isNegative: false };
+    }
+
+    // Referral source detection
+    if (
+      /\b(google|friend|referral|search engine|social media|linkedin|facebook|advertisement|other|word of mouth|recommendation)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain referral sources");
+      return { fieldType: "referral_source", confidence: 0.90, evidence, isNegative: false };
+    }
+
+    // Industry detection
+    if (
+      /\b(technology|healthcare|finance|education|real estate|retail|legal|construction|automotive|ecommerce|hospitality)\b/i.test(combinedOptions)
+    ) {
+      evidence.push("select options contain industries");
+      return { fieldType: "industry", confidence: 0.90, evidence, isNegative: false };
+    }
+
     // Subject / Inquiry reason detection
     if (
       /\b(general|inquiry|enquiry|sales|support|billing|partnerships?|services?|business|quote|careers)\b/i.test(combinedOptions)
@@ -635,112 +727,68 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     signals.parentContainerText
   ].filter(Boolean).join(" ");
 
-  const testCandidate = (type: Exclude<SemanticFieldType, "unknown">): { matched: boolean; conf: number; ev: string } => {
+  const CANDIDATE_TYPES: Exclude<SemanticFieldType, "unknown" | "honeypot" | "consent" | "newsletter" | "attachment">[] = [
+    "first_name",
+    "last_name",
+    "full_name",
+    "email",
+    "phone",
+    "company",
+    "website",
+    "subject",
+    "message",
+    "city",
+    "state",
+    "postal_code",
+    "country",
+    "address",
+    "job_title",
+    "budget",
+    "service_interest",
+    "referral_source",
+    "industry",
+    "company_size",
+    "date",
+    "time"
+  ];
+
+  // PASS 1: Check primary signals (explicit label, placeholder, aria-label) across all candidate types
+  for (const type of CANDIDATE_TYPES) {
     const patterns = MULTILINGUAL_SYNONYMS[type];
-
     if (matchSynonyms(primarySignalsText, patterns)) {
-      return { matched: true, conf: 0.92, ev: `primary label/placeholder matched ${type}` };
+      if (type === "full_name" && /\b(company|business|firm|enterprise)\b/i.test(primarySignalsText || technicalIdentifiers)) {
+        evidence.push("contains company qualifier");
+        return { fieldType: "company", confidence: 0.85, evidence, isNegative: false };
+      }
+      evidence.push(`primary label/placeholder matched ${type}`);
+      return { fieldType: type, confidence: 0.92, evidence, isNegative: false };
     }
+  }
 
+  // PASS 2: Check technical identifiers (name, id attributes) across all candidate types
+  for (const type of CANDIDATE_TYPES) {
+    const patterns = MULTILINGUAL_SYNONYMS[type];
     if (matchSynonyms(technicalIdentifiers, patterns)) {
-      return { matched: true, conf: 0.88, ev: `name/id attribute matched ${type}` };
+      if (type === "full_name" && /\b(company|business|firm|enterprise)\b/i.test(primarySignalsText || technicalIdentifiers)) {
+        evidence.push("contains company qualifier");
+        return { fieldType: "company", confidence: 0.85, evidence, isNegative: false };
+      }
+      evidence.push(`name/id attribute matched ${type}`);
+      return { fieldType: type, confidence: 0.88, evidence, isNegative: false };
     }
+  }
 
+  // PASS 3: Check contextual container text (only as low-confidence fallback when primary/technical did not match)
+  for (const type of CANDIDATE_TYPES) {
+    const patterns = MULTILINGUAL_SYNONYMS[type];
     if (matchSynonyms(contextualText, patterns)) {
-      return { matched: true, conf: 0.70, ev: `contextual container matched ${type}` };
+      if (type === "full_name" && /\b(company|business|firm|enterprise)\b/i.test(primarySignalsText || technicalIdentifiers)) {
+        evidence.push("contains company qualifier");
+        return { fieldType: "company", confidence: 0.85, evidence, isNegative: false };
+      }
+      evidence.push(`contextual container matched ${type}`);
+      return { fieldType: type, confidence: 0.70, evidence, isNegative: false };
     }
-
-    return { matched: false, conf: 0, ev: "" };
-  };
-
-  const firstNameTest = testCandidate("first_name");
-  if (firstNameTest.matched) {
-    evidence.push(firstNameTest.ev);
-    return { fieldType: "first_name", confidence: firstNameTest.conf, evidence, isNegative: false };
-  }
-
-  const lastNameTest = testCandidate("last_name");
-  if (lastNameTest.matched) {
-    evidence.push(lastNameTest.ev);
-    return { fieldType: "last_name", confidence: lastNameTest.conf, evidence, isNegative: false };
-  }
-
-  const fullNameTest = testCandidate("full_name");
-  if (fullNameTest.matched) {
-    if (/\b(company|business|firm|enterprise)\b/i.test(primarySignalsText || technicalIdentifiers)) {
-      evidence.push("contains company qualifier");
-      return { fieldType: "company", confidence: 0.85, evidence, isNegative: false };
-    }
-    evidence.push(fullNameTest.ev);
-    return { fieldType: "full_name", confidence: fullNameTest.conf, evidence, isNegative: false };
-  }
-
-  const emailTest = testCandidate("email");
-  if (emailTest.matched) {
-    evidence.push(emailTest.ev);
-    return { fieldType: "email", confidence: emailTest.conf, evidence, isNegative: false };
-  }
-
-  const phoneTest = testCandidate("phone");
-  if (phoneTest.matched) {
-    evidence.push(phoneTest.ev);
-    return { fieldType: "phone", confidence: phoneTest.conf, evidence, isNegative: false };
-  }
-
-  const companyTest = testCandidate("company");
-  if (companyTest.matched) {
-    evidence.push(companyTest.ev);
-    return { fieldType: "company", confidence: companyTest.conf, evidence, isNegative: false };
-  }
-
-  const websiteTest = testCandidate("website");
-  if (websiteTest.matched) {
-    evidence.push(websiteTest.ev);
-    return { fieldType: "website", confidence: websiteTest.conf, evidence, isNegative: false };
-  }
-
-  const subjectTest = testCandidate("subject");
-  if (subjectTest.matched) {
-    evidence.push(subjectTest.ev);
-    return { fieldType: "subject", confidence: subjectTest.conf, evidence, isNegative: false };
-  }
-
-  const messageTest = testCandidate("message");
-  if (messageTest.matched) {
-    evidence.push(messageTest.ev);
-    return { fieldType: "message", confidence: messageTest.conf, evidence, isNegative: false };
-  }
-
-  for (const locType of ["city", "state", "postal_code", "country", "address"] as const) {
-    const test = testCandidate(locType);
-    if (test.matched) {
-      evidence.push(test.ev);
-      return { fieldType: locType, confidence: test.conf, evidence, isNegative: false };
-    }
-  }
-
-  const jobTitleTest = testCandidate("job_title");
-  if (jobTitleTest.matched) {
-    evidence.push(jobTitleTest.ev);
-    return { fieldType: "job_title", confidence: jobTitleTest.conf, evidence, isNegative: false };
-  }
-
-  const budgetTest = testCandidate("budget");
-  if (budgetTest.matched) {
-    evidence.push(budgetTest.ev);
-    return { fieldType: "budget", confidence: budgetTest.conf, evidence, isNegative: false };
-  }
-
-  const dateTest = testCandidate("date");
-  if (dateTest.matched) {
-    evidence.push(dateTest.ev);
-    return { fieldType: "date", confidence: dateTest.conf, evidence, isNegative: false };
-  }
-
-  const timeTest = testCandidate("time");
-  if (timeTest.matched) {
-    evidence.push(timeTest.ev);
-    return { fieldType: "time", confidence: timeTest.conf, evidence, isNegative: false };
   }
 
   // 4. Structural Form-Order Fallback (When labels are weak/absent or non-standard, e.g. name="field_1")

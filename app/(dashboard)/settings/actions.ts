@@ -134,6 +134,11 @@ export async function updateProxySettingsAction(
     const bandwidthSaverValue = String(formData.get("proxyBandwidthSaver") || "").toLowerCase();
     const bandwidthSaver = bandwidthSaverValue === "true" || bandwidthSaverValue === "on" || bandwidthSaverValue === "1";
 
+    const rawStrategy = String(formData.get("proxyStrategy") || "fallback_only").trim().toLowerCase();
+    const proxyStrategy = ["fallback_only", "always", "disabled"].includes(rawStrategy)
+      ? rawStrategy
+      : "fallback_only";
+
     if (!protocol) throw new Error("Proxy protocol must be HTTP, HTTPS, or SOCKS5.");
     if (enabled && (!host || port === null)) {
       throw new Error("An enabled proxy requires a host and a port from 1 to 65535.");
@@ -155,6 +160,7 @@ export async function updateProxySettingsAction(
       where: { id: user.id },
       data: {
         proxyEnabled: enabled,
+        proxyStrategy,
         proxyProtocol: protocol,
         proxyHost: host || null,
         proxyPort: port,

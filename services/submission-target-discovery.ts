@@ -2036,14 +2036,9 @@ async function discoverSubmissionTargetsInternal({
     await blockHeavyAssets(page);
 
     let proxy407Hit = false;
-    let on407Reject: ((err: any) => void) | null = null;
-    const proxy407Promise = new Promise((_, reject) => {
-      on407Reject = reject;
-    });
     const responseHandler = (res: any) => {
       if (res.status() === 407) {
         proxy407Hit = true;
-        if (on407Reject) on407Reject(new ProxyAuthenticationError(PROXY_407_MESSAGE));
       }
     };
     page.on("response", responseHandler);
@@ -2125,27 +2120,29 @@ async function discoverSubmissionTargetsInternal({
     }
 
     // Dedicated Contact Form Fast-Path:
-    // If the entered page already contains a dedicated, high-confidence contact form (or is a /contact URL),
-    // use it immediately. But if the root homepage only has a low-confidence/single-field widget,
-    // ensure dedicated navigation candidates like /contact or /contact-us are prioritized.
+    // If the entered page already contains a dedicated contact form (or is an explicit /contact URL),
+    // use it immediately to avoid unnecessary crawl delays.
     const isRootHomepage = withoutHash(page.url()) === normalizedWebsiteUrl || withoutHash(page.url()) === `${normalizedWebsiteUrl}/`;
+    const isDedicatedContactUrl = /contact|reach|touch|book|schedule|inquir|connect/i.test(normalizedWebsiteUrl) || /contact|reach|touch|book|schedule|inquir|connect/i.test(page.url());
     const isDedicatedContactForm = directResult?.targetType === "contact_form" && (
       !isRootHomepage ||
-      directResult.confidence >= 85 ||
-      /contact|reach|touch|book/i.test(page.url())
+      directResult.confidence >= 80 ||
+      isDedicatedContactUrl
     );
 
     if (isDedicatedContactForm) {
       const targets = Array.from(discovered.values()).sort(
         (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
       );
-      return {
-        websiteUrl: normalizedWebsiteUrl,
-        targets,
-        checkedUrls,
-        reason: "Contact form found directly on the entered page.",
-        screenshotPath: targets[0]?.screenshotPath
-      };
+      if (targets.length > 0) {
+        return {
+          websiteUrl: normalizedWebsiteUrl,
+          targets,
+          checkedUrls,
+          reason: "Contact form found directly on the entered page.",
+          screenshotPath: targets[0]?.screenshotPath
+        };
+      }
     }
 
     const supportedExternalCandidates = await collectSupportedExternalCandidates(page, page.url());
@@ -2295,9 +2292,16 @@ async function discoverSubmissionTargetsInternal({
       if (candidateVerification && candidateVerification.blocking !== false && !isAuthorizedCaptchaTestTarget(candidate.url)) {
         const isInlineCaptcha = ["reCAPTCHA", "hCaptcha", "Cloudflare Turnstile"].includes(candidateVerification.name);
         if (!isInlineCaptcha) {
-          lastDetectedVerification = candidateVerification;
-          console.log(`[CONTACT-DISCOVERY] Blocking challenge screen encountered on candidate ${candidate.url}: ${candidateVerification.reason}`);
-          break;
+          const isSynthetic = candidate.reason.startsWith("common path");
+          if (!isSynthetic) {
+            lastDetectedVerification = candidateVerification;
+            console.log(`[CONTACT-DISCOVERY] Blocking challenge screen encountered on candidate ${candidate.url}: ${candidateVerification.reason}`);
+            break;
+          } else {
+            console.log(`[CONTACT-DISCOVERY] Synthetic path ${candidate.url} hit verification screen; skipping synthetic candidate.`);
+            consecutiveSyntheticFailures++;
+            continue;
+          }
         }
       }
 

@@ -36,6 +36,7 @@ interface SettingsFormProps {
     proxyUsername: string;
     hasPassword: boolean;
     proxyBandwidthSaver: boolean;
+    proxyStrategy?: string;
   };
   history: HistoryItem[];
 }
@@ -58,6 +59,7 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
   // Proxy State
   const [proxyFormState, proxyFormAction] = useActionState(updateProxySettingsAction, {});
   const [proxyEnabled, setProxyEnabled] = useState(initialProxySettings.proxyEnabled);
+  const [proxyStrategy, setProxyStrategy] = useState<string>(initialProxySettings.proxyStrategy || "fallback_only");
   const [proxyProtocol, setProxyProtocol] = useState<ProxyProtocol>(
     (initialProxySettings.proxyProtocol as ProxyProtocol) || "http"
   );
@@ -427,6 +429,56 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
                     {proto}
                   </button>
                 ))}
+              </div>
+            </div>
+
+            {/* Routing Strategy Selector */}
+            <div>
+              <label className="block text-sm font-semibold text-ink">
+                Proxy Routing Strategy
+              </label>
+              <input name="proxyStrategy" type="hidden" value={proxyStrategy} />
+              <div className="mt-2 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setProxyStrategy("fallback_only")}
+                  className={`rounded-xl border p-3.5 text-left transition ${
+                    proxyStrategy === "fallback_only"
+                      ? "border-brand bg-brand/5 ring-2 ring-brand/20"
+                      : "border-line bg-white hover:border-slate-300"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-ink flex items-center gap-1.5">
+                      ⚡ Smart Fallback
+                    </span>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                      Recommended
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted leading-relaxed">
+                    Direct connection ($0 cost) first. Proxy activates on-demand only if blocked by 403 or Cloudflare/WAF.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setProxyStrategy("always")}
+                  className={`rounded-xl border p-3.5 text-left transition ${
+                    proxyStrategy === "always"
+                      ? "border-brand bg-brand/5 ring-2 ring-brand/20"
+                      : "border-line bg-white hover:border-slate-300"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-ink">
+                      🔄 Always Proxy
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-muted leading-relaxed">
+                    Routes 100% of website requests through residential proxy regardless of block status.
+                  </p>
+                </button>
               </div>
             </div>
 

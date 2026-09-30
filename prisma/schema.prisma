@@ -29,6 +29,7 @@ model User {
   proxyUsername          String?
   proxyPassword          String?
   proxyBandwidthSaver    Boolean                 @default(true)
+  proxyStrategy          String                  @default("fallback_only")
 }
 
 model AutomationTransaction {

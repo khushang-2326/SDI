@@ -18,7 +18,8 @@ export default async function SettingsPage() {
       proxyPort: true,
       proxyUsername: true,
       proxyPassword: true,
-      proxyBandwidthSaver: true
+      proxyBandwidthSaver: true,
+      proxyStrategy: true
     }
   });
 
@@ -41,7 +42,8 @@ export default async function SettingsPage() {
     proxyPort: userSettings?.proxyPort ? String(userSettings.proxyPort) : "",
     proxyUsername: userSettings?.proxyUsername ?? "",
     hasPassword: Boolean(userSettings?.proxyPassword),
-    proxyBandwidthSaver: userSettings?.proxyBandwidthSaver ?? true
+    proxyBandwidthSaver: userSettings?.proxyBandwidthSaver ?? true,
+    proxyStrategy: (userSettings as any)?.proxyStrategy ?? "fallback_only"
   };
 
   return (

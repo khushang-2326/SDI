@@ -115,6 +115,7 @@ export type AcquireContextOptions = {
   // Use for a bounded retry when a website returns different content to the
   // configured proxy (for example, a scheduler with no visible slots).
   disableProxy?: boolean;
+  forceProxy?: boolean;
   bandwidthSaver?: boolean;
   startupTimeoutMs?: number;
   targetId?: string | number;
@@ -164,6 +165,10 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
 
   // 1. Explicit proxy passed in options
   if (options.proxy?.enabled && options.proxy.host && options.proxy.port) {
+    const strategy = options.proxy.strategy || "fallback_only";
+    if (strategy === "fallback_only" && !options.forceProxy) {
+      return null;
+    }
     const protocol = options.proxy.protocol || "http";
     return {
       server: `${protocol}://${options.proxy.host}:${options.proxy.port}`,
@@ -180,6 +185,7 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
         where: { id: options.userId },
         select: {
           proxyEnabled: true,
+          proxyStrategy: true,
           proxyProtocol: true,
           proxyHost: true,
           proxyPort: true,
@@ -190,6 +196,11 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
       });
 
       if (user?.proxyEnabled && user.proxyHost && user.proxyPort) {
+        const strategy = (user as any).proxyStrategy || "fallback_only";
+        if (strategy === "fallback_only" && !options.forceProxy) {
+          return null; // Smart fallback: use direct connection first ($0 cost)
+        }
+
         const protocol = user.proxyProtocol || "http";
         const password = user.proxyPassword ? decrypt(user.proxyPassword) : undefined;
         return {
@@ -206,6 +217,10 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
 
   // 3. Fallback to environment variable proxy config
   if (config.proxy?.enabled && config.proxy.host && config.proxy.port) {
+    const strategy = config.proxy.strategy || "fallback_only";
+    if (strategy === "fallback_only" && !options.forceProxy) {
+      return null;
+    }
     const protocol = config.proxy.protocol || "http";
     return {
       server: `${protocol}://${config.proxy.host}:${config.proxy.port}`,

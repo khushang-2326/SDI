@@ -1408,22 +1408,36 @@ async function findPrimaryForm(page: Page) {
   await unhideHiddenFormContainers(page);
   const candidates: Locator[] = [];
   const addVisibleForms = async (forms: Locator) => {
-    const count = await forms.count().catch(() => 0);
-    for (let index = 0; index < count; index++) {
-      const form = forms.nth(index);
-      if (await form.isVisible().catch(() => false)) candidates.push(form);
+    try {
+      const count = await Promise.race([
+        forms.count(),
+        new Promise<number>((_, rej) => setTimeout(() => rej(new Error("forms count timeout")), 1500))
+      ]).catch(() => 0);
+      for (let index = 0; index < count; index++) {
+        const form = forms.nth(index);
+        const isVis = await Promise.race([
+          form.isVisible(),
+          new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error("form isVisible timeout")), 1000))
+        ]).catch(() => false);
+        if (isVis) candidates.push(form);
+      }
+    } catch {
+      // ignore
     }
   };
 
   await addVisibleForms(page.locator("form"));
   for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
+    if (frame === page.mainFrame() || frame.isDetached() || !frame.url() || frame.url() === "about:blank") continue;
     await addVisibleForms(frame.locator("form"));
   }
 
   let best: { form: Locator; score: number } | null = null;
   for (const form of candidates) {
-    const score = await scorePrimaryForm(form);
+    const score = await Promise.race([
+      scorePrimaryForm(form),
+      new Promise<number>((_, rej) => setTimeout(() => rej(new Error("scorePrimaryForm timeout")), 1500))
+    ]).catch(() => Number.NEGATIVE_INFINITY);
     if (!best || score > best.score) best = { form, score };
   }
   return best?.form ?? null;
@@ -2227,6 +2241,7 @@ export async function submitContactForm({
     const proxy407Promise = new Promise((_, reject) => {
       on407Reject = reject;
     });
+    proxy407Promise.catch(() => {});
     const responseHandler = (res: any) => {
       if (res.status() === 407) {
         proxy407Hit = true;
@@ -2237,7 +2252,7 @@ export async function submitContactForm({
 
     let navResponse: any = null;
     const tNavStart = Date.now();
-    const initialNavTimeout = Math.max(3000, Math.min(15000, timeoutMs));
+    const initialNavTimeout = Math.max(3000, Math.min(30000, timeoutMs));
     try {
       navResponse = await Promise.race([
         activePage.goto(websiteUrl, {
@@ -2262,7 +2277,7 @@ export async function submitContactForm({
         }
       } else {
         try {
-          const remainingCommitTimeout = Math.max(3000, Math.min(10000, timeoutMs - (Date.now() - tNavStart)));
+          const remainingCommitTimeout = Math.max(5000, timeoutMs - (Date.now() - tNavStart));
           navResponse = await Promise.race([
             activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
             proxy407Promise

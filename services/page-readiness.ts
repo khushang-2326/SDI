@@ -190,18 +190,24 @@ export async function waitForUniversalPageReadiness(
       let hasFrameBooking = false;
       if (!pageData.hasForms || !pageData.hasBooking) {
         for (const frame of page.frames()) {
-          if (frame === page.mainFrame()) continue;
+          if (frame === page.mainFrame() || frame.isDetached() || !frame.url() || frame.url() === "about:blank") continue;
           try {
-            const frameHasForms = await frame.evaluate(() => {
-              const el = document.querySelector("input:not([type='hidden']):not([type='search']), textarea, select");
-              return Boolean(el);
-            }).catch(() => false);
+            const frameHasForms = await Promise.race([
+              frame.evaluate(() => {
+                const el = document.querySelector("input:not([type='hidden']):not([type='search']), textarea, select");
+                return Boolean(el);
+              }),
+              new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error("frame forms timeout")), 1200))
+            ]).catch(() => false);
             if (frameHasForms) hasFrameForms = true;
 
-            const frameHasBooking = await frame.evaluate(() => {
-              const el = document.querySelector(".vdpCell, [class*='calendar'], [class*='timeslot'], [class*='scheduler']");
-              return Boolean(el);
-            }).catch(() => false);
+            const frameHasBooking = await Promise.race([
+              frame.evaluate(() => {
+                const el = document.querySelector(".vdpCell, [class*='calendar'], [class*='timeslot'], [class*='scheduler']");
+                return Boolean(el);
+              }),
+              new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error("frame booking timeout")), 1200))
+            ]).catch(() => false);
             if (frameHasBooking) hasFrameBooking = true;
           } catch {
             // Frame detached or cross-origin restricted

@@ -7,6 +7,7 @@ import { submitHubSpotBooking } from "@/services/hubspot-booking-automation";
 import { discoverSubmissionTargets } from "@/services/submission-target-discovery";
 import {
   isProxyAuthenticationFailure,
+  isBlockedDirectConnection,
   ProxyAuthenticationError,
   PROXY_407_MESSAGE,
   redactProxyDetails
@@ -173,14 +174,15 @@ async function executeTarget({
     (bookingResult.errorMessage?.includes("did not render") || bookingResult.status === "booking_widget_found")
   ) {
     try {
+      const fallbackUrl = (typeof target.metadata?.discoveredFrom === "string" ? target.metadata.discoveredFrom : null) || target.url;
       const contactFallback = await submitContactForm({
-        websiteUrl: target.url,
+        websiteUrl: fallbackUrl,
         leadData,
         submit: liveSubmit,
         browserContext,
         skipPersist: true,
         userId,
-        timeoutMs: Math.min(timeoutMs, 10000)
+        timeoutMs
       });
       if (contactFallback.status === "success" || contactFallback.status === "dry_run_ready_to_book") {
         return contactFallback;
@@ -205,7 +207,8 @@ export async function runMultiTargetAutomation({
   userId,
   deadlineAt,
   headless = true,
-  isDirectRetry = false
+  isDirectRetry = false,
+  isProxyRetry = false
 }: {
   websiteUrl: string;
   leadData: LeadData;
@@ -219,6 +222,7 @@ export async function runMultiTargetAutomation({
   deadlineAt?: number;
   headless?: boolean;
   isDirectRetry?: boolean;
+  isProxyRetry?: boolean;
 }): Promise<MultiTargetRunResult> {
   const executionId = `exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   console.log(`[TARGET_LIFECYCLE:${executionId}] TARGET_STARTED url=${websiteUrl}`);
@@ -228,6 +232,7 @@ export async function runMultiTargetAutomation({
   let targetSucceeded = false;
   let timedOut = false;
   let encounteredProxyFailure = false;
+  let encounteredBlockFailure = false;
   const attemptedKeys = new Set<string>();
 
   let deadlineTimerActive = deadlineAt !== undefined;
@@ -365,7 +370,10 @@ export async function runMultiTargetAutomation({
       const errLower = (result.errorMessage || "").toLowerCase();
       if (isProxyAuthenticationFailure(result.errorMessage)) {
         encounteredProxyFailure = true;
-      } else if (!isDirectRetry && (errLower.includes("403") || errLower.includes("forbidden")) && !errLower.includes("turnstile") && !errLower.includes("challenge") && !errLower.includes("robot challenge")) {
+      } else if (!isDirectRetry && !isProxyRetry && isBlockedDirectConnection(result.errorMessage)) {
+        console.log(`[SMART-PROXY-FALLBACK] Target direct access blocked on ${target.url} (${result.errorMessage}). Triggering on-demand proxy fallback...`);
+        encounteredBlockFailure = true;
+      } else if (isProxyRetry && (errLower.includes("403") || errLower.includes("forbidden")) && !errLower.includes("turnstile") && !errLower.includes("challenge") && !errLower.includes("robot challenge")) {
         // Legitimate datacenter proxy IP block: server rejected proxy, allow direct connection retry
         console.log(`[PROXY-FALLBACK] Legitimate HTTP 403 detected on ${target.url}. Triggering direct connection fallback...`);
         encounteredProxyFailure = true;
@@ -387,7 +395,67 @@ export async function runMultiTargetAutomation({
         targetSucceeded = true;
         break;
       }
-      if (encounteredProxyFailure) break;
+      if (encounteredProxyFailure || encounteredBlockFailure) break;
+    }
+  }
+
+  async function triggerProxyFallbackRetry(reasonForRetry: string): Promise<MultiTargetRunResult> {
+    stopDeadlineTimer();
+    const remainingProxyMs = deadlineAt !== undefined ? deadlineAt - Date.now() : timeoutMs;
+    if (remainingProxyMs <= 5000) {
+      return {
+        discoveryReason: "Proxy fallback skipped: insufficient remaining time budget.",
+        checkedUrls: [websiteUrl],
+        targets: [],
+        attempts
+      };
+    }
+    console.log(`[SMART-PROXY-FALLBACK] Acquiring on-demand proxy context for ${websiteUrl} due to: ${reasonForRetry}`);
+    let proxyContext: BrowserContext | null = null;
+    try {
+      proxyContext = await acquireContext({
+        headless: headless ?? true,
+        userId,
+        forceProxy: true,
+        disableProxy: false,
+        bandwidthSaver: true,
+        startupTimeoutMs: Math.min(10_000, remainingProxyMs)
+      });
+      const proxyRun = await runMultiTargetAutomation({
+        websiteUrl,
+        leadData,
+        bookingPreferences,
+        liveSubmit,
+        browserContext: proxyContext,
+        timeoutMs: Math.min(MAX_ATTEMPT_TIMEOUT_MS, remainingProxyMs),
+        cachedTargets,
+        callbacks,
+        userId,
+        deadlineAt: deadlineAt,
+        headless,
+        isDirectRetry: false,
+        isProxyRetry: true
+      });
+      const proxyHasSuccess = proxyRun.attempts.some((a) => isSuccessful(a.result));
+      if (proxyHasSuccess) {
+        proxyRun.discoveryReason = [
+          "Smart Fallback: resolved via on-demand proxy",
+          proxyRun.discoveryReason
+        ].filter(Boolean).join("; ");
+      }
+      return proxyRun;
+    } catch (proxyErr) {
+      console.warn(`[SMART-PROXY-FALLBACK] Proxy fallback failed on ${websiteUrl}:`, proxyErr);
+      return {
+        discoveryReason: `Proxy fallback attempted: ${proxyErr instanceof Error ? proxyErr.message : String(proxyErr)}`,
+        checkedUrls: [websiteUrl],
+        targets: [],
+        attempts
+      };
+    } finally {
+      if (proxyContext) {
+        await releaseContext(proxyContext).catch(() => undefined);
+      }
     }
   }
 
@@ -423,7 +491,8 @@ export async function runMultiTargetAutomation({
         userId,
         deadlineAt: deadlineAt, // strictly adhere to the overall target deadline!
         headless,
-        isDirectRetry: true
+        isDirectRetry: true,
+        isProxyRetry: false
       });
       const directHasSuccess = directRun.attempts.some((a) => isSuccessful(a.result));
       if (directHasSuccess) {
@@ -451,6 +520,9 @@ export async function runMultiTargetAutomation({
     await executeTargets(cachedContactTargets);
     if (encounteredProxyFailure && !isDirectRetry) {
       return triggerDirectRetry("Cached target encountered proxy authentication failure.");
+    }
+    if (encounteredBlockFailure && !isProxyRetry && !isDirectRetry) {
+      return triggerProxyFallbackRetry("Cached target encountered direct block.");
     }
     if (targetSucceeded) {
       stopDeadlineTimer();
@@ -488,10 +560,14 @@ export async function runMultiTargetAutomation({
     });
     if (isProxyAuthenticationFailure(discovery.reason)) {
       encounteredProxyFailure = true;
+    } else if (discovery.targets.length === 0 && isBlockedDirectConnection(discovery.reason)) {
+      encounteredBlockFailure = true;
     }
   } catch (discoveryErr) {
     if (isProxyAuthenticationFailure(discoveryErr)) {
       encounteredProxyFailure = true;
+    } else if (isBlockedDirectConnection(discoveryErr)) {
+      encounteredBlockFailure = true;
     }
     discovery = {
       websiteUrl,
@@ -507,6 +583,9 @@ export async function runMultiTargetAutomation({
   if (encounteredProxyFailure && !isDirectRetry) {
     return triggerDirectRetry(discovery.reason);
   }
+  if (encounteredBlockFailure && !isProxyRetry && !isDirectRetry) {
+    return triggerProxyFallbackRetry(discovery.reason);
+  }
 
   await callbacks.onTargetsDiscovered?.(discovery.targets, discovery.reason);
   const discoveredContactTargets = discovery.targets.filter(
@@ -519,10 +598,41 @@ export async function runMultiTargetAutomation({
   if (encounteredProxyFailure && !isDirectRetry) {
     return triggerDirectRetry("Target execution encountered proxy authentication failure.");
   }
-  if (!targetSucceeded && !encounteredProxyFailure) {
+  if (encounteredBlockFailure && !isProxyRetry && !isDirectRetry) {
+    return triggerProxyFallbackRetry("Target execution encountered direct block.");
+  }
+  if (!targetSucceeded && !encounteredProxyFailure && !encounteredBlockFailure) {
     await executeTargets(bookingFallbackTargets);
     if (encounteredProxyFailure && !isDirectRetry) {
       return triggerDirectRetry("Target execution encountered proxy authentication failure.");
+    }
+    if (encounteredBlockFailure && !isProxyRetry && !isDirectRetry) {
+      return triggerProxyFallbackRetry("Target execution encountered direct block.");
+    }
+  }
+
+  // If no discovered targets were found or executed, and we haven't tried the direct entered URL yet, execute direct fallback
+  if (
+    !targetSucceeded &&
+    !encounteredProxyFailure &&
+    !encounteredBlockFailure &&
+    attempts.length === 0 &&
+    websiteUrl
+  ) {
+    const directFallbackTarget: DiscoveredSubmissionTarget = {
+      targetType: "contact_form",
+      url: websiteUrl,
+      executionOrder: 1,
+      confidence: 75,
+      reason: "Direct URL fallback execution",
+      screenshotPath: null
+    };
+    await executeTargets([directFallbackTarget]);
+    if (encounteredProxyFailure && !isDirectRetry) {
+      return triggerDirectRetry("Direct fallback encountered proxy authentication failure.");
+    }
+    if (encounteredBlockFailure && !isProxyRetry && !isDirectRetry) {
+      return triggerProxyFallbackRetry("Direct fallback encountered direct block.");
     }
   }
 

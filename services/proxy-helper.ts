@@ -103,3 +103,71 @@ export function isProxyAuthenticationFailure(
 
   return false;
 }
+
+/**
+ * Checks whether an error, HTTP status code, or page message indicates that
+ * a direct connection was blocked by a firewall, WAF, Cloudflare challenge, or HTTP 403.
+ * This triggers on-demand proxy fallback retry only when necessary.
+ */
+export function isBlockedDirectConnection(
+  error: unknown,
+  responseStatus?: number | null,
+  pageText?: string | null
+): boolean {
+  if (
+    responseStatus === 403 ||
+    responseStatus === 429 ||
+    responseStatus === 503 ||
+    responseStatus === 202 ||
+    responseStatus === 406
+  ) {
+    return true;
+  }
+
+  const errStr = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
+
+  if (
+    errStr.includes("403") ||
+    errStr.includes("429") ||
+    errStr.includes("503") ||
+    errStr.includes("202") ||
+    errStr.includes("forbidden") ||
+    errStr.includes("access denied") ||
+    errStr.includes("cloudflare") ||
+    errStr.includes("robot challenge") ||
+    errStr.includes("human verification") ||
+    errStr.includes("bot challenge") ||
+    errStr.includes("waf") ||
+    errStr.includes("turnstile") ||
+    errStr.includes("blocked by security") ||
+    errStr.includes("unsupported verification") ||
+    errStr.includes("target discovery exceeded overall budget limit") ||
+    errStr.includes("timeout 10000ms exceeded") ||
+    errStr.includes("navigation timeout") ||
+    errStr.includes("err_connection_reset") ||
+    errStr.includes("err_connection_refused") ||
+    errStr.includes("err_connection_timed_out") ||
+    errStr.includes("err_aborted")
+  ) {
+    return true;
+  }
+
+  if (pageText) {
+    const ptLower = pageText.toLowerCase();
+    if (
+      ptLower.includes("403 forbidden") ||
+      ptLower.includes("access denied") ||
+      ptLower.includes("attention required! | cloudflare") ||
+      ptLower.includes("checking your browser before accessing") ||
+      ptLower.includes("human verification required") ||
+      ptLower.includes("security check to access") ||
+      ptLower.includes("just a moment...") ||
+      ptLower.includes("verify you are human")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+

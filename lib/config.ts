@@ -37,6 +37,7 @@ export const config = {
   },
   proxy: {
     enabled: process.env.PROXY_ENABLED === "true",
+    strategy: (process.env.PROXY_STRATEGY as "fallback_only" | "always" | "disabled") || "fallback_only",
     protocol: (process.env.PROXY_PROTOCOL as "http" | "https" | "socks5") || "http",
     host: process.env.PROXY_HOST || "",
     port: positiveInteger(process.env.PROXY_PORT, 10000, 65535),

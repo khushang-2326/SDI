@@ -1,7 +1,9 @@
 export type ProxyProtocol = "http" | "https" | "socks5";
+export type ProxyStrategy = "fallback_only" | "always" | "disabled";
 
 export interface ProxyConfig {
   enabled: boolean;
+  strategy?: ProxyStrategy;
   protocol: ProxyProtocol;
   host: string;
   port: number;
@@ -11,6 +13,7 @@ export interface ProxyConfig {
 }
 
 export interface ParsedProxy {
+  strategy?: ProxyStrategy;
   protocol: ProxyProtocol;
   host: string;
   port: number;

@@ -690,27 +690,40 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "full_name")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (firstNameCandidates.length > 0) {
+  if (firstNameCandidates.length > 0 && lastNameCandidates.length > 0) {
     const bestFirst = firstNameCandidates[0];
     const fVal = nameParts.firstName || "John";
     await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
-  }
 
-  if (lastNameCandidates.length > 0) {
     const bestLast = lastNameCandidates[0];
     const lVal = nameParts.lastName || "Miller";
     await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
-  }
+  } else if (firstNameCandidates.length > 0 && lastNameCandidates.length === 0 && fullNameCandidates.length > 0) {
+    const bestFirst = firstNameCandidates[0];
+    const fVal = nameParts.firstName || "John";
+    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
 
-  // If first and last name were NOT both present/filled, and a full_name candidate exists:
-  if (!filledFields.includes("firstName") && !filledFields.includes("lastName")) {
-    if (fullNameCandidates.length > 0) {
-      const bestFull = fullNameCandidates[0];
-      const fnVal = leadData.fullName || "John Miller";
-      await fillSignal(bestFull.signal, "full_name", "fullName", fnVal, bestFull.cls.confidence, bestFull.cls.evidence, leadData.fullName ? "USER_DATA" : "FALLBACK_DATA");
-    } else {
-      skippedFields.push("fullName");
-    }
+    const bestLast = fullNameCandidates[0];
+    const lVal = nameParts.lastName || "Miller";
+    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
+  } else if (firstNameCandidates.length === 0 && lastNameCandidates.length > 0 && fullNameCandidates.length > 0) {
+    const bestFirst = fullNameCandidates[0];
+    const fVal = nameParts.firstName || "John";
+    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
+
+    const bestLast = lastNameCandidates[0];
+    const lVal = nameParts.lastName || "Miller";
+    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
+  } else if (firstNameCandidates.length > 0) {
+    const bestFirst = firstNameCandidates[0];
+    const fVal = nameParts.firstName || leadData.fullName || "John";
+    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
+  } else if (fullNameCandidates.length > 0) {
+    const bestFull = fullNameCandidates[0];
+    const fnVal = leadData.fullName || "John Miller";
+    await fillSignal(bestFull.signal, "full_name", "fullName", fnVal, bestFull.cls.confidence, bestFull.cls.evidence, leadData.fullName ? "USER_DATA" : "FALLBACK_DATA");
+  } else {
+    skippedFields.push("fullName");
   }
 
   // 3. Phone / Mobile
@@ -1942,16 +1955,20 @@ async function submitBookingWidget({
   };
 }
 
-async function detectSuccess(page: Page) {
-  // Fast-path polling loop: check immediately and every 500ms for up to 6s
-  // Many forms redirect or show confirmation immediately without waiting for background network requests.
+async function detectSuccess(page: Page, isNetworkSuccess?: () => boolean) {
+  // Fast-path polling loop: check immediately and every 300ms for up to 10s
   const startTime = Date.now();
-  const maxWaitMs = 6000;
+  const maxWaitMs = 10000;
 
   while (Date.now() - startTime < maxWaitMs) {
+    // 0. Check network AJAX success flag
+    if (isNetworkSuccess && isNetworkSuccess()) {
+      return true;
+    }
+
     // 1. Check URL redirect or path
     const currentUrl = page.url().toLowerCase();
-    if (/(thank[_-]?you|thanks|success|confirmed|submission-received|message-sent|inquiry-received)/i.test(currentUrl)) {
+    if (/(thank[_-]?you|thanks|success|confirmed|submission-received|message-sent|inquiry-received|\/sent|\/done)/i.test(currentUrl)) {
       return true;
     }
 
@@ -1963,7 +1980,12 @@ async function detectSuccess(page: Page) {
     const textMatched = await checkSuccessText(page);
     if (textMatched) return true;
 
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(300);
+  }
+
+  // Final check on network flag
+  if (isNetworkSuccess && isNetworkSuccess()) {
+    return true;
   }
 
   return false;
@@ -1972,15 +1994,17 @@ async function detectSuccess(page: Page) {
 async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
   const successSelectors = [
     ".wpcf7-mail-sent-ok:visible",
-    ".wpcf7-response-output:has-text('Thank')",
-    ".wpcf7-response-output:has-text('sent')",
+    ".wpcf7-response-output:not(.wpcf7-validation-errors):not(.wpcf7-mail-sent-ng):not(.wpcf7-spam-blocked):visible",
     ".elementor-message-success:visible",
     ".w-form-done:visible",
+    ".w-form-done[style*='display: block']",
+    ".w-form-done:not([style*='display: none'])",
     ".form-submission-success:visible",
     ".alert-success:visible",
     ".success-message:visible",
     "[role='alert']:has-text('thank')",
     "[role='alert']:has-text('sent')",
+    "[role='alert']:has-text('success')",
     ".submitted-message:visible",
     ".form-success:visible",
     ".gform_confirmation_message:visible",
@@ -1991,7 +2015,15 @@ async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
     ".ff-message-success:visible",
     "[data-form-status='success']:visible",
     "[aria-live='polite']:has-text('thank')",
-    ".form-feedback:has-text('thank')"
+    "[aria-live='polite']:has-text('success')",
+    ".form-feedback:has-text('thank')",
+    ".forminator-response-message:visible",
+    ".hubspot-form-success:visible",
+    ".hs-form-success:visible",
+    ".toast-success:visible",
+    ".toastr-success:visible",
+    ".iziToast-success:visible",
+    ".swal2-success:visible"
   ];
 
   for (const selector of successSelectors) {
@@ -2458,14 +2490,63 @@ export async function submitContactForm({
       throw new Error("No visible submit button found.");
     }
 
+    let networkReportedSuccess = false;
+    const ajaxResponseListener = (res: any) => {
+      try {
+        const url = res.url().toLowerCase();
+        const status = res.status();
+        if (
+          status >= 200 &&
+          status < 300 &&
+          (url.includes("wp-json") ||
+            url.includes("admin-ajax") ||
+            url.includes("feedback") ||
+            url.includes("contact") ||
+            url.includes("submit") ||
+            url.includes("forms") ||
+            url.includes("hsforms") ||
+            url.includes("formspree") ||
+            url.includes("web3forms") ||
+            url.includes("getform") ||
+            url.includes("leadconnector"))
+        ) {
+          res.text().then((text: string) => {
+            if (
+              text &&
+              (text.includes('"status":"mail_sent"') ||
+                text.includes('"success":true') ||
+                text.includes('"status":"success"') ||
+                text.includes('"result":"success"') ||
+                /thank|received|mail_sent/i.test(text)) &&
+              !text.includes('"status":"spam"') &&
+              !text.includes('"status":"validation_failed"')
+            ) {
+              networkReportedSuccess = true;
+            }
+          }).catch(() => {});
+        }
+      } catch {}
+    };
+
     if (shouldSubmit) {
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => undefined);
-      // Wait for either navigation (redirect) or immediate DOM update/AJAX completion
+
+      // Natural mouse movement towards submit button for anti-bot / reCAPTCHA v3 confidence
       try {
-        await Promise.allSettled([
-          page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 6000 }),
-          submitButton.click({ timeout: 8000 })
+        const box = await submitButton.boundingBox();
+        if (box) {
+          await activePage.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+        }
+      } catch {}
+
+      activePage.on("response", ajaxResponseListener);
+
+      // Wait for either navigation (redirect) or immediate DOM update/AJAX completion without blocking 6s
+      try {
+        await Promise.race([
+          page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 4000 }),
+          submitButton.click({ timeout: 6000 })
         ]);
       } catch {
         // Fallback: requestSubmit on form directly if click fails
@@ -2480,7 +2561,13 @@ export async function submitContactForm({
       }
     }
 
-    const success = shouldSubmit ? await detectSuccess(page) : true;
+    const success = shouldSubmit
+      ? (networkReportedSuccess || await detectSuccess(page, () => networkReportedSuccess))
+      : true;
+
+    if (shouldSubmit) {
+      activePage.off("response", ajaxResponseListener);
+    }
     screenshotPath = await takeScreenshot(page, websiteUrl, shouldSubmit ? "after-submit" : "dry-run");
 
     if (!success) {

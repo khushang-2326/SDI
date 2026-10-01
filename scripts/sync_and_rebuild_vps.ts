@@ -12,6 +12,8 @@ conn.on('ready', () => {
     const filesToSync = [
       'services/proxy-helper.ts',
       'services/contact-form-automation.ts',
+      'services/field-classifier.ts',
+      'services/worker-pool.ts',
       'services/multi-target-automation.ts',
       'services/submission-target-discovery.ts',
       'app/(dashboard)/settings/page.tsx',

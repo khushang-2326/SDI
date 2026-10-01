@@ -222,8 +222,8 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
   ]
 };
 
-export function splitFullName(fullName: string): { firstName: string; middleName: string; lastName: string } {
-  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+export function splitFullName(fullName?: string | null): { firstName: string; middleName: string; lastName: string } {
+  const parts = (fullName || "").trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return { firstName: "", middleName: "", lastName: "" };
   if (parts.length === 1) return { firstName: parts[0], middleName: "", lastName: parts[0] };
   if (parts.length === 2) return { firstName: parts[0], middleName: "", lastName: parts[1] };
@@ -377,7 +377,7 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
         const select = input as HTMLSelectElement;
         selectOptions = Array.from(select.options).map((opt) => ({
           text: (opt.textContent ?? "").replace(/\s+/g, " ").trim(),
-          value: opt.value.trim(),
+          value: (opt.value || "").trim(),
           disabled: opt.disabled
         }));
       }

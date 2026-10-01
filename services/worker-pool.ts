@@ -263,12 +263,21 @@ async function processSingleTarget(
       const multiTargetRun = runMultiTargetAutomation({
         websiteUrl: website.websiteUrl,
         leadData: {
-          fullName: payloadFields.get("fullName") || "",
+          fullName: payloadFields.get("fullName") || payloadFields.get("name") || "",
+          firstName: payloadFields.get("firstName") || "",
+          lastName: payloadFields.get("lastName") || "",
           email: payloadFields.get("email") || "",
-          mobile: payloadFields.get("mobile") || payloadFields.get("mobileNumber") || "",
+          mobile: payloadFields.get("mobile") || payloadFields.get("mobileNumber") || payloadFields.get("phone") || "",
+          phone: payloadFields.get("phone") || payloadFields.get("mobile") || "",
+          city: payloadFields.get("city") || "",
+          state: payloadFields.get("state") || "",
+          country: payloadFields.get("country") || "",
           address: payloadFields.get("address") || "",
-          message: payloadFields.get("message") || "",
-          companyName: payloadFields.get("companyName") || ""
+          message: payloadFields.get("message") || payloadFields.get("inquiry") || "",
+          companyName: payloadFields.get("companyName") || payloadFields.get("company") || "",
+          website: payloadFields.get("website") || payloadFields.get("websiteUrl") || "",
+          jobTitle: payloadFields.get("jobTitle") || payloadFields.get("role") || "",
+          subject: payloadFields.get("subject") || ""
         },
         bookingPreferences: {
           preferredDate: payloadFields.get("preferredDate"),

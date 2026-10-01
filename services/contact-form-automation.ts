@@ -360,7 +360,7 @@ async function safelyFillCityField(
     const targetNorm = val.toLowerCase();
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-      const value = option.value.trim().toLowerCase();
+      const value = (option.value || "").trim().toLowerCase();
       return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
   }, targetVal).catch(() => -1);
@@ -396,7 +396,7 @@ async function safelyFillStateField(
     const targetNorm = val.toLowerCase();
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-      const value = option.value.trim().toLowerCase();
+      const value = (option.value || "").trim().toLowerCase();
       return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
   }, targetVal).catch(() => -1);
@@ -432,7 +432,7 @@ async function safelyFillCountryField(
     const targetNorm = val.toLowerCase();
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-      const value = option.value.trim().toLowerCase();
+      const value = (option.value || "").trim().toLowerCase();
       return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
   }, targetVal).catch(() => -1);
@@ -2011,6 +2011,8 @@ async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
     ".nf-response-msg:visible",
     ".fluentform-submission-success:visible",
     ".wpforms-confirmation-container:visible",
+    ".wpforms-confirmation-scroll:visible",
+    ".wpforms-confirmation-container-full:visible",
     ".frm_message:visible",
     ".ff-message-success:visible",
     "[data-form-status='success']:visible",
@@ -2023,7 +2025,13 @@ async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
     ".toast-success:visible",
     ".toastr-success:visible",
     ".iziToast-success:visible",
-    ".swal2-success:visible"
+    ".swal2-success:visible",
+    ".caldera-grid .alert-success",
+    ".super-msg.super-success:visible",
+    "[data-status='mail_sent']:visible",
+    "[data-status='sent']:visible",
+    "form.sent:visible",
+    ".wpcf7 form.sent:visible"
   ];
 
   for (const selector of successSelectors) {
@@ -2062,6 +2070,12 @@ async function checkSuccessText(page: Page): Promise<boolean> {
     "request submitted",
     "form submitted successfully",
     "as soon as possible",
+    "message successfully sent",
+    "email sent successfully",
+    "we received your message",
+    "your request has been sent",
+    "thanks for connecting",
+    "thanks for your message",
     // Multilingual Success Patterns
     "gracias por contactar",
     "mensaje enviado",
@@ -2090,14 +2104,13 @@ async function checkSuccessText(page: Page): Promise<boolean> {
     return true;
   }
 
-  // Also check child frames (e.g. Dubsado, HubSpot, Typeform frames)
+  // Also check child iframes
   for (const frame of page.frames()) {
     if (frame === page.mainFrame()) continue;
-    const frameUrl = frame.url().toLowerCase();
-    if (/(thank[_-]?you|thanks|success|confirmed)/i.test(frameUrl)) return true;
     const frameText = (await frame.locator("body").innerText({ timeout: 1000 }).catch(() => ""))
       .toLowerCase()
-      .replace(/\s+/g, " ");
+    const frameUrl = frame.url().toLowerCase();
+    if (/(thank[_-]?you|thanks|success|confirmed)/i.test(frameUrl)) return true;
     if (successPatterns.some((pattern) => frameText.includes(pattern))) {
       return true;
     }
@@ -2497,7 +2510,7 @@ export async function submitContactForm({
         const status = res.status();
         if (
           status >= 200 &&
-          status < 300 &&
+          status < 400 &&
           (url.includes("wp-json") ||
             url.includes("admin-ajax") ||
             url.includes("feedback") ||
@@ -2508,6 +2521,11 @@ export async function submitContactForm({
             url.includes("formspree") ||
             url.includes("web3forms") ||
             url.includes("getform") ||
+            url.includes("elementor") ||
+            url.includes("ninja") ||
+            url.includes("fluent") ||
+            url.includes("forminator") ||
+            url.includes("caldera") ||
             url.includes("leadconnector"))
         ) {
           res.text().then((text: string) => {
@@ -2517,9 +2535,13 @@ export async function submitContactForm({
                 text.includes('"success":true') ||
                 text.includes('"status":"success"') ||
                 text.includes('"result":"success"') ||
-                /thank|received|mail_sent/i.test(text)) &&
+                text.includes('"sent":true') ||
+                text.includes('"code":"ok"') ||
+                /thank|received|mail_sent|success|submitted/i.test(text)) &&
               !text.includes('"status":"spam"') &&
-              !text.includes('"status":"validation_failed"')
+              !text.includes('"status":"validation_failed"') &&
+              !text.includes('"status":"error"') &&
+              !text.includes('"success":false')
             ) {
               networkReportedSuccess = true;
             }
@@ -2542,14 +2564,17 @@ export async function submitContactForm({
 
       activePage.on("response", ajaxResponseListener);
 
-      // Wait for either navigation (redirect) or immediate DOM update/AJAX completion without blocking 6s
+      // Primary click execution
+      let clickSucceeded = false;
       try {
-        await Promise.race([
-          page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 4000 }),
-          submitButton.click({ timeout: 6000 })
-        ]);
+        await submitButton.click({ timeout: 4000 });
+        clickSucceeded = true;
       } catch {
-        // Fallback: requestSubmit on form directly if click fails
+        clickSucceeded = false;
+      }
+
+      // Secondary fallback: trigger requestSubmit directly on form if click failed or had no effect
+      if (!clickSucceeded) {
         await submitButton.evaluate((btn) => {
           const form = btn.closest("form");
           if (form && typeof form.requestSubmit === "function") {

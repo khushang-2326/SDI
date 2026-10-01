@@ -309,8 +309,8 @@ async function blockHeavyAssets(page: Page) {
       return;
     }
 
-    const isHeavyMedia = ["media", "font"].includes(resourceType) ||
-      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url);
+    const isHeavyMedia = ["media", "font", "image"].includes(resourceType) ||
+      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v|png|jpg|jpeg|webp|gif|svg|ico|bmp|tiff|avif)(\?.*)?$/i.test(url);
 
     const isTrackerOrAd =
       url.includes("google-analytics") ||

@@ -22,6 +22,14 @@ interface HistoryItem {
   createdAt: Date;
 }
 
+interface ProxyLogItem {
+  id: string;
+  message: string;
+  details: string | null;
+  createdAt: Date;
+  level: string;
+}
+
 interface SettingsFormProps {
   initialSettings: {
     captchaEnabled: boolean;
@@ -39,9 +47,22 @@ interface SettingsFormProps {
     proxyStrategy?: string;
   };
   history: HistoryItem[];
+  proxyUsageStats?: {
+    totalAttempts: number;
+    proxyLogsCount: number;
+    recentProxyLogs: ProxyLogItem[];
+  };
 }
 
-export function SettingsForm({ initialSettings, initialProxySettings, history }: SettingsFormProps) {
+export function SettingsForm({
+  initialSettings,
+  initialProxySettings,
+  history,
+  proxyUsageStats
+}: SettingsFormProps) {
+  // Active Tab for Right-hand analytics: "captcha" | "proxy"
+  const [activeTab, setActiveTab] = useState<"captcha" | "proxy">("captcha");
+
   // CAPTCHA State
   const [captchaFormState, captchaFormAction] = useActionState(updateCaptchaSettingsAction, {});
   const [providerSearch, setProviderSearch] = useState("");
@@ -74,16 +95,7 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
   const [isProxyPending, startProxyTransition] = useTransition();
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
 
-  // Server Actions reset native form controls after a save. Reapply the
-  // values confirmed by the database so the visible switches cannot drift
-  // from the saved CAPTCHA or proxy configuration.
-  useEffect(() => {
-    if (!captchaFormState.success) return;
-    if (typeof captchaFormState.captchaEnabled === "boolean") {
-      setCaptchaEnabled(captchaFormState.captchaEnabled);
-    }
-  }, [captchaFormState]);
-
+  // Synchronize with database props whenever server revalidates or mounts
   useEffect(() => {
     if (typeof initialSettings.captchaEnabled === "boolean") {
       setCaptchaEnabled(initialSettings.captchaEnabled);
@@ -95,6 +107,62 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
       setApiKeyInput("••••••••");
     }
   }, [initialSettings.captchaEnabled, initialSettings.captchaProvider, initialSettings.hasKey]);
+
+  useEffect(() => {
+    setProxyEnabled(initialProxySettings.proxyEnabled);
+    setProxyStrategy(initialProxySettings.proxyStrategy || "fallback_only");
+    setProxyProtocol((initialProxySettings.proxyProtocol as ProxyProtocol) || "http");
+    setProxyHost(initialProxySettings.proxyHost || "");
+    setProxyPort(initialProxySettings.proxyPort || "");
+    setProxyUsername(initialProxySettings.proxyUsername || "");
+    if (initialProxySettings.hasPassword && !proxyPassword) {
+      setProxyPassword("••••••••");
+    }
+    setProxyBandwidthSaver(initialProxySettings.proxyBandwidthSaver);
+  }, [
+    initialProxySettings.proxyEnabled,
+    initialProxySettings.proxyStrategy,
+    initialProxySettings.proxyProtocol,
+    initialProxySettings.proxyHost,
+    initialProxySettings.proxyPort,
+    initialProxySettings.proxyUsername,
+    initialProxySettings.hasPassword,
+    initialProxySettings.proxyBandwidthSaver
+  ]);
+
+  // Client-side LocalStorage Auto-backup so entered values are never lost on accidental navigation
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const cached = localStorage.getItem("sdi_form_backup");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (!initialProxySettings.proxyHost && parsed.proxyHost) setProxyHost(parsed.proxyHost);
+        if (!initialProxySettings.proxyPort && parsed.proxyPort) setProxyPort(parsed.proxyPort);
+        if (!initialProxySettings.proxyUsername && parsed.proxyUsername) setProxyUsername(parsed.proxyUsername);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const saveToLocalBackup = (updates: Record<string, any>) => {
+    if (typeof window === "undefined") return;
+    try {
+      const current = JSON.parse(localStorage.getItem("sdi_form_backup") || "{}");
+      localStorage.setItem("sdi_form_backup", JSON.stringify({ ...current, ...updates }));
+    } catch {
+      // ignore
+    }
+  };
+
+  // Reapply server confirmation after save actions
+  useEffect(() => {
+    if (!captchaFormState.success) return;
+    if (typeof captchaFormState.captchaEnabled === "boolean") {
+      setCaptchaEnabled(captchaFormState.captchaEnabled);
+    }
+  }, [captchaFormState]);
 
   useEffect(() => {
     if (!proxyFormState.success) return;
@@ -152,6 +220,12 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
     setProxyPort(String(parsed.port));
     if (parsed.username) setProxyUsername(parsed.username);
     if (parsed.password) setProxyPassword(parsed.password);
+    saveToLocalBackup({
+      proxyProtocol: parsed.protocol,
+      proxyHost: parsed.host,
+      proxyPort: String(parsed.port),
+      proxyUsername: parsed.username
+    });
     setQuickImportMessage(`✓ Auto-filled: ${parsed.host}:${parsed.port} (${parsed.protocol.toUpperCase()})`);
     setRawQuickImport("");
   };
@@ -328,7 +402,7 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
             {/* Save state status */}
             {captchaFormState.success && (
               <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-700 text-center card-enter">
-                CAPTCHA settings saved successfully.
+                CAPTCHA settings saved permanently.
               </div>
             )}
             {captchaFormState.error && (
@@ -339,7 +413,7 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
           </div>
         </form>
 
-        {/* 2. Proxy Configurations (Proxy-Seller & Any Universal Provider) */}
+        {/* 2. Proxy Configurations (Proxy-Seller & Universal Provider) */}
         <form action={proxyFormAction} className="rounded-2xl border border-line bg-white p-6 shadow-soft card-enter">
           <div className="flex items-center justify-between mb-5">
             <div>
@@ -453,7 +527,7 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
                       ⚡ Smart Fallback
                     </span>
                     <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
-                      Recommended
+                      Zero Cost Default
                     </span>
                   </div>
                   <p className="mt-1 text-[11px] text-muted leading-relaxed">
@@ -492,7 +566,10 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
                   className="mt-2 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm font-mono outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                   id="proxyHost"
                   name="proxyHost"
-                  onChange={(e) => setProxyHost(e.target.value)}
+                  onChange={(e) => {
+                    setProxyHost(e.target.value);
+                    saveToLocalBackup({ proxyHost: e.target.value });
+                  }}
                   placeholder="res.proxy-seller.com"
                   type="text"
                   value={proxyHost}
@@ -506,7 +583,10 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
                   className="mt-2 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm font-mono outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                   id="proxyPort"
                   name="proxyPort"
-                  onChange={(e) => setProxyPort(e.target.value)}
+                  onChange={(e) => {
+                    setProxyPort(e.target.value);
+                    saveToLocalBackup({ proxyPort: e.target.value });
+                  }}
                   placeholder="10000"
                   type="number"
                   value={proxyPort}
@@ -524,7 +604,10 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
                   className="mt-2 w-full rounded-lg border border-line bg-white px-3 py-2.5 text-sm font-mono outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                   id="proxyUsername"
                   name="proxyUsername"
-                  onChange={(e) => setProxyUsername(e.target.value)}
+                  onChange={(e) => {
+                    setProxyUsername(e.target.value);
+                    saveToLocalBackup({ proxyUsername: e.target.value });
+                  }}
                   placeholder="Leave blank if IP whitelist"
                   type="text"
                   value={proxyUsername}
@@ -551,14 +634,14 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
               <div>
                 <div className="flex items-center gap-2">
                   <label className="text-sm font-semibold text-ink" htmlFor="proxyBandwidthSaver">
-                    Bandwidth Saver (Block Media)
+                    Bandwidth Saver (Block Images & Media)
                   </label>
                   <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
                     Saves 95% Data
                   </span>
                 </div>
                 <p className="text-xs text-muted mt-0.5">
-                  Aborts heavy images, videos, and fonts in Playwright so your 1 GB plan lasts for 4,000+ websites.
+                  Aborts images (.png, .jpg, .webp), videos, and webfonts in Playwright so 1 GB lasts for 10,000+ websites.
                 </p>
               </div>
               <label className="relative inline-flex cursor-pointer items-center">
@@ -626,7 +709,7 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
             {/* Save state status */}
             {proxyFormState.success && (
               <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-semibold text-emerald-700 text-center card-enter">
-                Proxy configurations saved successfully.
+                Proxy configurations saved permanently.
               </div>
             )}
             {proxyFormState.error && (
@@ -638,88 +721,235 @@ export function SettingsForm({ initialSettings, initialProxySettings, history }:
         </form>
       </div>
 
-      {/* Right Column: History & Analytics Panel */}
-      <div className="lg:col-span-6 space-y-8">
-        <div className="rounded-2xl border border-line bg-white shadow-soft card-enter flex flex-col overflow-hidden">
-          <div className="border-b border-line px-5 py-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-bold text-ink">Recent Solve History</h2>
-              <p className="text-xs text-muted mt-0.5">Summary of bot checks bypass results.</p>
-            </div>
-            <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-brand">
-              Total bypassed: {history.length}
+      {/* Right Column: History & Analytics Panel (Tabs for CAPTCHA & Proxy) */}
+      <div className="lg:col-span-6 space-y-6">
+        {/* Navigation Tabs */}
+        <div className="flex items-center gap-2 border-b border-line pb-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab("captcha")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+              activeTab === "captcha"
+                ? "bg-brand text-white shadow-sm"
+                : "bg-white text-muted border border-line hover:text-ink"
+            }`}
+          >
+            <span>🤖 CAPTCHA Solves</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+              activeTab === "captcha" ? "bg-white/20 text-white" : "bg-slate-100 text-muted"
+            }`}>
+              {history.length}
             </span>
-          </div>
+          </button>
 
-          <div className="overflow-x-auto [scrollbar-width:thin]">
-            <table className="min-w-full divide-y divide-line text-sm">
-              <thead className="bg-canvas text-left text-xs font-semibold uppercase tracking-wide text-muted">
-                <tr>
-                  <th className="px-4 py-3">Timestamp</th>
-                  <th className="px-4 py-3">Provider</th>
-                  <th className="px-4 py-3">Type</th>
-                  <th className="px-4 py-3">Result</th>
-                  <th className="px-4 py-3">Duration</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {history.map((item) => (
-                  <tr className="hover:bg-canvas/50 transition" key={item.id}>
-                    <td className="px-4 py-3 text-xs text-muted">
-                      {new Date(item.createdAt).toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 font-semibold text-ink capitalize">
-                      {item.provider}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-muted">
-                      {item.captchaType}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${
-                        item.status === "Success" 
-                          ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
-                          : "bg-rose-50 text-rose-700 border border-rose-100"
-                      }`}>
-                        {item.status}
-                      </span>
-                      {item.errorMessage && (
-                        <p className="text-[10px] text-rose-500 mt-0.5 max-w-[200px] truncate" title={item.errorMessage}>
-                          {item.errorMessage}
-                        </p>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-muted">
-                      {(item.durationMs / 1000).toFixed(2)}s
-                    </td>
-                  </tr>
-                ))}
-                {history.length === 0 ? (
-                  <tr>
-                    <td className="px-4 py-12 text-center text-muted" colSpan={5}>
-                      No solves recorded. Complete outreach automation runs to compile history.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab("proxy")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
+              activeTab === "proxy"
+                ? "bg-brand text-white shadow-sm"
+                : "bg-white text-muted border border-line hover:text-ink"
+            }`}
+          >
+            <span>🌐 Proxy Usage & Data</span>
+            <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+              activeTab === "proxy" ? "bg-white/20 text-white" : "bg-slate-100 text-muted"
+            }`}>
+              {proxyUsageStats?.proxyLogsCount ?? 0}
+            </span>
+          </button>
         </div>
+
+        {/* 1. CAPTCHA Analytics & History */}
+        {activeTab === "captcha" && (
+          <div className="rounded-2xl border border-line bg-white shadow-soft card-enter flex flex-col overflow-hidden">
+            <div className="border-b border-line px-5 py-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-ink">Recent Solve History</h2>
+                <p className="text-xs text-muted mt-0.5">Summary of bot checks bypass results.</p>
+              </div>
+              <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-brand">
+                Total bypassed: {history.length}
+              </span>
+            </div>
+
+            <div className="overflow-x-auto [scrollbar-width:thin]">
+              <table className="min-w-full divide-y divide-line text-sm">
+                <thead className="bg-canvas text-left text-xs font-semibold uppercase tracking-wide text-muted">
+                  <tr>
+                    <th className="px-4 py-3">Timestamp</th>
+                    <th className="px-4 py-3">Provider</th>
+                    <th className="px-4 py-3">Type</th>
+                    <th className="px-4 py-3">Result</th>
+                    <th className="px-4 py-3">Duration</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {history.map((item) => (
+                    <tr className="hover:bg-canvas/50 transition" key={item.id}>
+                      <td className="px-4 py-3 text-xs text-muted">
+                        {new Date(item.createdAt).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3 font-semibold text-ink capitalize">
+                        {item.provider}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted">
+                        {item.captchaType}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${
+                          item.status === "Success" 
+                            ? "bg-emerald-50 text-emerald-700 border border-emerald-100" 
+                            : "bg-rose-50 text-rose-700 border border-rose-100"
+                        }`}>
+                          {item.status}
+                        </span>
+                        {item.errorMessage && (
+                          <p className="text-[10px] text-rose-500 mt-0.5 max-w-[200px] truncate" title={item.errorMessage}>
+                            {item.errorMessage}
+                          </p>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-muted">
+                        {(item.durationMs / 1000).toFixed(2)}s
+                      </td>
+                    </tr>
+                  ))}
+                  {history.length === 0 ? (
+                    <tr>
+                      <td className="px-4 py-12 text-center text-muted" colSpan={5}>
+                        No solves recorded. Complete outreach automation runs to compile history.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* 2. Proxy Analytics, Bandwidth Saver & Logs */}
+        {activeTab === "proxy" && (
+          <div className="space-y-6">
+            {/* Proxy Performance & Savings Cards */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="rounded-2xl border border-line bg-white p-4 shadow-soft">
+                <p className="text-xs font-medium text-muted">Total Targets Run</p>
+                <p className="text-2xl font-bold text-ink mt-1">
+                  {proxyUsageStats?.totalAttempts ?? 0}
+                </p>
+                <p className="text-[11px] text-muted mt-1">
+                  Direct & proxied outreach attempts
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4 shadow-soft">
+                <p className="text-xs font-bold text-emerald-800">1 GB Capacity</p>
+                <p className="text-2xl font-bold text-emerald-900 mt-1">
+                  ~12,000 Sites
+                </p>
+                <p className="text-[11px] text-emerald-700 mt-1">
+                  95% saved (Images/Media blocked)
+                </p>
+              </div>
+            </div>
+
+            {/* Bandwidth Breakdown Card */}
+            <div className="rounded-2xl border border-line bg-white p-5 shadow-soft">
+              <h3 className="text-sm font-bold text-ink flex items-center justify-between">
+                <span>Bandwidth Consumption Comparison</span>
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                  Active
+                </span>
+              </h3>
+              
+              <div className="mt-4 space-y-3">
+                <div>
+                  <div className="flex justify-between text-xs font-medium text-ink mb-1">
+                    <span>With Bandwidth Saver (Current)</span>
+                    <span className="font-bold text-emerald-600">~80 KB / site</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full bg-emerald-500 rounded-full" style={{ width: "5%" }} />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs font-medium text-muted mb-1">
+                    <span>Without Optimization (Old Build)</span>
+                    <span className="text-rose-600 font-semibold">~3,500 KB / site</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+                    <div className="h-full bg-rose-400 rounded-full" style={{ width: "100%" }} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 pt-3 border-t border-line text-xs text-muted leading-relaxed">
+                ⚡ <strong>Smart Fallback Active:</strong> SDI tries direct connection ($0) first and only consumes residential proxy bandwidth when a website returns 403 / Cloudflare WAF block.
+              </div>
+            </div>
+
+            {/* Recent Proxy Activity Stream */}
+            <div className="rounded-2xl border border-line bg-white shadow-soft overflow-hidden">
+              <div className="border-b border-line px-5 py-4 flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-ink">Recent Proxy & Fallback Events</h3>
+                  <p className="text-xs text-muted mt-0.5">Logs generated during automated proxy routing.</p>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto [scrollbar-width:thin]">
+                <table className="min-w-full divide-y divide-line text-sm">
+                  <thead className="bg-canvas text-left text-xs font-semibold uppercase tracking-wide text-muted">
+                    <tr>
+                      <th className="px-4 py-3">Timestamp</th>
+                      <th className="px-4 py-3">Event / Message</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line">
+                    {(proxyUsageStats?.recentProxyLogs || []).map((log) => (
+                      <tr className="hover:bg-canvas/50 transition" key={log.id}>
+                        <td className="px-4 py-3 text-xs text-muted whitespace-nowrap">
+                          {new Date(log.createdAt).toLocaleTimeString()}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-ink">
+                          {log.message}
+                          {log.details && (
+                            <p className="text-[10px] text-muted mt-0.5 font-mono">{log.details}</p>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {(!proxyUsageStats?.recentProxyLogs || proxyUsageStats.recentProxyLogs.length === 0) && (
+                      <tr>
+                        <td className="px-4 py-8 text-center text-xs text-muted" colSpan={2}>
+                          No proxy events recorded yet. Smart fallback activates when websites block direct traffic.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Proxy Health & Tips Card */}
         <div className="rounded-2xl border border-line bg-gradient-to-br from-slate-50 to-white p-6 shadow-soft card-enter">
-          <h3 className="text-base font-bold text-ink">Residential Proxy Best Practices</h3>
+          <h3 className="text-base font-bold text-ink">Proxy Optimization Tips</h3>
           <ul className="mt-3 space-y-2.5 text-xs text-muted">
             <li className="flex items-start gap-2">
               <span className="text-brand font-bold">1.</span>
-              <span><strong>Sticky Sessions:</strong> In Proxy-Seller, set rotation method to <em>30 min</em> or <em>60 min</em> so multi-step booking forms (Calendly/HubSpot) don&apos;t reset midway.</span>
+              <span><strong>Smart Fallback:</strong> Keep strategy on <em>Smart Fallback</em> to preserve 100% of proxy GB for websites that genuinely block direct IPs.</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-emerald-600 font-bold">2.</span>
-              <span><strong>Bandwidth Saver:</strong> Keep Bandwidth Saver turned <strong>ON</strong> to avoid loading large videos and banner images, making a 1 GB plan last for 4,000+ website submissions.</span>
+              <span><strong>Sticky Sessions:</strong> In Proxy-Seller, set rotation time to <em>30 min</em> so multi-step booking forms don&apos;t get interrupted.</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="text-indigo-600 font-bold">3.</span>
-              <span><strong>Universal Compatibility:</strong> Works with any HTTP or SOCKS5 provider worldwide (Proxy-Seller, Bright Data, Oxylabs, Webshare, etc.).</span>
+              <span><strong>Bandwidth Saver:</strong> Keep Bandwidth Saver turned <strong>ON</strong> to block images and videos, making 1 GB cover 10,000+ target websites.</span>
             </li>
           </ul>
         </div>

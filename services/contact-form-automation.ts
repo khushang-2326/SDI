@@ -224,9 +224,9 @@ async function blockHeavyAssets(page: Page) {
       return;
     }
 
-    // Abort heavy media, video streams, fonts, and third-party trackers
-    const isHeavyMedia = ["media", "font"].includes(resourceType) ||
-      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url);
+    // Abort heavy media, images, video streams, fonts, and third-party trackers
+    const isHeavyMedia = ["media", "font", "image"].includes(resourceType) ||
+      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v|png|jpg|jpeg|webp|gif|svg|ico|bmp|tiff|avif)(\?.*)?$/i.test(url);
 
     const isTrackerOrAd =
       url.includes("google-analytics") ||

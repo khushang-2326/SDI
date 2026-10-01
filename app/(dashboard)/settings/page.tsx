@@ -29,6 +29,31 @@ export default async function SettingsPage() {
     take: 30
   });
 
+  const proxyLogs = await prisma.submissionAttemptLog.findMany({
+    where: {
+      message: { contains: "proxy" }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+    select: {
+      id: true,
+      message: true,
+      details: true,
+      createdAt: true,
+      level: true
+    }
+  });
+
+  const totalAttempts = await prisma.submissionAttempt.count({
+    where: {
+      submissionResult: {
+        job: {
+          userId: user.id
+        }
+      }
+    }
+  });
+
   const initialSettings = {
     captchaEnabled: userSettings?.captchaEnabled ?? false,
     captchaProvider: userSettings?.captchaProvider ?? "mock",
@@ -46,6 +71,18 @@ export default async function SettingsPage() {
     proxyStrategy: (userSettings as any)?.proxyStrategy ?? "fallback_only"
   };
 
+  const proxyUsageStats = {
+    totalAttempts,
+    proxyLogsCount: proxyLogs.length,
+    recentProxyLogs: proxyLogs.map((log) => ({
+      id: log.id,
+      message: log.message,
+      details: log.details,
+      createdAt: log.createdAt,
+      level: log.level
+    }))
+  };
+
   return (
     <>
       <PageHeader
@@ -57,6 +94,7 @@ export default async function SettingsPage() {
           initialSettings={initialSettings}
           initialProxySettings={initialProxySettings}
           history={history}
+          proxyUsageStats={proxyUsageStats}
         />
       </div>
     </>

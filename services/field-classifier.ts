@@ -234,6 +234,76 @@ export function splitFullName(fullName?: string | null): { firstName: string; mi
   };
 }
 
+export function solveMathOrSpamChallenge(descriptor: string): string | null {
+  if (!descriptor) return null;
+  const text = descriptor.toLowerCase().replace(/\s+/g, " ").trim();
+
+  // 1. Text extraction instructions: e.g. "Spam check please enter: seo", "Spam Check Enter: seolosangeles", "enter: XYZ", "type 'XYZ'"
+  const enterMatch = text.match(/(?:please\s+)?(?:enter|type|input|write|code)[:\s]+['"]?([a-zA-Z0-9_-]+)['"]?/i);
+  if (enterMatch && enterMatch[1]) {
+    const word = enterMatch[1].trim();
+    if (!["the", "your", "a", "an", "this", "number", "text", "answer", "code", "message", "name", "email", "phone"].includes(word.toLowerCase())) {
+      return word;
+    }
+  }
+
+  // 2. Arithmetic math quizzes: e.g. "3+4 = *", "3+4=?", "3+2=?", "1+2=", "2 +3 =?", "23+23 *", "4 - 0 =", "What is 9 + 8 = ?", "What is 8 + 10*", "5+7=?", "3+3 = *"
+  const mathRegex = /(\d+)\s*([\+\-\*\/xX]|plus|minus|times|multiplied\s+by|divided\s+by)\s*(\d+)/i;
+  const mathMatch = text.match(mathRegex);
+  if (mathMatch) {
+    const num1 = parseInt(mathMatch[1], 10);
+    const op = mathMatch[2].toLowerCase();
+    const num2 = parseInt(mathMatch[3], 10);
+    if (!isNaN(num1) && !isNaN(num2)) {
+      if (op === "+" || op === "plus") return String(num1 + num2);
+      if (op === "-" || op === "minus") return String(num1 - num2);
+      if (op === "*" || op === "x" || op === "times" || op.includes("multiplied")) return String(num1 * num2);
+      if ((op === "/" || op.includes("divided")) && num2 !== 0) return String(Math.floor(num1 / num2));
+    }
+  }
+
+  // 3. Word numbers: "one plus two", "three + four", "two plus three"
+  const wordMap: Record<string, number> = {
+    zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+    sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20
+  };
+  const wordMathRegex = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s*(\+|\-|plus|minus|times)\s*(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\b/i;
+  const wordMatch = text.match(wordMathRegex);
+  if (wordMatch) {
+    const n1 = wordMap[wordMatch[1].toLowerCase()];
+    const op = wordMatch[2].toLowerCase();
+    const n2 = wordMap[wordMatch[3].toLowerCase()];
+    if (n1 !== undefined && n2 !== undefined) {
+      if (op === "+" || op === "plus") return String(n1 + n2);
+      if (op === "-" || op === "minus") return String(n1 - n2);
+      if (op === "*" || op === "times") return String(n1 * n2);
+    }
+  }
+
+  // 4. Common knowledge security questions:
+  if (text.includes("color") && text.includes("sky")) return "blue";
+  if (text.includes("color") && text.includes("grass")) return "green";
+  if (text.includes("color") && text.includes("snow")) return "white";
+  if (text.includes("color") && text.includes("sun")) return "yellow";
+  if (text.includes("capital") && text.includes("japan")) return "Tokyo";
+  if (text.includes("capital") && text.includes("france")) return "Paris";
+  if (text.includes("capital") && (text.includes("usa") || text.includes("united states") || text.includes("america"))) return "Washington";
+  if (text.includes("capital") && (text.includes("uk") || text.includes("england") || text.includes("united kingdom"))) return "London";
+  if (text.includes("capital") && text.includes("germany")) return "Berlin";
+  if (text.includes("capital") && text.includes("italy")) return "Rome";
+  if (text.includes("capital") && text.includes("spain")) return "Madrid";
+  if (text.includes("capital") && text.includes("canada")) return "Ottawa";
+  if (text.includes("capital") && text.includes("australia")) return "Canberra";
+  if (text.includes("days") && text.includes("week")) return "7";
+  if (text.includes("hours") && text.includes("day")) return "24";
+  if (text.includes("months") && text.includes("year")) return "12";
+  if (/\b(are\s+you\s+(a\s+)?human|human\s+verification)\b/i.test(text)) return "yes";
+
+  return null;
+}
+
 export async function extractFieldSignals(scope: Page | Locator): Promise<FieldSignals[]> {
   return scope.locator(COMMON_INPUT_SELECTOR).evaluateAll((elements) => {
     return elements.map((element, index) => {
@@ -290,6 +360,16 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
         } catch {
           // ignore selector escape errors
         }
+      }
+      if (!explicitLabel) {
+        try {
+          const quizSpan = input.parentElement?.querySelector(".wpcf7-quiz-label") ||
+                           input.closest(".wpcf7-form-control-wrap")?.querySelector(".wpcf7-quiz-label") ||
+                           (input.previousElementSibling?.classList?.contains("wpcf7-quiz-label") ? input.previousElementSibling : null);
+          if (quizSpan) {
+            explicitLabel = (quizSpan.textContent ?? "").replace(/\s+/g, " ").trim();
+          }
+        } catch {}
       }
 
       // Associated labels property

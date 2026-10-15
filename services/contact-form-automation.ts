@@ -33,10 +33,24 @@ import {
   classifyAllFormFields,
   isHoneypotField,
   splitFullName,
+  solveMathOrSpamChallenge,
   COMMON_INPUT_SELECTOR
 } from "./field-classifier";
 
 type FieldKey = "fullName" | "email" | "mobile" | "city" | "address" | "message" | "companyName" | "website" | "jobTitle";
+
+export function resolveSpintax(text: string): string {
+  if (!text) return text;
+  let result = text;
+  const regex = /\{([^{}]+)\}/g;
+  while (regex.test(result)) {
+    result = result.replace(regex, (_, choices) => {
+      const parts = choices.split("|");
+      return parts[Math.floor(Math.random() * parts.length)].trim();
+    });
+  }
+  return result;
+}
 
 type FieldCandidate = {
   index: number;
@@ -304,33 +318,36 @@ async function safelyFillField(
     });
   }
 
-  // Verify DOM value and perform controlled-input synchronization if needed (React, Vue, Webflow, etc.)
-  let currentValue = await locator.inputValue().catch(() => "");
-  if (!currentValue && value) {
-    await locator.evaluate((el, val) => {
-      const input = el as HTMLInputElement;
-      const nativeInputSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value"
-      )?.set;
-      const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLTextAreaElement.prototype,
-        "value"
-      )?.set;
-      if (input.tagName.toLowerCase() === "textarea" && nativeTextareaSetter) {
-        nativeTextareaSetter.call(input, val);
-      } else if (nativeInputSetter) {
-        nativeInputSetter.call(input, val);
-      } else {
-        input.value = val;
-      }
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("blur", { bubbles: true }));
-    }, value).catch(() => undefined);
-    currentValue = await locator.inputValue().catch(() => "");
-  }
+  // Verify DOM value and perform comprehensive event synchronization (React, Vue, Webflow, jQuery, UpSolution, WPForms, etc.)
+  await locator.evaluate((el, val) => {
+    const input = el as HTMLInputElement;
+    const nativeInputSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value"
+    )?.set;
+    const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value"
+    )?.set;
+    if (input.tagName.toLowerCase() === "textarea" && nativeTextareaSetter) {
+      nativeTextareaSetter.call(input, val);
+    } else if (nativeInputSetter) {
+      nativeInputSetter.call(input, val);
+    } else if (!input.value) {
+      input.value = val;
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new Event("blur", { bubbles: true }));
+    input.dispatchEvent(new Event("focusout", { bubbles: true }));
+    if ((window as any).jQuery) {
+      try {
+        (window as any).jQuery(input).trigger("input").trigger("change").trigger("blur").trigger("focusout");
+      } catch {}
+    }
+  }, value).catch(() => undefined);
 
+  let currentValue = await locator.inputValue().catch(() => "");
   const verified = Boolean(
     currentValue &&
     (currentValue.toLowerCase().includes(value.slice(0, 8).toLowerCase()) ||
@@ -718,6 +735,14 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     const bestFirst = firstNameCandidates[0];
     const fVal = nameParts.firstName || leadData.fullName || "John";
     await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
+  } else if (fullNameCandidates.length >= 2) {
+    const bestFirst = fullNameCandidates[0];
+    const fVal = nameParts.firstName || "John";
+    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
+
+    const bestLast = fullNameCandidates[1];
+    const lVal = nameParts.lastName || "Miller";
+    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
   } else if (fullNameCandidates.length > 0) {
     const bestFull = fullNameCandidates[0];
     const fnVal = leadData.fullName || "John Miller";
@@ -1156,10 +1181,32 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       continue;
     }
     if (signal.tagName === "select") {
-      const didSelect = await selectFirstRealOption(loc).catch(() => false);
+      let didSelect = await selectFirstRealOption(loc).catch(() => false);
+      if (!didSelect) {
+        didSelect = await loc.evaluate((el: HTMLSelectElement) => {
+          if (!el || !el.options || el.options.length === 0) return false;
+          const targetIndex = el.options.length > 1 ? 1 : 0;
+          el.selectedIndex = targetIndex;
+          if ((window as any).jQuery) {
+            try { (window as any).jQuery(el).trigger("change"); } catch {}
+          }
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          return true;
+        }).catch(() => false);
+      }
       if (didSelect) {
         usedIndexes.add(signal.index);
         filledFields.push(`required_select:${signal.index}`);
+        verificationItems.push({
+          fieldIndex: signal.index,
+          fieldType: "unknown",
+          mappedSource: `required_select:${signal.index} [FALLBACK_SELECT]`,
+          confidence: 0.7,
+          evidence: ["required select option chosen"],
+          filled: true,
+          verified: true
+        });
       }
       continue;
     }
@@ -1171,18 +1218,56 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
 
     // Semantic check: check if the unmapped required text field can be safely mapped to a known semantic category
-    const fieldDescriptor = `${signal.name} ${signal.id} ${signal.placeholder} ${signal.explicitLabel} ${signal.ariaLabel}`.toLowerCase();
+    const fieldDescriptor = [
+      signal.name,
+      signal.id,
+      signal.placeholder,
+      signal.explicitLabel,
+      signal.ariaLabel,
+      signal.surroundingLabel,
+      signal.precedingSiblingText,
+      signal.followingSiblingText,
+      signal.parentContainerText,
+      ...(signal.associatedLabels || [])
+    ].filter(Boolean).join(" ").toLowerCase();
     
+    // 10a. Math & Anti-spam text challenges (e.g. 3+4=?, "enter: seo", "What color is the sky?")
+    const challengeAnswer = solveMathOrSpamChallenge(fieldDescriptor);
+    if (challengeAnswer !== null) {
+      const fillRes = await safelyFillField(loc, challengeAnswer).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+      if (fillRes.success) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`spam_quiz:${signal.index}`);
+        verificationItems.push({
+          fieldIndex: signal.index,
+          fieldType: "unknown",
+          mappedSource: `spam_quiz:${signal.index} [SOLVED_CHALLENGE: ${challengeAnswer}]`,
+          confidence: 0.95,
+          evidence: ["solved math/spam challenge", `solution:${challengeAnswer}`],
+          filled: true,
+          verified: fillRes.verified,
+          finalValue: fillRes.actualValue
+        });
+        continue;
+      }
+    }
+
     let safeValue: string | null = null;
     let telemetrySource: "USER_DATA" | "FALLBACK_DATA" = "FALLBACK_DATA";
 
     if (/\b(name|first|last|fname|lname|your-name|surname)\b/i.test(fieldDescriptor)) {
       safeValue = nameParts.firstName || leadData.firstName || leadData.fullName || "John";
       telemetrySource = (nameParts.firstName || leadData.firstName || leadData.fullName) ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(email|e-mail)\b/i.test(fieldDescriptor) || signal.type === "email") {
+      safeValue = leadData.email;
+      telemetrySource = "USER_DATA";
+    } else if (/\b(phone|mobile|tel|contact[ _-]?number|enter[ _-]?number|phone[ _-]?number)\b/i.test(fieldDescriptor) || signal.name === "number" || signal.type === "tel") {
+      safeValue = leadData.mobile || leadData.mobileNumber || leadData.phone || "2125550199";
+      telemetrySource = (leadData.mobile || leadData.mobileNumber || leadData.phone) ? "USER_DATA" : "FALLBACK_DATA";
     } else if (/\b(city|town)\b/i.test(fieldDescriptor)) {
       safeValue = userCity || "New York";
       telemetrySource = userCity ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(zip|postal)\b/i.test(fieldDescriptor) || signal.type === "number") {
+    } else if (/\b(zip|postal|zip-code)\b/i.test(fieldDescriptor) || signal.type === "number") {
       safeValue = userPostal || "10001";
       telemetrySource = userPostal ? "USER_DATA" : "FALLBACK_DATA";
     } else if (/\b(state|province|region)\b/i.test(fieldDescriptor)) {
@@ -1197,6 +1282,12 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     } else if (/\b(budget|monthly[ _-]?budget|project[ _-]?budget|price|investment)\b/i.test(fieldDescriptor)) {
       safeValue = userBudget || "5000";
       telemetrySource = userBudget ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (/\b(dollar|client[ _-]?value|revenue|deal[ _-]?size|order[ _-]?value|amount)\b/i.test(fieldDescriptor)) {
+      safeValue = "$5,000";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(specialty|practice|category|department)\b/i.test(fieldDescriptor)) {
+      safeValue = "General";
+      telemetrySource = "FALLBACK_DATA";
     } else if (/\b(service|services|interest|interested|services?[ _-]?of[ _-]?interest|preferred[ _-]?service)\b/i.test(fieldDescriptor)) {
       safeValue = userService || "Web Design & Digital Marketing";
       telemetrySource = userService ? "USER_DATA" : "FALLBACK_DATA";
@@ -1209,9 +1300,31 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     } else if (/\b(title|role|position|occupation)\b/i.test(fieldDescriptor)) {
       safeValue = userJob || "Manager";
       telemetrySource = userJob ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(message|comment|note|details|inquiry|subject|feedback|description|question|brief|help|needs)\b/i.test(fieldDescriptor) || signal.tagName === "textarea") {
+    } else if (/\b(how\s+many\s+products|products|items|sku|inventory)\b/i.test(fieldDescriptor)) {
+      safeValue = "1-100";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(how\s+many|quantity|count)\b/i.test(fieldDescriptor)) {
+      safeValue = "1-10";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(years\s+in\s+business|how\s+long\s+in\s+business|experience|business[ _-]?years)\b/i.test(fieldDescriptor)) {
+      safeValue = "5+";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(friend|colleague|partner|referrer)\b/i.test(fieldDescriptor)) {
+      safeValue = nameParts.firstName || "Alex";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(deadline|timeframe|timeline|when\s+to\s+start)\b/i.test(fieldDescriptor)) {
+      safeValue = "As soon as possible";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(hour|preferred[ _-]?time|time|best\s+time)\b/i.test(fieldDescriptor) || signal.type === "time") {
+      safeValue = "10:00 AM";
+      telemetrySource = "FALLBACK_DATA";
+    } else if (/\b(message|comment|note|details|inquiry|subject|feedback|description|question|brief|help|needs|goals|solutions|project\s+goals|objective|tell\s+us\s+how|why\s+are\s+you\s+reaching|about\s+project|project\s+description|requirement)\b/i.test(fieldDescriptor) || signal.tagName === "textarea") {
       safeValue = leadData.message || leadData.subject || "General Inquiry";
       telemetrySource = (leadData.message || leadData.subject) ? "USER_DATA" : "FALLBACK_DATA";
+    } else if (signal.isRequired && (signal.type === "text" || !signal.type)) {
+      // Universal safe fallback for unmapped required text fields without domain semantics
+      safeValue = leadData.subject || "Partnership Inquiry";
+      telemetrySource = "FALLBACK_DATA";
     }
 
     // If safeValue could not be safely derived from generic text, location, or contact info:
@@ -1280,6 +1393,17 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     
     // Honeypot protection: skip honeypot fields so they are neither filled nor trigger required errors
     if (isHoneypotField(signal)) {
+      usedIndexes.add(signal.index);
+      continue;
+    }
+
+    // Skip search bars (e.g. name="s", search inputs on header/sidebar)
+    if (
+      signal.type === "search" ||
+      signal.name === "s" ||
+      signal.id === "search" ||
+      /\b(search|search_input|site-search|site_search)\b/i.test(signal.name || signal.id || "")
+    ) {
       usedIndexes.add(signal.index);
       continue;
     }
@@ -2404,9 +2528,25 @@ export async function submitContactForm({
       }
     }
 
+    // Warm up page interactions to trigger delayed scripts (WP Rocket, LiteSpeed Cache, etc.)
+    await activePage.mouse.move(150, 250).catch(() => undefined);
+    await activePage.evaluate(() => {
+      window.dispatchEvent(new Event("scroll"));
+      window.dispatchEvent(new Event("mousemove"));
+      window.dispatchEvent(new Event("touchstart"));
+    }).catch(() => undefined);
+    await activePage.waitForTimeout(300);
+
+    // Resolve any spintax choices in the message/subject before filling
+    const effectiveLeadData = {
+      ...leadData,
+      message: resolveSpintax(leadData.message || ""),
+      subject: resolveSpintax(leadData.subject || "")
+    };
+
     // Fill the selected primary form only once.
     const tFillStart = Date.now();
-    const fillResult = await fillAllVisibleForms(page, leadData);
+    const fillResult = await fillAllVisibleForms(page, effectiveLeadData);
     tFieldFilling = Date.now() - tFillStart;
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
@@ -2504,6 +2644,7 @@ export async function submitContactForm({
     }
 
     let networkReportedSuccess = false;
+    let serverReportedSpamOrBlock: string | null = null;
     const ajaxResponseListener = (res: any) => {
       try {
         const url = res.url().toLowerCase();
@@ -2529,8 +2670,16 @@ export async function submitContactForm({
             url.includes("leadconnector"))
         ) {
           res.text().then((text: string) => {
+            if (!text) return;
+            if (text.includes("apbct") && (text.includes('"blocked":true') || text.includes("Forbidden") || text.includes("blacklisted"))) {
+              serverReportedSpamOrBlock = "Server Anti-Spam (CleanTalk) blocked submission: Sender IP or email blacklisted.";
+            } else if (text.includes('"status":"spam"')) {
+              serverReportedSpamOrBlock = "Server spam filter (Akismet / WPCF7) classified submission as spam.";
+            } else if (text.includes('"status":"mail_failed"') || text.includes('"mail_sent_ng"')) {
+              serverReportedSpamOrBlock = "Server mail delivery failed (SMTP connection error on target host).";
+            }
+
             if (
-              text &&
               (text.includes('"status":"mail_sent"') ||
                 text.includes('"success":true') ||
                 text.includes('"status":"success"') ||
@@ -2541,7 +2690,8 @@ export async function submitContactForm({
               !text.includes('"status":"spam"') &&
               !text.includes('"status":"validation_failed"') &&
               !text.includes('"status":"error"') &&
-              !text.includes('"success":false')
+              !text.includes('"success":false') &&
+              !text.includes('"blocked":true')
             ) {
               networkReportedSuccess = true;
             }
@@ -2554,15 +2704,35 @@ export async function submitContactForm({
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => undefined);
 
-      // Natural mouse movement towards submit button for anti-bot / reCAPTCHA v3 confidence
+      // Anti-speed-trap & human velocity pacing:
+      // WordPress anti-spam plugins (WP-Armour, Akismet, CF7 Honeypot) measure the timestamp
+      // delta between page render and submission. A submission in < 4.5s is instantly flagged as bot.
+      const elapsedSinceFill = Date.now() - tFillStart;
+      if (elapsedSinceFill < 4500) {
+        const neededDelay = 4500 - elapsedSinceFill + Math.floor(Math.random() * 1200);
+        await activePage.waitForTimeout(neededDelay);
+      }
+
+      // Natural curved mouse movement & hover hesitation for anti-bot / reCAPTCHA v3 confidence
       try {
         const box = await submitButton.boundingBox();
         if (box) {
-          await activePage.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+          const targetX = box.x + box.width / 2 + (Math.random() * 8 - 4);
+          const targetY = box.y + box.height / 2 + (Math.random() * 6 - 3);
+          // Waypoint curve
+          await activePage.mouse.move(targetX - 35, targetY - 25, { steps: 8 }).catch(() => undefined);
+          await activePage.waitForTimeout(100 + Math.floor(Math.random() * 150));
+          await activePage.mouse.move(targetX, targetY, { steps: 6 }).catch(() => undefined);
+          // Human hover hesitation before clicking
+          await activePage.waitForTimeout(300 + Math.floor(Math.random() * 250));
         }
       } catch {}
 
       activePage.on("response", ajaxResponseListener);
+
+      let networkActivityFired = false;
+      const activityTracker = () => { networkActivityFired = true; };
+      activePage.on("request", activityTracker);
 
       // Primary click execution
       let clickSucceeded = false;
@@ -2573,17 +2743,28 @@ export async function submitContactForm({
         clickSucceeded = false;
       }
 
-      // Secondary fallback: trigger requestSubmit directly on form if click failed or had no effect
-      if (!clickSucceeded) {
+      // Secondary fallback: if click didn't trigger any network request within 1.5s, trigger jQuery/requestSubmit dispatch
+      await activePage.waitForTimeout(1500);
+      if (!networkActivityFired || !clickSucceeded) {
         await submitButton.evaluate((btn) => {
           const form = btn.closest("form");
-          if (form && typeof form.requestSubmit === "function") {
-            form.requestSubmit(btn as HTMLButtonElement | HTMLInputElement);
-          } else if ("click" in btn && typeof (btn as HTMLElement).click === "function") {
-            (btn as HTMLElement).click();
+          if (form) {
+            if ((window as any).jQuery) {
+              try { (window as any).jQuery(form).trigger("submit"); } catch {}
+            }
+            if (typeof form.requestSubmit === "function") {
+              try { form.requestSubmit(btn as HTMLButtonElement | HTMLInputElement); } catch {}
+            } else if (typeof form.submit === "function") {
+              try { form.submit(); } catch {}
+            }
+          }
+          if ("click" in btn && typeof (btn as HTMLElement).click === "function") {
+            try { (btn as HTMLElement).click(); } catch {}
           }
         }).catch(() => undefined);
       }
+
+      activePage.off("request", activityTracker);
     }
 
     const success = shouldSubmit
@@ -2596,6 +2777,38 @@ export async function submitContactForm({
     screenshotPath = await takeScreenshot(page, websiteUrl, shouldSubmit ? "after-submit" : "dry-run");
 
     if (!success) {
+      if (serverReportedSpamOrBlock) {
+        throw new Error(serverReportedSpamOrBlock);
+      }
+
+      // Check if on-page spam or error alert is visible
+      const onPageError = await activePage.evaluate(() => {
+        const errorSelectors = [
+          ".wpcf7-response-output.wpcf7-spam-blocked",
+          ".wpcf7-response-output.wpcf7-mail-sent-ng",
+          ".wpcf7-response-output.wpcf7-validation-errors",
+          ".wpforms-error-container",
+          ".gform_validation_errors",
+          ".alert-danger",
+          ".error-message",
+          "[role='alert']"
+        ];
+        for (const sel of errorSelectors) {
+          const el = document.querySelector(sel);
+          if (el && (el as HTMLElement).offsetParent !== null) {
+            const txt = (el.textContent || "").trim();
+            if (txt && (txt.toLowerCase().includes("spam") || txt.toLowerCase().includes("error") || txt.toLowerCase().includes("failed"))) {
+              return txt;
+            }
+          }
+        }
+        return null;
+      }).catch(() => null);
+
+      if (onPageError) {
+        throw new Error(`Website rejected submission: "${onPageError.slice(0, 150)}"`);
+      }
+
       throw new Error("Submit clicked, but no success message or successful page response was detected.");
     }
 

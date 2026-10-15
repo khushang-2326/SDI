@@ -269,6 +269,7 @@ export function SettingsForm({
       data.set("proxyPort", proxyPort);
       data.set("proxyUsername", proxyUsername);
       data.set("proxyPassword", proxyPassword);
+      data.set("proxyPoolText", proxyPoolText);
       const res = await validateProxyAction(data);
       setProxyTestResult(res);
     });

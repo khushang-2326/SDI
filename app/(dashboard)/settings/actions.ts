@@ -251,6 +251,18 @@ export async function validateProxyAction(formData: FormData): Promise<ProxyTest
       proxy = parseProxyString(data.rawString);
     }
 
+    const rawPool = String(formData.get("proxyPoolText") || "").trim();
+    if (!proxy && rawPool && (!data.host || data.host === "res.proxy-seller.com")) {
+      const lines = rawPool.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      for (const line of lines) {
+        const candidate = parseProxyString(line);
+        if (candidate && candidate.host && candidate.port) {
+          proxy = candidate;
+          break;
+        }
+      }
+    }
+
     if (!proxy && data.host && data.port) {
       const portNum = parseProxyPort(data.port);
       const protocol = parseProxyProtocol(data.protocol);

@@ -96,6 +96,28 @@ export function SettingsForm({
   const [proxyPoolText, setProxyPoolText] = useState(initialProxySettings.initialProxyPoolText || "");
   const [proxyPoolCount, setProxyPoolCount] = useState(initialProxySettings.proxyPoolCount || 0);
 
+  const applyFirstProxyFromText = (text: string) => {
+    if (!text) return;
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+    for (const line of lines) {
+      const parsed = parseProxyString(line);
+      if (parsed && parsed.host && parsed.port) {
+        setProxyProtocol(parsed.protocol || "http");
+        setProxyHost(parsed.host);
+        setProxyPort(String(parsed.port));
+        if (parsed.username) setProxyUsername(parsed.username);
+        if (parsed.password) setProxyPassword(parsed.password);
+        saveToLocalBackup({
+          proxyProtocol: parsed.protocol || "http",
+          proxyHost: parsed.host,
+          proxyPort: String(parsed.port),
+          proxyUsername: parsed.username
+        });
+        break;
+      }
+    }
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -104,21 +126,14 @@ export function SettingsForm({
       const content = String(event.target?.result || "").trim();
       if (content) {
         setProxyPoolText(content);
-        const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const lines = content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
         setProxyPoolCount(lines.length);
-        setQuickImportMessage(`✓ Imported ${lines.length} proxies from ${file.name}`);
-
-        const first = parseProxyString(lines[0]);
-        if (first) {
-          setProxyProtocol(first.protocol);
-          setProxyHost(first.host);
-          setProxyPort(String(first.port));
-          if (first.username) setProxyUsername(first.username);
-          if (first.password) setProxyPassword(first.password);
-        }
+        setQuickImportMessage(`✓ Loaded ${lines.length} proxies from ${file.name}`);
+        applyFirstProxyFromText(content);
       }
     };
     reader.readAsText(file);
+    e.target.value = "";
   };
 
   const [isProxyPending, startProxyTransition] = useTransition();
@@ -548,9 +563,11 @@ export function SettingsForm({
                 placeholder={"Paste multi-line proxy list here (1 per line):\n103.47.52.172:8214:mhohjihm:z1rpw8rsfwqv\n136.0.188.166:6129:mhohjihm:z1rpw8rsfwqv\n..."}
                 value={proxyPoolText}
                 onChange={(e) => {
-                  setProxyPoolText(e.target.value);
-                  const lines = e.target.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+                  const val = e.target.value;
+                  setProxyPoolText(val);
+                  const lines = val.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
                   setProxyPoolCount(lines.length);
+                  applyFirstProxyFromText(val);
                 }}
               />
             </div>

@@ -45,6 +45,8 @@ interface SettingsFormProps {
     hasPassword: boolean;
     proxyBandwidthSaver: boolean;
     proxyStrategy?: string;
+    proxyPoolCount?: number;
+    initialProxyPoolText?: string;
   };
   history: HistoryItem[];
   proxyUsageStats?: {
@@ -91,6 +93,33 @@ export function SettingsForm({
   const [proxyBandwidthSaver, setProxyBandwidthSaver] = useState(initialProxySettings.proxyBandwidthSaver);
   const [rawQuickImport, setRawQuickImport] = useState("");
   const [quickImportMessage, setQuickImportMessage] = useState<string | null>(null);
+  const [proxyPoolText, setProxyPoolText] = useState(initialProxySettings.initialProxyPoolText || "");
+  const [proxyPoolCount, setProxyPoolCount] = useState(initialProxySettings.proxyPoolCount || 0);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = String(event.target?.result || "").trim();
+      if (content) {
+        setProxyPoolText(content);
+        const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        setProxyPoolCount(lines.length);
+        setQuickImportMessage(`✓ Imported ${lines.length} proxies from ${file.name}`);
+
+        const first = parseProxyString(lines[0]);
+        if (first) {
+          setProxyProtocol(first.protocol);
+          setProxyHost(first.host);
+          setProxyPort(String(first.port));
+          if (first.username) setProxyUsername(first.username);
+          if (first.password) setProxyPassword(first.password);
+        }
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const [isProxyPending, startProxyTransition] = useTransition();
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
@@ -480,6 +509,49 @@ export function SettingsForm({
                   {quickImportMessage}
                 </p>
               )}
+            </div>
+
+            {/* Bulk Proxy Pool & File Upload */}
+            <div className="rounded-xl border border-line bg-canvas/70 p-4">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <label className="text-xs font-bold uppercase tracking-wider text-ink flex items-center gap-1.5">
+                    📁 Bulk Proxy List / File Upload (.txt)
+                  </label>
+                  <p className="text-xs text-muted mt-0.5">
+                    Upload your Webshare proxy file or paste all 100+ lines below. Automation workers will auto-rotate across all proxies!
+                  </p>
+                </div>
+                {proxyPoolCount > 0 && (
+                  <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-800">
+                    ✔ {proxyPoolCount} Proxies in Rotation Pool
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3 mb-2.5">
+                <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-line bg-white px-3 py-1.5 text-xs font-semibold text-ink shadow-sm hover:bg-slate-50 transition">
+                  <svg className="w-4 h-4 text-brand" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
+                  <span>Upload .txt File</span>
+                  <input type="file" accept=".txt,.csv" className="hidden" onChange={handleFileUpload} />
+                </label>
+                <span className="text-[11px] text-muted">Supports Webshare, Smartproxy, or any IP:Port:User:Pass format.</span>
+              </div>
+
+              <textarea
+                name="proxyPoolText"
+                rows={4}
+                className="w-full rounded-lg border border-line bg-white p-2.5 text-xs font-mono outline-none focus:border-brand focus:ring-2 focus:ring-brand/20 [scrollbar-width:thin]"
+                placeholder={"Paste multi-line proxy list here (1 per line):\n103.47.52.172:8214:mhohjihm:z1rpw8rsfwqv\n136.0.188.166:6129:mhohjihm:z1rpw8rsfwqv\n..."}
+                value={proxyPoolText}
+                onChange={(e) => {
+                  setProxyPoolText(e.target.value);
+                  const lines = e.target.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+                  setProxyPoolCount(lines.length);
+                }}
+              />
             </div>
 
             {/* Protocol Selector */}

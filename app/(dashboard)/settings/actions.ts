@@ -139,21 +139,70 @@ export async function updateProxySettingsAction(
       ? rawStrategy
       : "fallback_only";
 
+    const rawProxyPool = String(formData.get("proxyPoolText") || "").trim();
+    let parsedPoolJson: string | null = null;
+    let poolCount = 0;
+
+    if (rawProxyPool) {
+      const lines = rawProxyPool.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const parsedList: any[] = [];
+      for (const line of lines) {
+        const parsed = parseProxyString(line);
+        if (parsed && parsed.host && parsed.port) {
+          const pass = parsed.password && !parsed.password.startsWith("•••")
+            ? `enc:${encrypt(parsed.password)}`
+            : null;
+          parsedList.push({
+            protocol: parsed.protocol || "http",
+            host: parsed.host,
+            port: parsed.port,
+            username: parsed.username || null,
+            password: pass
+          });
+        }
+      }
+      if (parsedList.length > 0) {
+        parsedPoolJson = JSON.stringify(parsedList);
+        poolCount = parsedList.length;
+      }
+    }
+
     if (!protocol) throw new Error("Proxy protocol must be HTTP, HTTPS, or SOCKS5.");
-    if (enabled && (!host || port === null)) {
-      throw new Error("An enabled proxy requires a host and a port from 1 to 65535.");
+    if (enabled && !parsedPoolJson && (!host || port === null)) {
+      throw new Error("An enabled proxy requires either a proxy pool or a host and port.");
     }
 
     const existingUser = await prisma.user.findUnique({
       where: { id: user.id },
-      select: { proxyPassword: true }
+      select: { proxyPassword: true, proxyPool: true }
     });
 
+    let effectiveHost = host;
+    let effectivePort = port;
+    let effectiveUsername = username;
     let encryptedPassword = existingUser?.proxyPassword ?? null;
+
     if (rawPassword && !rawPassword.startsWith("•••")) {
       encryptedPassword = encrypt(rawPassword);
     } else if (!rawPassword && rawPassword !== "••••••••") {
       encryptedPassword = null;
+    }
+
+    // If single host/port is empty but pool is provided, auto-set primary from first proxy in pool
+    if ((!effectiveHost || !effectivePort) && parsedPoolJson) {
+      try {
+        const list = JSON.parse(parsedPoolJson);
+        if (list[0]) {
+          effectiveHost = list[0].host;
+          effectivePort = list[0].port;
+          effectiveUsername = list[0].username || "";
+          if (list[0].password?.startsWith("enc:")) {
+            encryptedPassword = list[0].password.slice(4);
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
 
     await prisma.user.update({
@@ -162,16 +211,21 @@ export async function updateProxySettingsAction(
         proxyEnabled: enabled,
         proxyStrategy,
         proxyProtocol: protocol,
-        proxyHost: host || null,
-        proxyPort: port,
-        proxyUsername: username || null,
+        proxyHost: effectiveHost || null,
+        proxyPort: effectivePort,
+        proxyUsername: effectiveUsername || null,
         proxyPassword: encryptedPassword,
-        proxyBandwidthSaver: bandwidthSaver
+        proxyBandwidthSaver: bandwidthSaver,
+        proxyPool: parsedPoolJson ?? (existingUser as any)?.proxyPool ?? null
       }
     });
 
     revalidatePath("/settings");
-    return { success: true, proxyEnabled: enabled, proxyBandwidthSaver: bandwidthSaver };
+    return {
+      success: true,
+      proxyEnabled: enabled,
+      proxyBandwidthSaver: bandwidthSaver
+    };
   } catch (error: any) {
     return { success: false, error: error.message || "Failed to save proxy settings." };
   }

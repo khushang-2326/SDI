@@ -19,9 +19,32 @@ export default async function SettingsPage() {
       proxyUsername: true,
       proxyPassword: true,
       proxyBandwidthSaver: true,
-      proxyStrategy: true
+      proxyStrategy: true,
+      proxyPool: true
     }
   });
+
+  let proxyPoolCount = 0;
+  let initialProxyPoolText = "";
+  try {
+    if ((userSettings as any)?.proxyPool) {
+      const list = JSON.parse((userSettings as any).proxyPool);
+      if (Array.isArray(list)) {
+        proxyPoolCount = list.length;
+        initialProxyPoolText = list
+          .map((p: any) => {
+            let line = `${p.host}:${p.port}`;
+            if (p.username) {
+              line += `:${p.username}:••••••••`;
+            }
+            return line;
+          })
+          .join("\n");
+      }
+    }
+  } catch {
+    // ignore
+  }
 
   const history = await prisma.captchaSolveHistory.findMany({
     where: { userId: user.id },
@@ -68,7 +91,9 @@ export default async function SettingsPage() {
     proxyUsername: userSettings?.proxyUsername ?? "",
     hasPassword: Boolean(userSettings?.proxyPassword),
     proxyBandwidthSaver: userSettings?.proxyBandwidthSaver ?? true,
-    proxyStrategy: (userSettings as any)?.proxyStrategy ?? "fallback_only"
+    proxyStrategy: (userSettings as any)?.proxyStrategy ?? "fallback_only",
+    proxyPoolCount,
+    initialProxyPoolText
   };
 
   const proxyUsageStats = {

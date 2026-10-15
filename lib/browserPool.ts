@@ -20,6 +20,7 @@ const browserPools: Record<BrowserMode, PooledBrowser> = {
 };
 const contextModes = new WeakMap<BrowserContext, BrowserMode>();
 const DEFAULT_CONTEXT_STARTUP_TIMEOUT_MS = 20_000;
+let globalProxyPoolCounter = 0;
 
 async function withStartupTimeout<T>(
   operation: Promise<T>,
@@ -191,24 +192,53 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
           proxyPort: true,
           proxyUsername: true,
           proxyPassword: true,
-          proxyBandwidthSaver: true
+          proxyBandwidthSaver: true,
+          proxyPool: true
         }
       });
 
-      if (user?.proxyEnabled && user.proxyHost && user.proxyPort) {
+      if (user?.proxyEnabled) {
         const strategy = (user as any).proxyStrategy || "fallback_only";
         if (strategy === "fallback_only" && !options.forceProxy) {
           return null; // Smart fallback: use direct connection first ($0 cost)
         }
 
-        const protocol = user.proxyProtocol || "http";
-        const password = user.proxyPassword ? decrypt(user.proxyPassword) : undefined;
-        return {
-          server: `${protocol}://${user.proxyHost}:${user.proxyPort}`,
-          username: user.proxyUsername || undefined,
-          password: password || undefined,
-          bandwidthSaver: options.bandwidthSaver ?? user.proxyBandwidthSaver ?? true
-        };
+        // Check for multi-proxy rotation pool
+        if ((user as any).proxyPool) {
+          try {
+            const pool = JSON.parse((user as any).proxyPool);
+            if (Array.isArray(pool) && pool.length > 0) {
+              const selected = pool[globalProxyPoolCounter++ % pool.length];
+              if (selected && selected.host && selected.port) {
+                const protocol = selected.protocol || "http";
+                let pass = selected.password;
+                if (pass && pass.startsWith("enc:")) {
+                  pass = decrypt(pass.slice(4));
+                }
+                return {
+                  server: `${protocol}://${selected.host}:${selected.port}`,
+                  username: selected.username || undefined,
+                  password: pass || undefined,
+                  bandwidthSaver: options.bandwidthSaver ?? user.proxyBandwidthSaver ?? true
+                };
+              }
+            }
+          } catch (poolErr) {
+            console.warn("[BrowserPool] Failed parsing user proxyPool:", poolErr);
+          }
+        }
+
+        // Fallback to single configured proxy
+        if (user.proxyHost && user.proxyPort) {
+          const protocol = user.proxyProtocol || "http";
+          const password = user.proxyPassword ? decrypt(user.proxyPassword) : undefined;
+          return {
+            server: `${protocol}://${user.proxyHost}:${user.proxyPort}`,
+            username: user.proxyUsername || undefined,
+            password: password || undefined,
+            bandwidthSaver: options.bandwidthSaver ?? user.proxyBandwidthSaver ?? true
+          };
+        }
       }
     } catch (e) {
       console.warn("[BrowserPool] Failed to fetch user proxy settings:", e);

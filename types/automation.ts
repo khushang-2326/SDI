@@ -85,6 +85,7 @@ export type SubmitContactFormResult = {
     | "no_available_slots"
     | "iframe_not_accessible"
     | "confirmation_not_found";
+  submissionOutcome?: "FAILED" | "SUBMITTED_ATTEMPT" | "PASS" | "VERIFIED_SUCCESS";
   errorMessage: string | null;
   message?: string | null;
   screenshotPath: string | null;

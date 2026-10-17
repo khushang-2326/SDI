@@ -90,6 +90,7 @@ export async function importWebsitesFromExcel(
   let invalidRows = 0;
   let failedRows = 0;
   const validRows: WebsiteImportRow[] = [];
+  const updatesToApply: Array<{ id: string; contactPageUrl: string }> = [];
 
   for (const row of rows) {
     const rawWebsiteUrl = readCell(row.website) || readCell(row.websiteUrl);
@@ -127,10 +128,8 @@ export async function importWebsitesFromExcel(
     if (seenUrls.has(normalizedWebsiteUrl)) {
       const existing = existingByUrl.get(normalizedWebsiteUrl);
       if (existing && contactPageUrl && existing.contactPageUrl !== contactPageUrl) {
-        await prisma.targetWebsite.update({
-          where: { id: existing.id },
-          data: { contactPageUrl }
-        });
+        updatesToApply.push({ id: existing.id, contactPageUrl });
+        existing.contactPageUrl = contactPageUrl;
       }
       duplicateRows += 1;
       continue;
@@ -146,10 +145,31 @@ export async function importWebsitesFromExcel(
     });
   }
 
+  // Batch execute any existing website contact URL updates in chunks
+  if (updatesToApply.length > 0) {
+    const UPDATE_CHUNK = 50;
+    for (let i = 0; i < updatesToApply.length; i += UPDATE_CHUNK) {
+      const chunk = updatesToApply.slice(i, i + UPDATE_CHUNK);
+      await prisma.$transaction(
+        chunk.map((item) =>
+          prisma.targetWebsite.update({
+            where: { id: item.id },
+            data: { contactPageUrl: item.contactPageUrl }
+          })
+        )
+      ).catch(() => undefined);
+    }
+  }
+
+  // Batch insert new valid website rows in chunks of 500
   if (validRows.length > 0) {
-    await prisma.targetWebsite.createMany({
-      data: validRows.map((row) => ({ ...row, userId }))
-    });
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < validRows.length; i += CHUNK_SIZE) {
+      const chunk = validRows.slice(i, i + CHUNK_SIZE);
+      await prisma.targetWebsite.createMany({
+        data: chunk.map((row) => ({ ...row, userId }))
+      });
+    }
   }
 
   return {

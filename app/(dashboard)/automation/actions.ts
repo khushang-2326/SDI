@@ -25,6 +25,7 @@ import { getAutomationQueue } from "@/queue/client";
 import {
   runParallelWorkerPool,
   getActiveWorkers,
+  clearActiveWorkers,
   type WorkerStatusInfo
 } from "@/services/worker-pool";
 
@@ -34,6 +35,7 @@ export type AutomationResult = {
     discoveryReason: string | null;
     targetType: string | null;
     status: SubmitContactFormResult["status"];
+    submissionOutcome?: "FAILED" | "SUBMITTED_ATTEMPT" | "PASS" | "VERIFIED_SUCCESS";
     errorMessage: string | null;
     screenshotPath: string | null;
     screenshotPaths: string[];
@@ -126,6 +128,9 @@ async function mapJobToBackgroundJob(dbJob: any): Promise<BackgroundAutomationJo
         discoveryReason: res.message,
         targetType: null,
         status: res.status === "Completed" ? "success" : "failed",
+        submissionOutcome: res.status === "Completed"
+          ? (res.message?.toLowerCase().includes("verified") ? "VERIFIED_SUCCESS" : "PASS")
+          : (res.status === "Cancelled" ? "SUBMITTED_ATTEMPT" : "FAILED"),
         errorMessage: res.status === "Failed" ? res.message : null,
         screenshotPath: proofPath(res.screenshotPath),
         screenshotPaths: res.screenshotPath ? [proofPath(res.screenshotPath)].filter(Boolean) as string[] : [],
@@ -143,7 +148,13 @@ async function mapJobToBackgroundJob(dbJob: any): Promise<BackgroundAutomationJo
           message: attempt.message,
           errorMessage: attempt.errorMessage,
           screenshotPath: proofPath(attempt.screenshotPath),
-          screenshotPaths: JSON.parse(attempt.screenshotPaths || "[]").map(proofPath),
+          screenshotPaths: (() => {
+            try {
+              return JSON.parse(attempt.screenshotPaths || "[]").map(proofPath);
+            } catch {
+              return [];
+            }
+          })(),
           startedAt: attempt.startedAt?.toISOString() ?? null,
           completedAt: attempt.completedAt?.toISOString() ?? null
         }))
@@ -305,11 +316,14 @@ export async function cancelBackgroundAutomationAction(jobId: string) {
     include: { results: { include: { targetWebsite: true, attempts: { orderBy: { executionOrder: "asc" } } } } }
   });
   if (!job || job.status === "Cancelled") {
+    if (job) {
+      localAutomationLocks.delete(jobId);
+      clearActiveWorkers(jobId);
+    }
     return job ? mapJobToBackgroundJob(job) : null;
   }
 
-  // SQLite is the source of truth for cancellation. Do not wait for Redis here:
-  // the worker checks the parent status before processing and before submission.
+  // SQLite is the source of truth for cancellation.
   await prisma.$transaction([
     prisma.submissionJob.update({
       where: { id: jobId },
@@ -321,6 +335,9 @@ export async function cancelBackgroundAutomationAction(jobId: string) {
     })
   ]);
 
+  localAutomationLocks.delete(jobId);
+  clearActiveWorkers(jobId);
+
   const updatedJob = await prisma.submissionJob.findFirst({
     where: { id: jobId },
     include: { results: { include: { targetWebsite: true, attempts: { orderBy: { executionOrder: "asc" } } } } }
@@ -329,30 +346,75 @@ export async function cancelBackgroundAutomationAction(jobId: string) {
   return updatedJob ? mapJobToBackgroundJob(updatedJob) : null;
 }
 
-export async function resetBackgroundAutomationAction(jobId: string) {
-  const user = await requireUser();
-  const job = await prisma.submissionJob.findFirst({
-    where: { id: jobId, userId: user.id }
-  });
-  if (!job || job.status === "Pending" || job.status === "Running") return false;
+export async function resetBackgroundAutomationForUser(userId: string, jobId?: string): Promise<boolean> {
+  if (jobId) {
+    // 1. Immediately mark job & results cancelled so any running worker loop terminates
+    await prisma.$transaction([
+      prisma.submissionJob.updateMany({
+        where: { id: jobId, userId },
+        data: { status: "Cancelled", completedAt: new Date() }
+      }),
+      prisma.submissionResult.updateMany({
+        where: { jobId, status: { in: ["Pending", "Discovering", "Running"] } },
+        data: { status: "Cancelled", message: "Cancelled by reset" }
+      })
+    ]);
 
-  const deleted = await prisma.submissionJob.deleteMany({
-    where: {
-      id: jobId,
-      userId: user.id,
-      status: { in: ["Completed", "Failed", "Cancelled"] }
-    }
-  });
+    // 2. Clear in-memory execution lock and worker status tracking
+    localAutomationLocks.delete(jobId);
+    clearActiveWorkers(jobId);
 
-  return deleted.count > 0;
+    // 3. Clean up database logs and job (cascades to results, attempts, logs)
+    await prisma.jobLog.deleteMany({ where: { jobId } }).catch(() => undefined);
+    await prisma.submissionJob.deleteMany({
+      where: { id: jobId, userId }
+    });
+    return true;
+  }
+
+  // If no specific jobId provided, perform a comprehensive session reset for this user:
+  const activeJobs = await prisma.submissionJob.findMany({
+    where: { userId, status: { in: ["Pending", "Running"] } },
+    select: { id: true }
+  });
+  for (const aj of activeJobs) {
+    localAutomationLocks.delete(aj.id);
+    clearActiveWorkers(aj.id);
+  }
+
+  // 1. Cancel any active or pending runs
+  await prisma.$transaction([
+    prisma.submissionJob.updateMany({
+      where: { userId, status: { in: ["Pending", "Running"] } },
+      data: { status: "Cancelled", completedAt: new Date() }
+    }),
+    prisma.submissionResult.updateMany({
+      where: { job: { userId }, status: { in: ["Pending", "Discovering", "Running"] } },
+      data: { status: "Cancelled", message: "Cancelled by reset" }
+    })
+  ]);
+
+  // 2. Delete all past/cancelled/completed submission jobs for user to guarantee a clean initial state
+  const allUserJobs = await prisma.submissionJob.findMany({
+    where: { userId },
+    select: { id: true }
+  });
+  if (allUserJobs.length > 0) {
+    const jobIds = allUserJobs.map((j) => j.id);
+    await prisma.jobLog.deleteMany({ where: { jobId: { in: jobIds } } }).catch(() => undefined);
+    await prisma.submissionJob.deleteMany({ where: { userId } });
+  }
+
+  return true;
 }
 
-export async function getBackgroundAutomationAction(jobId?: string) {
+export async function resetBackgroundAutomationAction(jobId?: string): Promise<boolean> {
   const user = await requireUser();
+  return resetBackgroundAutomationForUser(user.id, jobId);
+}
+
+export async function getBackgroundAutomationForUser(userId: string, jobId?: string) {
   if (jobId) {
-    // A browser/context can occasionally stop responding without rejecting its
-    // promise. Recover that one website shortly after its hard deadline so the
-    // rest of the batch is never held hostage by it.
     if (config.queueProvider === "local") {
       const staleResultBefore = new Date(
         Date.now() - config.worker.websiteTimeoutMs - 30_000
@@ -362,7 +424,7 @@ export async function getBackgroundAutomationAction(jobId?: string) {
           jobId,
           status: { in: ["Discovering", "Running"] },
           updatedAt: { lt: staleResultBefore },
-          job: { userId: user.id, status: "Running" }
+          job: { userId, status: "Running" }
         },
         data: {
           status: "Failed",
@@ -373,7 +435,7 @@ export async function getBackgroundAutomationAction(jobId?: string) {
     }
 
     const dbJob = await prisma.submissionJob.findFirst({
-      where: { id: jobId, userId: user.id },
+      where: { id: jobId, userId },
       include: {
         results: {
           include: {
@@ -388,36 +450,10 @@ export async function getBackgroundAutomationAction(jobId?: string) {
   }
 
   // When called without jobId (e.g. user reloaded page or opened new window),
-  // do NOT cancel running jobs after 30 minutes!
-  // Only clean up truly abandoned runs if they have been inactive for > 12 hours AND are not in memory.
-  const staleBefore = new Date(Date.now() - 12 * 60 * 60 * 1000);
-  const staleJobs = await prisma.submissionJob.findMany({
-    where: { userId: user.id, status: "Running", updatedAt: { lt: staleBefore } },
-    select: { id: true }
-  });
-
-  const trulyStaleJobIds = staleJobs
-    .map((job) => job.id)
-    .filter((id) => !localAutomationLocks.has(id));
-
-  if (trulyStaleJobIds.length > 0) {
-    await prisma.$transaction([
-      prisma.submissionJob.updateMany({
-        where: { id: { in: trulyStaleJobIds }, userId: user.id, status: "Running" },
-        data: { status: "Cancelled", completedAt: new Date() }
-      }),
-      prisma.submissionResult.updateMany({
-        where: {
-          jobId: { in: trulyStaleJobIds },
-          status: { in: ["Pending", "Discovering", "Running"] }
-        },
-        data: { status: "Cancelled", message: "Stale run cleared automatically" }
-      })
-    ]);
-  }
-
+  // only reconnect if there is an active Running or Pending run!
+  // If the run has finished or was reset, return null so the page starts in a clean state.
   const dbJob = await prisma.submissionJob.findFirst({
-    where: { userId: user.id },
+    where: { userId, status: { in: ["Running", "Pending"] } },
     orderBy: { createdAt: "desc" },
     include: {
       results: {
@@ -430,6 +466,11 @@ export async function getBackgroundAutomationAction(jobId?: string) {
   });
   if (!dbJob) return null;
   return mapJobToBackgroundJob(dbJob);
+}
+
+export async function getBackgroundAutomationAction(jobId?: string) {
+  const user = await requireUser();
+  return getBackgroundAutomationForUser(user.id, jobId);
 }
 
 function localResultCompleted(result: AutomationResult) {
@@ -796,6 +837,7 @@ function serializeResult(
     discoveryReason: details.discoveryReason ?? null,
     targetType: details.targetType ?? null,
     status: result.status,
+    submissionOutcome: result.submissionOutcome ?? (result.status === "success" ? "PASS" : "FAILED"),
     errorMessage: result.errorMessage,
     screenshotPath: proofPath(result.screenshotPath),
     screenshotPaths: (result.screenshotPaths ?? (result.screenshotPath ? [result.screenshotPath] : []))

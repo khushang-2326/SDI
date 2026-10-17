@@ -44,6 +44,7 @@ export interface ActionButtonCandidate {
   target: string;
   onclick: string;
   isModalTrigger: boolean;
+  isDirectExternalCommunication?: boolean;
   score: number;
   reason: string;
   fingerprint: string;
@@ -55,33 +56,55 @@ export const ACTION_BUTTON_KEYWORDS: Array<{
   score: number;
   label: string;
 }> = [
-  // High-priority Booking / Scheduling
-  { pattern: /\bbook(\s*a)?\s*(call|meeting|appointment|demo|now)\b/i, score: 120, label: "Book CTA" },
-  { pattern: /\bschedule(\s*a)?\s*(meeting|call|consultation|appointment|now|demo)\b/i, score: 115, label: "Schedule CTA" },
-  { pattern: /\bmeeting\s*now\b/i, score: 110, label: "Meeting Now" },
-  { pattern: /\bmake\s*an?\s*appointment\b/i, score: 110, label: "Make an Appointment" },
-  { pattern: /\bfree\s*consultation\b/i, score: 105, label: "Free Consultation" },
-  { pattern: /\brequest(\s*a)?\s*consultation\b/i, score: 105, label: "Request a Consultation" },
+  // 1. High-priority Booking / Scheduling
+  { pattern: /\bbook(\s*a)?\s*(call|meeting|appointment|demo|now|consultation|session)\b/i, score: 125, label: "Book CTA" },
+  { pattern: /\bschedule(\s*a)?\s*(meeting|call|consultation|appointment|now|demo|session)\b/i, score: 120, label: "Schedule CTA" },
+  { pattern: /\bmake\s*an?\s*appointment\b/i, score: 115, label: "Make an Appointment" },
+  { pattern: /\bmeeting\s*now\b/i, score: 115, label: "Meeting Now" },
+  { pattern: /\breserve\s*now\b/i, score: 110, label: "Reserve Now" },
+  { pattern: /\brequest(\s*a)?\s*(booking|reservation)\b/i, score: 110, label: "Request a Booking" },
+  { pattern: /\bfree\s*consultation\b/i, score: 110, label: "Free Consultation" },
+  { pattern: /\b(schedule|book)\s*a\s*consultation\b/i, score: 110, label: "Schedule a Consultation" },
 
-  // High-priority Contact / Quote
-  { pattern: /\bcontact\s*(us)?\b/i, score: 100, label: "Contact Us" },
-  { pattern: /\bget\s*in\s*touch\b/i, score: 95, label: "Get in Touch" },
+  // 2. High-priority Calling & Contacting
+  { pattern: /\bcontact\s*(us|me)?\b/i, score: 105, label: "Contact Us" },
+  { pattern: /\bget\s*in\s*(touch|contact)\b/i, score: 105, label: "Get in Touch" },
+  { pattern: /\btalk\s*to\s*(us|our\s*team|sales|a?\s*specialist|an?\s*expert|a?\s*consultant)\b/i, score: 100, label: "Talk to Us" },
+  { pattern: /\bspeak\s*(to|with)\s*(us|sales|our\s*team|an?\s*expert|a?\s*specialist)\b/i, score: 100, label: "Speak to Us" },
   { pattern: /\blet'?s\s*talk\b/i, score: 95, label: "Let's Talk" },
-  { pattern: /\btalk\s*to\s*(us|our\s*team|sales)\b/i, score: 90, label: "Talk to Us" },
-  { pattern: /\b(request|get)(\s*a)?\s*quote\b/i, score: 90, label: "Request a Quote" },
-  { pattern: /\b(enquire\s*now|send\s*inquiry|make\s*an\s*inquiry|inquire)\b/i, score: 90, label: "Inquire" },
-  { pattern: /\bcall\s*us\b/i, score: 85, label: "Call Us" },
+  { pattern: /\brequest(\s*a)?\s*call(back)?\b/i, score: 95, label: "Request a Call" },
+  { pattern: /\bcall\s*(me\s*back|us|now)\b/i, score: 90, label: "Call Us" },
+
+  // 3. Meetings & Consultations
+  { pattern: /\bmeet\s*(with\s*)?(us|the\s*team)\b/i, score: 95, label: "Meet Us" },
+  { pattern: /\bjoin\s*(a\s*)?meeting\b/i, score: 90, label: "Join Meeting" },
+  { pattern: /\bstart\s*(a\s*)?meeting\b/i, score: 90, label: "Start Meeting" },
+  { pattern: /\bconsult\s*us\b/i, score: 90, label: "Consult Us" },
+  { pattern: /\brequest(\s*a)?\s*consultation\b/i, score: 95, label: "Request a Consultation" },
+
+  // 4. Sales, Demos, and Business Inquiries
+  { pattern: /\b(request|book|get)(\s*a)?\s*demo\b/i, score: 100, label: "Demo CTA" },
+  { pattern: /\b(request|get)(\s*a)?\s*quote\b/i, score: 95, label: "Request a Quote" },
+  { pattern: /\b(enquire\s*now|send(\s*an)?\s*inquiry|make\s*an\s*inquiry|inquire\s*now|inquire)\b/i, score: 95, label: "Inquire" },
+  { pattern: /\brequest\s*information\b/i, score: 90, label: "Request Information" },
+  { pattern: /\bask\s*an?\s*expert\b/i, score: 90, label: "Ask an Expert" },
+  { pattern: /\bconnect\s*with\s*us\b/i, score: 90, label: "Connect with Us" },
+  { pattern: /\bcontact\s*sales\b/i, score: 95, label: "Contact Sales" },
+  { pattern: /\bwork\s*with\s*us\b/i, score: 85, label: "Work with Us" },
   { pattern: /\bstart\s*a\s*project\b/i, score: 85, label: "Start a Project" },
-  { pattern: /\bwork\s*with\s*us\b/i, score: 80, label: "Work with Us" },
+  { pattern: /\bget\s*started\b/i, score: 80, label: "Get Started" },
+  { pattern: /\bstart\s*now\b/i, score: 80, label: "Start Now" },
+  { pattern: /\bjoin\s*now\b/i, score: 80, label: "Join Now" },
+  { pattern: /\bregister\s*now\b/i, score: 75, label: "Register Now" },
 
-  // General Action CTAs
-  { pattern: /\bjoin\s*now\b/i, score: 75, label: "Join Now" },
-  { pattern: /\bstart\s*now\b/i, score: 75, label: "Start Now" },
-  { pattern: /\bget\s*started\b/i, score: 75, label: "Get Started" },
-  { pattern: /\bregister\s*now\b/i, score: 70, label: "Register Now" },
+  // 5. Customer messaging & support CTAs (inspected for contact forms)
+  { pattern: /\b(message|email)\s*us\b/i, score: 80, label: "Message Us" },
+  { pattern: /\b(help\s*and\s*support|customer\s*support)\b/i, score: 75, label: "Customer Support" },
+  { pattern: /\blet'?s\s*connect\b/i, score: 75, label: "Let's Connect" },
+  { pattern: /\bdiscover\s*more\b/i, score: 65, label: "Discover More" },
 
-  // Multilingual equivalents
-  { pattern: /\b(contacto|cont[aá]ctenos|contactez[- ]nous|kontakt|contattaci|pedir\s*cita|cita\s*previa|devis|termin\s*vereinbaren|agendar)\b/i, score: 95, label: "Multilingual Contact" }
+  // 6. Multilingual equivalents
+  { pattern: /\b(contacto|cont[aá]ctenos|contactez[- ]nous|kontakt|contattaci|pedir\s*cita|cita\s*previa|devis|termin\s*vereinbaren|agendar|habla\s*con\s*nosotros|solicitar\s*demo)\b/i, score: 100, label: "Multilingual Contact" }
 ];
 
 export const SCHEDULER_URL_PATTERN =
@@ -129,26 +152,55 @@ export async function discoverActionButtonsOnPage(
         /calendly\.com|meetings(-[a-z0-9]+)?\.hubspot\.com|leadconnectorhq\.com\/widget\/booking|acuityscheduling\.com|tidycal\.com|simplybook\.me|youcanbook\.me|calendarhero\.com|appointlet\.com|setmore\.com|cal\.com/i;
 
       const KEYWORD_RULES = [
-        { pattern: /\bbook(\s*a)?\s*(call|meeting|appointment|demo|now)\b/i, score: 120, label: "Book CTA" },
-        { pattern: /\bschedule(\s*a)?\s*(meeting|call|consultation|appointment|now|demo)\b/i, score: 115, label: "Schedule CTA" },
-        { pattern: /\bmeeting\s*now\b/i, score: 110, label: "Meeting Now" },
-        { pattern: /\bmake\s*an?\s*appointment\b/i, score: 110, label: "Make an Appointment" },
-        { pattern: /\bfree\s*consultation\b/i, score: 105, label: "Free Consultation" },
-        { pattern: /\brequest(\s*a)?\s*consultation\b/i, score: 105, label: "Request a Consultation" },
-        { pattern: /\bcontact\s*(us)?\b/i, score: 100, label: "Contact Us" },
-        { pattern: /\bget\s*in\s*touch\b/i, score: 95, label: "Get in Touch" },
+        // 1. High-priority Booking / Scheduling
+        { pattern: /\bbook(\s*a)?\s*(call|meeting|appointment|demo|now|consultation|session)\b/i, score: 125, label: "Book CTA" },
+        { pattern: /\bschedule(\s*a)?\s*(meeting|call|consultation|appointment|now|demo|session)\b/i, score: 120, label: "Schedule CTA" },
+        { pattern: /\bmake\s*an?\s*appointment\b/i, score: 115, label: "Make an Appointment" },
+        { pattern: /\bmeeting\s*now\b/i, score: 115, label: "Meeting Now" },
+        { pattern: /\breserve\s*now\b/i, score: 110, label: "Reserve Now" },
+        { pattern: /\brequest(\s*a)?\s*(booking|reservation)\b/i, score: 110, label: "Request a Booking" },
+        { pattern: /\bfree\s*consultation\b/i, score: 110, label: "Free Consultation" },
+        { pattern: /\b(schedule|book)\s*a\s*consultation\b/i, score: 110, label: "Schedule a Consultation" },
+
+        // 2. High-priority Calling & Contacting
+        { pattern: /\bcontact\s*(us|me)?\b/i, score: 105, label: "Contact Us" },
+        { pattern: /\bget\s*in\s*(touch|contact)\b/i, score: 105, label: "Get in Touch" },
+        { pattern: /\btalk\s*to\s*(us|our\s*team|sales|a?\s*specialist|an?\s*expert|a?\s*consultant)\b/i, score: 100, label: "Talk to Us" },
+        { pattern: /\bspeak\s*(to|with)\s*(us|sales|our\s*team|an?\s*expert|a?\s*specialist)\b/i, score: 100, label: "Speak to Us" },
         { pattern: /\blet'?s\s*talk\b/i, score: 95, label: "Let's Talk" },
-        { pattern: /\btalk\s*to\s*(us|our\s*team|sales)\b/i, score: 90, label: "Talk to Us" },
-        { pattern: /\b(request|get)(\s*a)?\s*quote\b/i, score: 90, label: "Request a Quote" },
-        { pattern: /\b(enquire\s*now|send\s*inquiry|make\s*an\s*inquiry|inquire)\b/i, score: 90, label: "Inquire" },
-        { pattern: /\bcall\s*us\b/i, score: 85, label: "Call Us" },
+        { pattern: /\brequest(\s*a)?\s*call(back)?\b/i, score: 95, label: "Request a Call" },
+        { pattern: /\bcall\s*(me\s*back|us|now)\b/i, score: 90, label: "Call Us" },
+
+        // 3. Meetings & Consultations
+        { pattern: /\bmeet\s*(with\s*)?(us|the\s*team)\b/i, score: 95, label: "Meet Us" },
+        { pattern: /\bjoin\s*(a\s*)?meeting\b/i, score: 90, label: "Join Meeting" },
+        { pattern: /\bstart\s*(a\s*)?meeting\b/i, score: 90, label: "Start Meeting" },
+        { pattern: /\bconsult\s*us\b/i, score: 90, label: "Consult Us" },
+        { pattern: /\brequest(\s*a)?\s*consultation\b/i, score: 95, label: "Request a Consultation" },
+
+        // 4. Sales, Demos, and Business Inquiries
+        { pattern: /\b(request|book|get)(\s*a)?\s*demo\b/i, score: 100, label: "Demo CTA" },
+        { pattern: /\b(request|get)(\s*a)?\s*quote\b/i, score: 95, label: "Request a Quote" },
+        { pattern: /\b(enquire\s*now|send(\s*an)?\s*inquiry|make\s*an\s*inquiry|inquire\s*now|inquire)\b/i, score: 95, label: "Inquire" },
+        { pattern: /\brequest\s*information\b/i, score: 90, label: "Request Information" },
+        { pattern: /\bask\s*an?\s*expert\b/i, score: 90, label: "Ask an Expert" },
+        { pattern: /\bconnect\s*with\s*us\b/i, score: 90, label: "Connect with Us" },
+        { pattern: /\bcontact\s*sales\b/i, score: 95, label: "Contact Sales" },
+        { pattern: /\bwork\s*with\s*us\b/i, score: 85, label: "Work with Us" },
         { pattern: /\bstart\s*a\s*project\b/i, score: 85, label: "Start a Project" },
-        { pattern: /\bwork\s*with\s*us\b/i, score: 80, label: "Work with Us" },
-        { pattern: /\bjoin\s*now\b/i, score: 75, label: "Join Now" },
-        { pattern: /\bstart\s*now\b/i, score: 75, label: "Start Now" },
-        { pattern: /\bget\s*started\b/i, score: 75, label: "Get Started" },
-        { pattern: /\bregister\s*now\b/i, score: 70, label: "Register Now" },
-        { pattern: /\b(contacto|cont[aá]ctenos|contactez[- ]nous|kontakt|contattaci|pedir\s*cita|cita\s*previa|devis|termin\s*vereinbaren|agendar)\b/i, score: 95, label: "Multilingual Contact" }
+        { pattern: /\bget\s*started\b/i, score: 80, label: "Get Started" },
+        { pattern: /\bstart\s*now\b/i, score: 80, label: "Start Now" },
+        { pattern: /\bjoin\s*now\b/i, score: 80, label: "Join Now" },
+        { pattern: /\bregister\s*now\b/i, score: 75, label: "Register Now" },
+
+        // 5. Customer messaging & support CTAs (inspected for contact forms)
+        { pattern: /\b(message|email)\s*us\b/i, score: 80, label: "Message Us" },
+        { pattern: /\b(help\s*and\s*support|customer\s*support)\b/i, score: 75, label: "Customer Support" },
+        { pattern: /\blet'?s\s*connect\b/i, score: 75, label: "Let's Connect" },
+        { pattern: /\bdiscover\s*more\b/i, score: 65, label: "Discover More" },
+
+        // 6. Multilingual equivalents
+        { pattern: /\b(contacto|cont[aá]ctenos|contactez[- ]nous|kontakt|contattaci|pedir\s*cita|cita\s*previa|devis|termin\s*vereinbaren|agendar|habla\s*con\s*nosotros|solicitar\s*demo)\b/i, score: 100, label: "Multilingual Contact" }
       ];
 
       const results: Array<{
@@ -161,6 +213,7 @@ export async function discoverActionButtonsOnPage(
         target: string;
         onclick: string;
         isModalTrigger: boolean;
+        isDirectExternalCommunication: boolean;
         score: number;
         reason: string;
         fingerprint: string;
@@ -290,7 +343,11 @@ export async function discoverActionButtonsOnPage(
         if (seenFingerprints.has(fingerprint)) continue;
         seenFingerprints.add(fingerprint);
 
-        // Assign a unique temporary attribute to locate this element precisely in Playwright
+        const isDirectExternalCommunication =
+          href.startsWith("tel:") ||
+          href.startsWith("mailto:") ||
+          /whatsapp\.com|wa\.me/i.test(href);
+
         el.setAttribute("data-sdi-action-button", String(results.length));
 
         results.push({
@@ -303,6 +360,7 @@ export async function discoverActionButtonsOnPage(
           target,
           onclick,
           isModalTrigger,
+          isDirectExternalCommunication,
           score,
           reason: matchedReason || "Context-aware action button",
           fingerprint
@@ -385,6 +443,12 @@ export async function executeActionButtonFallback({
     attemptedFingerprints.add(candidate.fingerprint);
 
     console.log(`[ACTION-BUTTON-FALLBACK] Attempting candidate ${i + 1}/${candidates.length}: "${candidate.text}" [${candidate.tagName}] (href="${candidate.href}", score=${candidate.score})`);
+
+    // Safe interaction rule: do NOT trigger native OS dialers, email clients, or messaging apps
+    if (candidate.isDirectExternalCommunication) {
+      console.log(`[ACTION-BUTTON-FALLBACK] Candidate "${candidate.text}" is a direct communication link (${candidate.href}). Skipping automated activation to follow safe interaction policy.`);
+      continue;
+    }
 
     // Diagnostic screenshot before clicking
     await takeDiagnosticScreenshot(page, websiteUrl, `before-action-btn-${i + 1}`).catch(() => null);

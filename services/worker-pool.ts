@@ -39,6 +39,14 @@ export function getActiveWorkers(jobId: string): WorkerStatusInfo[] {
   return jobWorkers ? Array.from(jobWorkers.values()) : [];
 }
 
+export function clearActiveWorkers(jobId?: string): void {
+  if (jobId) {
+    activeWorkerRegistry.delete(jobId);
+  } else {
+    activeWorkerRegistry.clear();
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

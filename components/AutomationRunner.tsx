@@ -108,6 +108,12 @@ function AutomationAnalysisModal({
   const [searchQuery, setSearchQuery] = useState("");
   const [copied, setCopied] = useState(false);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [modalPage, setModalPage] = useState(1);
+  const modalPageSize = 50;
+
+  useEffect(() => {
+    setModalPage(1);
+  }, [filter, searchQuery]);
 
   useEffect(() => {
     setMounted(true);
@@ -498,79 +504,120 @@ ${items
             />
           </div>
 
-          {/* Filtered Website List */}
-          <div className="space-y-3">
-            {filteredItems.map((item, idx) => (
-              <div
-                key={item.id || idx}
-                className={`rounded-2xl border p-4 transition ${
-                  item.isSuccess
-                    ? "border-emerald-700/60 bg-emerald-950/30 text-emerald-100"
-                    : item.status === "failed"
-                    ? "border-red-700/60 bg-red-950/30 text-red-100"
-                    : "border-slate-800 bg-slate-800/40 text-slate-200"
-                }`}
-              >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-slate-400">#{idx + 1}</span>
-                      <h4 className="text-sm font-bold text-white">{item.name}</h4>
-                    </div>
-                    <p className="break-all text-xs opacity-75">{item.url}</p>
-                  </div>
+          {/* Filtered Website List with Pagination */}
+          {(() => {
+            const totalModalPages = Math.max(1, Math.ceil(filteredItems.length / modalPageSize));
+            const currentModalPage = Math.min(modalPage, totalModalPages);
+            const startIdx = (currentModalPage - 1) * modalPageSize;
+            const paginatedModalItems = filteredItems.slice(startIdx, startIdx + modalPageSize);
 
-                  <span
-                    className={`rounded-full px-2.5 py-1 text-xs font-extrabold ${
-                      item.isSuccess
-                        ? "border border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
-                        : item.status === "failed"
-                        ? "border border-red-500/40 bg-red-500/20 text-red-300"
-                        : "border border-slate-600 bg-slate-700 text-slate-300"
-                    }`}
-                  >
-                    {item.isSuccess
-                      ? "✓ Succeeded"
-                      : item.status === "failed"
-                      ? "✕ Failed (0 Success)"
-                      : item.status}
-                  </span>
-                </div>
-
-                <div
-                  className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
-                    item.isSuccess
-                      ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
-                      : item.status === "failed"
-                      ? "bg-red-900/40 text-red-200 border border-red-800/50"
-                      : "bg-slate-800/60 text-slate-300"
-                  }`}
-                >
-                  <span className="mr-1 font-bold">
-                    {item.isSuccess ? "Outcome:" : "Failure Reason:"}
-                  </span>
-                  {item.detail}
-                  {item.trialsCount > 0 ? (
-                    <span className="ml-2 font-bold opacity-80">
-                      ({item.successfulTrialsCount}/{item.trialsCount} trials succeeded)
+            return (
+              <div className="space-y-3">
+                {filteredItems.length > modalPageSize ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-800/60 px-3 py-2 text-xs text-slate-300">
+                    <span>
+                      Showing {startIdx + 1}–{Math.min(startIdx + modalPageSize, filteredItems.length)} of {filteredItems.length}
                     </span>
-                  ) : null}
-                </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={currentModalPage <= 1}
+                        onClick={() => setModalPage((p) => Math.max(1, p - 1))}
+                        className="rounded-lg bg-slate-700 px-2.5 py-1 font-bold text-white transition hover:bg-slate-600 disabled:opacity-40"
+                      >
+                        ← Prev
+                      </button>
+                      <span className="px-2 font-mono">
+                        {currentModalPage} / {totalModalPages}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={currentModalPage >= totalModalPages}
+                        onClick={() => setModalPage((p) => Math.min(totalModalPages, p + 1))}
+                        className="rounded-lg bg-slate-700 px-2.5 py-1 font-bold text-white transition hover:bg-slate-600 disabled:opacity-40"
+                      >
+                        Next →
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
 
-                {item.screenshotPath ? (
-                  <div className="mt-3">
-                    <ScreenshotViewer src={item.screenshotPath} alt={item.name} />
+                {paginatedModalItems.map((item, idx) => {
+                  const actualIdx = startIdx + idx;
+                  return (
+                    <div
+                      key={item.id || actualIdx}
+                      className={`rounded-2xl border p-4 transition ${
+                        item.isSuccess
+                          ? "border-emerald-700/60 bg-emerald-950/30 text-emerald-100"
+                          : item.status === "failed"
+                          ? "border-red-700/60 bg-red-950/30 text-red-100"
+                          : "border-slate-800 bg-slate-800/40 text-slate-200"
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-slate-400">#{actualIdx + 1}</span>
+                            <h4 className="text-sm font-bold text-white">{item.name}</h4>
+                          </div>
+                          <p className="break-all text-xs opacity-75">{item.url}</p>
+                        </div>
+
+                        <span
+                          className={`rounded-full px-2.5 py-1 text-xs font-extrabold ${
+                            item.isSuccess
+                              ? "border border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+                              : item.status === "failed"
+                              ? "border border-red-500/40 bg-red-500/20 text-red-300"
+                              : "border border-slate-600 bg-slate-700 text-slate-300"
+                          }`}
+                        >
+                          {item.isSuccess
+                            ? "✓ Succeeded"
+                            : item.status === "failed"
+                            ? "✕ Failed (0 Success)"
+                            : item.status}
+                        </span>
+                      </div>
+
+                      <div
+                        className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
+                          item.isSuccess
+                            ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
+                            : item.status === "failed"
+                            ? "bg-red-900/40 text-red-200 border border-red-800/50"
+                            : "bg-slate-800/60 text-slate-300"
+                        }`}
+                      >
+                        <span className="mr-1 font-bold">
+                          {item.isSuccess ? "Outcome:" : "Failure Reason:"}
+                        </span>
+                        {item.detail}
+                        {item.trialsCount > 0 ? (
+                          <span className="ml-2 font-bold opacity-80">
+                            ({item.successfulTrialsCount}/{item.trialsCount} trials succeeded)
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {item.screenshotPath ? (
+                        <div className="mt-3">
+                          <ScreenshotViewer src={item.screenshotPath} alt={item.name} />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+
+                {filteredItems.length === 0 ? (
+                  <div className="rounded-2xl border border-slate-800 bg-slate-800/30 p-8 text-center text-xs text-slate-400">
+                    No websites match the selected filter.
                   </div>
                 ) : null}
               </div>
-            ))}
-
-            {filteredItems.length === 0 ? (
-              <div className="rounded-2xl border border-slate-800 bg-slate-800/30 p-8 text-center text-xs text-slate-400">
-                No websites match the selected filter.
-              </div>
-            ) : null}
-          </div>
+            );
+          })()}
         </div>
 
         {/* Modal Footer */}
@@ -691,7 +738,20 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [activeWorkers, setActiveWorkers] = useState<any[]>([]);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
   const [clock, setClock] = useState(() => Date.now());
+  const [manualRunCleared, setManualRunCleared] = useState(false);
+  const sessionEpochRef = useRef(0);
   const cancelledJobId = useRef<string | null>(null);
+
+  // Pagination & Filtering for batch items (eliminates lag on 3,000+ items)
+  const [batchFilter, setBatchFilter] = useState<"all" | "in_progress" | "completed" | "failed" | "waiting">("all");
+  const [batchSearchQuery, setBatchSearchQuery] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(50);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [batchFilter, batchSearchQuery]);
+
   const usingUploadedWebsite = sourceMode === "excel";
   const processingAllUploaded = selectedWebsiteId.startsWith("__file__:");
   const selectedFileGroup = fileGroups.find((group) => `__file__:${group.fileName}` === selectedWebsiteId);
@@ -727,6 +787,60 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     ? Math.max(0, (elapsedMs / finishedCount) * (liveBatchItems.length - finishedCount))
     : null;
 
+  const filterCounts = useMemo(() => {
+    let completed = 0;
+    let failed = 0;
+    let inProgress = 0;
+    let waiting = 0;
+    for (const item of liveBatchItems) {
+      if (hasSuccessfulAttempt(item)) {
+        completed++;
+      } else if (item.status === "failed") {
+        failed++;
+      } else if (item.status === "discovering") {
+        inProgress++;
+      } else {
+        waiting++;
+      }
+    }
+    return {
+      all: liveBatchItems.length,
+      inProgress,
+      completed,
+      failed,
+      waiting
+    };
+  }, [liveBatchItems]);
+
+  const filteredBatchItems = useMemo(() => {
+    if (!liveBatchItems.length) return [];
+    const q = batchSearchQuery.trim().toLowerCase();
+
+    return liveBatchItems.filter((item) => {
+      const isSuccess = hasSuccessfulAttempt(item);
+      if (batchFilter === "completed" && !isSuccess) return false;
+      if (batchFilter === "failed" && (isSuccess || item.status !== "failed")) return false;
+      if (batchFilter === "in_progress" && item.status !== "discovering") return false;
+      if (batchFilter === "waiting" && (isSuccess || item.status === "failed" || item.status === "discovering")) return false;
+
+      if (q) {
+        return (
+          item.name.toLowerCase().includes(q) ||
+          item.url.toLowerCase().includes(q) ||
+          (item.detail && item.detail.toLowerCase().includes(q))
+        );
+      }
+      return true;
+    });
+  }, [liveBatchItems, batchFilter, batchSearchQuery]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredBatchItems.length / itemsPerPage));
+  const effectivePage = Math.min(currentPage, totalPages);
+  const paginatedBatchItems = useMemo(() => {
+    const startIndex = (effectivePage - 1) * itemsPerPage;
+    return filteredBatchItems.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredBatchItems, effectivePage, itemsPerPage]);
+
   const analysisItems: AnalysisItem[] = useMemo(() => {
     if (liveBatchItems.length > 0) {
       return liveBatchItems.map((item) => {
@@ -758,7 +872,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
       });
     }
 
-    if (batchResults.length > 0) {
+    if (!manualRunCleared && batchResults.length > 0) {
       return batchResults.map((res, idx) => {
         const isSuccess = isResultSuccessful(res);
         const trialsCount = res.attempts?.length ?? 1;
@@ -788,7 +902,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
       });
     }
 
-    if (state.result) {
+    if (!manualRunCleared && state.result) {
       const isSuccess = isResultSuccessful(state.result);
       const trialsCount = state.result.attempts?.length ?? 1;
       const successfulTrialsCount = state.result.attempts?.filter(isAttemptSuccessful).length ?? (isSuccess ? 1 : 0);
@@ -819,7 +933,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     }
 
     return [];
-  }, [liveBatchItems, batchResults, state.result]);
+  }, [liveBatchItems, batchResults, state.result, manualRunCleared]);
 
   const totalTrialsExecuted = useMemo(() => {
     return analysisItems.reduce((acc, item) => acc + Math.max(1, item.trialsCount), 0);
@@ -840,6 +954,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     setJobStartedAt(new Date(job.createdAt).getTime());
     setIsBatchRunning(job.status === "running");
     setBatchStatus(job.status);
+    setManualRunCleared(false);
   }, []);
 
   function togglePauseAutomation() {
@@ -874,38 +989,54 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     );
     try {
       const cancelledJob = await cancelBackgroundAutomationAction(currentJobId);
-      // Do not allow Reset to race ahead of the database transaction. The
-      // returned job is already terminal and makes the Reset button valid.
       if (cancelledJob) applyBackgroundJob(cancelledJob);
     } finally {
       setIsCancelling(false);
     }
   }
+
   async function resetAutomation() {
-    if (!currentJobId || isBatchRunning || isCancelling || isResetting) return;
+    if (isResetting) return;
+    setIsResetting(true);
+    const epoch = ++sessionEpochRef.current;
+    const targetJobId = currentJobId;
+
+    // Immediately clear all frontend interactive state
     isPausedRef.current = false;
     setIsPaused(false);
-    setIsResetting(true);
+    setIsCancelling(false);
+    setIsBatchRunning(false);
+    setBatchStatus("idle");
+    setLiveBatchItems([]);
+    setActiveWorkers([]);
+    setCurrentJobId(null);
+    setJobStartedAt(null);
+    cancelledJobId.current = null;
+    setManualRunCleared(true);
+    setSelectedWebsiteId("");
+    setWebsiteUrl("");
+    setDirectContactUrl("");
+
     try {
-      if (await resetBackgroundAutomationAction(currentJobId)) {
-        cancelledJobId.current = null;
-        setLiveBatchItems([]);
-        setActiveWorkers([]);
-        setCurrentJobId(null);
-        setIsBatchRunning(false);
-        setBatchStatus("idle");
-      }
+      await resetBackgroundAutomationAction(targetJobId || undefined);
+    } catch (err) {
+      console.error("Reset error:", err);
     } finally {
-      setIsResetting(false);
+      if (sessionEpochRef.current === epoch) {
+        setIsResetting(false);
+      }
     }
   }
 
   useEffect(() => {
+    const epoch = sessionEpochRef.current;
     void getBackgroundAutomationAction().then((job) => {
+      if (sessionEpochRef.current !== epoch) return;
       applyBackgroundJob(job);
       if (job && job.status === "running") {
         void processLocalBackgroundAutomationAction(job.id, workerCount)
           .then((resumedJob) => {
+            if (sessionEpochRef.current !== epoch) return;
             if (resumedJob) applyBackgroundJob(resumedJob);
           })
           .catch(() => undefined);
@@ -916,15 +1047,16 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   useEffect(() => {
     if (!currentJobId || !isBatchRunning) return;
     const jobId = currentJobId;
+    const epoch = sessionEpochRef.current;
     let stopped = false;
 
     async function refreshProgress() {
       while (!stopped) {
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
-        if (stopped) return;
+        if (stopped || sessionEpochRef.current !== epoch) return;
 
         const job = await getBackgroundAutomationAction(jobId).catch(() => null);
-        if (stopped) return;
+        if (stopped || sessionEpochRef.current !== epoch) return;
         if (job) applyBackgroundJob(job);
         if (!job || job.status !== "running") return;
 
@@ -932,7 +1064,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         if (!job.items.some((item) => item.status === "discovering")) {
           void processLocalBackgroundAutomationAction(jobId, workerCount)
             .then((resumedJob) => {
-              if (!stopped && resumedJob) applyBackgroundJob(resumedJob);
+              if (!stopped && sessionEpochRef.current === epoch && resumedJob) applyBackgroundJob(resumedJob);
             })
             .catch(() => undefined);
         }
@@ -945,6 +1077,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
   async function submitWorkflow(event: FormEvent<HTMLFormElement>) {
     if (!processingAllUploaded) {
+      setManualRunCleared(false);
       openMonitorTab(event.currentTarget);
       return;
     }
@@ -952,6 +1085,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     event.preventDefault();
     if (isBatchRunning) return;
 
+    const epoch = ++sessionEpochRef.current;
     const baseFormData = new FormData(event.currentTarget);
     const initialItems = batchWebsites.map((website) => ({
       id: website.id,
@@ -966,11 +1100,28 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     setIsBatchRunning(true);
     setBatchStatus("running");
     cancelledJobId.current = null;
+    setManualRunCleared(false);
 
     baseFormData.set("websiteIds", JSON.stringify(batchWebsites.map((website) => website.id)));
     baseFormData.set("workerCount", String(workerCount));
-    try { applyBackgroundJob(await startBackgroundAutomationAction(baseFormData)); }
-    catch (error) { setIsBatchRunning(false); setBatchStatus("completed"); setLiveBatchItems((items) => items.map((item) => ({ ...item, status: "failed", detail: error instanceof Error ? error.message : "Unable to start background automation" }))); }
+    try {
+      const job = await startBackgroundAutomationAction(baseFormData);
+      if (sessionEpochRef.current === epoch) {
+        applyBackgroundJob(job);
+      }
+    } catch (error) {
+      if (sessionEpochRef.current === epoch) {
+        setIsBatchRunning(false);
+        setBatchStatus("completed");
+        setLiveBatchItems((items) =>
+          items.map((item) => ({
+            ...item,
+            status: "failed",
+            detail: error instanceof Error ? error.message : "Unable to start background automation"
+          }))
+        );
+      }
+    }
   }
 
   function openMonitorTab(form: HTMLFormElement) {
@@ -1276,9 +1427,20 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
             <button
               className="rounded-xl border border-line bg-white px-3 py-1.5 text-xs font-semibold text-brand transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
-              disabled={isBatchRunning || isCancelling || isResetting || !currentJobId || liveBatchItems.length === 0}
+              disabled={
+                isResetting ||
+                (!isBatchRunning &&
+                  !currentJobId &&
+                  liveBatchItems.length === 0 &&
+                  (manualRunCleared || !state.result) &&
+                  (manualRunCleared || !batchResults.length) &&
+                  !websiteUrl &&
+                  !selectedWebsiteId &&
+                  batchStatus === "idle")
+              }
               onClick={resetAutomation}
               type="button"
+              title="Reset all automation state, cancel running jobs, and clear the screen"
             >
               {isResetting ? "Resetting..." : "Reset"}
             </button>
@@ -1391,7 +1553,121 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
               <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Elapsed</span><strong className="ml-2 text-ink">{formatDuration(elapsedMs)}</strong></div>
               <div className="rounded-xl border border-line bg-canvas px-3 py-2"><span className="text-muted">Estimated time left</span><strong className="ml-2 text-ink">{estimatedRemainingMs === null ? "Calculating…" : formatDuration(estimatedRemainingMs)}</strong></div>
             </div>
-            {liveBatchItems.map((item, index) => {
+
+            {/* Filter and Search Bar for Batch Items */}
+            <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-line bg-slate-50/70 p-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setBatchFilter("all")}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
+                    batchFilter === "all"
+                      ? "bg-indigo-600 text-white shadow-sm"
+                      : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-100"
+                  }`}
+                >
+                  All ({filterCounts.all})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBatchFilter("in_progress")}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
+                    batchFilter === "in_progress"
+                      ? "bg-indigo-600 text-white shadow-sm"
+                      : "bg-white text-indigo-700 border border-indigo-200 hover:bg-indigo-50"
+                  }`}
+                >
+                  In Progress ({filterCounts.inProgress})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBatchFilter("completed")}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
+                    batchFilter === "completed"
+                      ? "bg-emerald-600 text-white shadow-sm"
+                      : "bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50"
+                  }`}
+                >
+                  ✓ Completed ({filterCounts.completed})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBatchFilter("failed")}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
+                    batchFilter === "failed"
+                      ? "bg-red-600 text-white shadow-sm"
+                      : "bg-white text-red-700 border border-red-200 hover:bg-red-50"
+                  }`}
+                >
+                  ✕ Failed ({filterCounts.failed})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBatchFilter("waiting")}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-bold transition ${
+                    batchFilter === "waiting"
+                      ? "bg-slate-700 text-white shadow-sm"
+                      : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-100"
+                  }`}
+                >
+                  Waiting ({filterCounts.waiting})
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="Filter websites..."
+                  value={batchSearchQuery}
+                  onChange={(e) => setBatchSearchQuery(e.target.value)}
+                  className="rounded-lg border border-line bg-white px-2.5 py-1 text-xs text-ink placeholder-muted outline-none focus:border-brand focus:ring-2 focus:ring-brand/10 w-44"
+                />
+                <select
+                  value={itemsPerPage}
+                  onChange={(e) => setItemsPerPage(Number(e.target.value))}
+                  className="rounded-lg border border-line bg-white px-2 py-1 text-xs text-ink outline-none"
+                  title="Items per page"
+                >
+                  <option value={25}>25 / page</option>
+                  <option value={50}>50 / page</option>
+                  <option value={100}>100 / page</option>
+                  <option value={250}>250 / page</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Pagination Top Indicator */}
+            {filteredBatchItems.length > itemsPerPage ? (
+              <div className="flex items-center justify-between text-xs text-muted px-1">
+                <span>
+                  Showing {(effectivePage - 1) * itemsPerPage + 1}–{Math.min(effectivePage * itemsPerPage, filteredBatchItems.length)} of {filteredBatchItems.length}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={effectivePage <= 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    className="rounded-lg border border-line bg-white px-2.5 py-1 font-semibold text-ink transition hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    ← Prev
+                  </button>
+                  <span className="font-mono text-ink">
+                    {effectivePage} / {totalPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={effectivePage >= totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    className="rounded-lg border border-line bg-white px-2.5 py-1 font-semibold text-ink transition hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    Next →
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {paginatedBatchItems.map((item) => {
+              const overallIndex = liveBatchItems.findIndex((x) => x.id === item.id) + 1;
               const isSuccess = hasSuccessfulAttempt(item);
               const isFailedZeroSuccess = item.status === "failed" && !isSuccess;
               const attemptsCount = item.result?.attempts?.length ?? 0;
@@ -1402,7 +1678,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-                        Website {index + 1} of {liveBatchItems.length}
+                        Website {overallIndex > 0 ? overallIndex : 1} of {liveBatchItems.length}
                       </p>
                       <p className="mt-1 text-sm font-semibold text-ink">{item.name}</p>
                       <p className="break-all text-xs text-muted">{item.url}</p>
@@ -1463,9 +1739,40 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                 </div>
               );
             })}
+
+            {filteredBatchItems.length === 0 ? (
+              <div className="rounded-2xl border border-line bg-canvas p-8 text-center text-xs text-muted">
+                No websites match the selected filter or search query.
+              </div>
+            ) : null}
+
+            {/* Pagination Bottom Indicator */}
+            {filteredBatchItems.length > itemsPerPage ? (
+              <div className="flex items-center justify-center gap-2 pt-2 text-xs">
+                <button
+                  type="button"
+                  disabled={effectivePage <= 1}
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  className="rounded-lg border border-line bg-white px-3 py-1.5 font-semibold text-ink transition hover:bg-slate-50 disabled:opacity-40"
+                >
+                  ← Previous Page
+                </button>
+                <span className="font-mono text-ink">
+                  Page {effectivePage} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={effectivePage >= totalPages}
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  className="rounded-lg border border-line bg-white px-3 py-1.5 font-semibold text-ink transition hover:bg-slate-50 disabled:opacity-40"
+                >
+                  Next Page →
+                </button>
+              </div>
+            ) : null}
           </div>
         ) : null}
-        {batchResults.length > 1 ? (
+        {!manualRunCleared && batchResults.length > 1 ? (
           <div className="mt-5 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-ink">Uploaded website batch results</h3>
@@ -1498,7 +1805,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             <h3 className="pt-2 text-sm font-semibold text-ink">Last processed website details</h3>
           </div>
         ) : null}
-        {state.result ? (() => {
+        {!manualRunCleared && state.result ? (() => {
           const isSuccess = isResultSuccessful(state.result);
           return (
             <div className={`mt-5 space-y-4 rounded-2xl border p-5 transition duration-300 ${isSuccess ? "border-emerald-300 bg-emerald-50/80 ring-1 ring-emerald-200/70 shadow-sm" : "border-red-300 bg-red-50/80 ring-1 ring-red-200/70 shadow-sm"}`}>

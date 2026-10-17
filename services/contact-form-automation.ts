@@ -788,7 +788,12 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
   const dropdowns = scope.locator([
     "[role='combobox']:not(select)",
     "[aria-haspopup='listbox']:not(select)",
-    "[aria-haspopup='menu'][role='button']"
+    "[aria-haspopup='menu'][role='button']",
+    ".select2-selection",
+    ".choices__inner",
+    ".react-select__control",
+    ".dropdown-toggle",
+    "[data-radix-collection-item]"
   ].join(", "));
   const filled: string[] = [];
   try {
@@ -803,10 +808,16 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
       const opened = await dropdown.click({ timeout: 1500 }).then(() => true).catch(() => false);
       if (!opened) continue;
 
+      await dropdown.page().waitForTimeout(150).catch(() => undefined);
+
       const options = dropdown.page().locator([
         "[role='listbox']:visible [role='option']:visible",
         "[role='menu']:visible [role='menuitem']:visible",
-        "[role='option']:visible"
+        "[role='option']:visible",
+        ".select2-results__option:not(.select2-results__option--disabled):visible",
+        ".choices__item--choice:not(.choices__item--disabled):visible",
+        ".dropdown-menu .dropdown-item:visible",
+        ".react-select__option:visible"
       ].join(", "));
       const optionCount = await options.count().catch(() => 0);
       let selected = false;
@@ -817,19 +828,20 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
           text: (element.textContent ?? "").replace(/\s+/g, " ").trim(),
           disabled:
             element.getAttribute("aria-disabled") === "true" ||
-            (element as HTMLButtonElement).disabled === true
+            (element as HTMLButtonElement).disabled === true ||
+            element.classList.contains("disabled")
         })).catch(() => ({ text: "", disabled: true }));
-        const isPlaceholder = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b)/i.test(optionState.text);
+        const isPlaceholder = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|^$)/i.test(optionState.text);
         if (optionState.disabled || !optionState.text || isPlaceholder) continue;
 
-      selected = await option.click({ timeout: 2000 }).then(() => true).catch(() => false);
-      if (selected) {
-        filled.push(`custom-dropdown:${index}`);
-        break;
+        selected = await option.click({ timeout: 2000 }).then(() => true).catch(() => false);
+        if (selected) {
+          filled.push(`custom-dropdown:${index}`);
+          break;
+        }
       }
-    }
 
-    if (!selected) await dropdown.press("Escape").catch(() => undefined);
+      if (!selected) await dropdown.press("Escape").catch(() => undefined);
     }
   } catch {
     // Ignore dropdown evaluation interruptions
@@ -3658,6 +3670,9 @@ export async function submitContactForm({
     const result: SubmitContactFormResult = {
       websiteUrl,
       status: shouldSubmit ? "success" : "dry_run_ready_to_book",
+      submissionOutcome: shouldSubmit
+        ? (explicitSuccess ? "VERIFIED_SUCCESS" : "PASS")
+        : "PASS",
       errorMessage: null,
       message: shouldSubmit
         ? (explicitSuccess
@@ -3713,6 +3728,7 @@ export async function submitContactForm({
     const result: SubmitContactFormResult = {
       websiteUrl,
       status: "failed",
+      submissionOutcome: "FAILED",
       errorMessage,
       screenshotPath,
       submittedAt,

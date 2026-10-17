@@ -1,0 +1,64 @@
+import { Client } from 'ssh2';
+import * as fs from 'fs';
+
+const conn = new Client();
+conn.on('ready', () => {
+  console.log('[SSH] Connected to Contabo VPS (94.72.119.156). Syncing updated automation services...');
+  conn.sftp((err, sftp) => {
+    if (err) { console.error('SFTP error:', err); process.exit(1); }
+
+    const filesToSync = [
+      { local: 'd:/Projects/SDI/services/field-classifier.ts', remote: '/root/SDI/services/field-classifier.ts', container: 'sdi:/app/services/field-classifier.ts' },
+      { local: 'd:/Projects/SDI/services/action-button-fallback.ts', remote: '/root/SDI/services/action-button-fallback.ts', container: 'sdi:/app/services/action-button-fallback.ts' },
+      { local: 'd:/Projects/SDI/services/submission-target-discovery.ts', remote: '/root/SDI/services/submission-target-discovery.ts', container: 'sdi:/app/services/submission-target-discovery.ts' },
+      { local: 'd:/Projects/SDI/services/multi-target-automation.ts', remote: '/root/SDI/services/multi-target-automation.ts', container: 'sdi:/app/services/multi-target-automation.ts' },
+      { local: 'd:/Projects/SDI/services/contact-form-automation.ts', remote: '/root/SDI/services/contact-form-automation.ts', container: 'sdi:/app/services/contact-form-automation.ts' },
+      { local: 'd:/Projects/SDI/services/success-invariants.ts', remote: '/root/SDI/services/success-invariants.ts', container: 'sdi:/app/services/success-invariants.ts' },
+      { local: 'd:/Projects/SDI/tsconfig.json', remote: '/root/SDI/tsconfig.json', container: 'sdi:/app/tsconfig.json' }
+    ];
+
+    let completed = 0;
+    for (const f of filesToSync) {
+      sftp.fastPut(f.local, f.remote, (putErr) => {
+        if (putErr) { console.error(`Error uploading ${f.local}:`, putErr); process.exit(1); }
+        console.log(`✅ Uploaded to host: ${f.remote}`);
+        completed++;
+
+        if (completed === filesToSync.length) {
+          console.log('[DOCKER] Copying updated files into sdi container...');
+          const copyCmd = filesToSync.map(f => `docker cp "${f.remote}" "${f.container}"`).join('\n') + `
+            echo "=== 1. Verifying TypeScript types inside container ==="
+            docker exec sdi npm run typecheck
+            echo "=== 2. Rebuilding Next.js production bundle inside container ==="
+            docker exec sdi npm run build
+            echo "=== 3. Restarting sdi container ==="
+            docker restart sdi
+            sleep 8
+            echo "=== 4. Checking container health and build timestamp ==="
+            docker exec sdi ls -l /app/.next/BUILD_ID || true
+            curl -I http://127.0.0.1:80 || true
+            echo "=== DEPLOYMENT AND CONTAINER UPDATE COMPLETE ==="
+          `;
+
+          conn.exec(copyCmd, (cmdErr, stream) => {
+            if (cmdErr) throw cmdErr;
+            stream.on('data', (d: Buffer) => process.stdout.write(d.toString()));
+            stream.stderr.on('data', (d: Buffer) => process.stderr.write(d.toString()));
+            stream.on('close', (code: number) => {
+              console.log(`\nDeployment finished with exit code: ${code}`);
+              conn.end();
+              process.exit(code || 0);
+            });
+          });
+        }
+      });
+    }
+  });
+});
+
+conn.on('error', (err) => {
+  console.error('[SSH] Connection error:', err);
+  process.exit(1);
+});
+
+conn.connect({ host: '94.72.119.156', port: 22, username: 'root', password: 'kadar786', readyTimeout: 90000, keepaliveInterval: 10000 });

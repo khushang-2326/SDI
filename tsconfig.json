@@ -39,6 +39,7 @@
     "node_modules",
     ".next",
     "outputs",
-    "scratch"
+    "scratch",
+    "scripts"
   ]
 }

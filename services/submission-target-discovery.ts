@@ -204,6 +204,7 @@ function normalizeText(value: string) {
 }
 
 function ensureUrl(value: string) {
+  if (!value || typeof value !== "string") return "";
   let trimmed = value.trim().replace(/^["']|["']$/g, "");
   // If mailto: is present at the beginning
   if (/^mailto:/i.test(trimmed)) {
@@ -264,7 +265,7 @@ async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
     await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
     const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
     const absolutePath = path.join(SCREENSHOT_DIR, fileName);
-    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 2500, animations: "disabled" });
+    await page.screenshot({ path: absolutePath, fullPage: false, timeout: 3000 });
     return `/screenshots/${fileName}`;
   } catch (err) {
     console.warn("Screenshot capture skipped:", err);
@@ -1212,7 +1213,44 @@ async function detectContactTarget(
 }
 
 async function collectSupportedExternalCandidates(page: Page, baseUrl: string): Promise<Candidate[]> {
-  return page.locator("a[href]").evaluateAll((anchors) =>
+  const candidates: Candidate[] = [];
+  try {
+    const { discoverActionButtonsOnPage } = await import("./action-button-fallback");
+    const actionButtons = await discoverActionButtonsOnPage(page, 10);
+    for (const btn of actionButtons) {
+      if (btn.href) {
+        try {
+          const resolved = new URL(btn.href, baseUrl);
+          const hostname = resolved.hostname.toLowerCase();
+          const isSched = isCalendlyEventUrl(resolved) || /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(hostname);
+          candidates.push({
+            url: withoutHash(resolved.toString()),
+            score: btn.score,
+            reason: isSched
+              ? `supported external booking link "${btn.text || resolved.hostname}"`
+              : `action button link "${btn.text || resolved.pathname}"`,
+            matchedTargetHint: true,
+            candidateText: btn.text,
+            candidateHref: btn.href,
+            candidateType: btn.isModalTrigger ? "modal_trigger" : "cta"
+          });
+        } catch {}
+      } else if (btn.isModalTrigger || btn.text) {
+        candidates.push({
+          url: withoutHash(baseUrl),
+          score: btn.score,
+          reason: `action button/modal trigger "${btn.text}"`,
+          matchedTargetHint: true,
+          candidateText: btn.text,
+          candidateType: "modal_trigger"
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("[CONTACT-DISCOVERY] Error collecting action button candidates:", err);
+  }
+
+  const legacyLinks = await page.locator("a[href]").evaluateAll((anchors) =>
     anchors.map((anchor) => ({
       href: anchor.getAttribute("href") ?? "",
       text: (anchor.textContent ?? "").replace(/\s+/g, " ").trim()
@@ -1228,12 +1266,15 @@ async function collectSupportedExternalCandidates(page: Page, baseUrl: string): 
         url: withoutHash(resolved.toString()),
         score: 100,
         reason: `supported external booking link "${link.text || resolved.hostname}"`,
-        matchedTargetHint: true
+        matchedTargetHint: true,
+        candidateText: link.text
       }];
     } catch {
       return [];
     }
   })).catch(() => []);
+
+  return mergeCandidates([...candidates, ...legacyLinks], 12);
 }
 
 function resultFromSupportedExternalCandidate(
@@ -2104,9 +2145,12 @@ async function discoverSubmissionTargetsInternal({
     const directResult = await detectTargetWithLazyScroll(page, page.url(), "entered URL already works");
     addResult(directResult);
 
-    // A direct public scheduling URL is already the exact target. Continuing
-    // through navigation wastes the remaining automation budget on unrelated forms.
-    if (directResult?.targetType === "calendly" || directResult?.targetType === "hubspot_booking") {
+    // If the entered URL was directly a public scheduling URL (e.g. calendly.com/user/event),
+    // it is already the exact target. Otherwise, if it's an embedded widget on a company domain,
+    // continue to also discover the site's /contact form as a reliable fallback.
+    const isDirectEnteredBookingUrl = isCalendlyEventUrl(new URL(normalizedWebsiteUrl)) ||
+      /(^|\.)meetings(-[a-z0-9]+)?\.hubspot\.com$/i.test(new URL(normalizedWebsiteUrl).hostname);
+    if (isDirectEnteredBookingUrl && (directResult?.targetType === "calendly" || directResult?.targetType === "hubspot_booking")) {
       const targets = Array.from(discovered.values()).sort(
         (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
       );
@@ -2173,7 +2217,7 @@ async function discoverSubmissionTargetsInternal({
       if (isExternal) return 3;
       try {
         const p = new URL(c.url).pathname.toLowerCase();
-        if (/(contact|get-in-touch|reach-us|talk-to-us|talk-to-sales|contact-sales|book-a-demo|book-now|schedule|inquiry|consultation|sales|demo)/i.test(p)) {
+        if (/(contact|get-in-touch|reach-us|talk-to-us|contact-sales|book-a-demo|book-now|schedule|inquiry|consultation|sales|demo)/i.test(p)) {
           return 1;
         }
       } catch {}
@@ -2207,7 +2251,22 @@ async function discoverSubmissionTargetsInternal({
 
     let candidateIndex = 0;
     while (candidateIndex < candidatesQueue.length) {
-      if (Array.from(discovered.values()).some((target) => target.targetType === "contact_form")) break;
+      // Check if we have discovered a dedicated, high-confidence contact form
+      const hasDedicatedContactForm = Array.from(discovered.values()).some((target) => {
+        if (target.targetType !== "contact_form") return false;
+        const cleanUrl = target.url.toLowerCase();
+        const isDedicatedPath = /(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry|inquiries)\b/i.test(cleanUrl);
+        return target.confidence >= 80 || isDedicatedPath;
+      });
+
+      // Check if high-intent Tier 1 or Tier 2 candidates still remain in queue
+      const remainingHighPriorityCandidates = candidatesQueue.slice(candidateIndex).some((c) => getCandidateTier(c) <= 2);
+
+      // Only exit candidate loop early if we already have a dedicated high-confidence contact form,
+      // or if we have a provisional form and no high-intent Tier 1/2 candidates remain
+      if (hasDedicatedContactForm || (discovered.size > 0 && !remainingHighPriorityCandidates && Array.from(discovered.values()).some((t) => t.targetType === "contact_form"))) {
+        break;
+      }
       if (checkedUrls.length >= maxPageVisits) break;
       if (Date.now() >= discoveryDeadlineAt - 500) {
         console.log(`[CONTACT-DISCOVERY] Approaching discovery deadline budget (${timeoutMs}ms). Exiting candidate loop.`);
@@ -2390,9 +2449,15 @@ async function discoverSubmissionTargetsInternal({
       }
     }
 
-    const targets = Array.from(discovered.values()).sort(
-      (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
-    );
+    const targets = Array.from(discovered.values()).sort((a, b) => {
+      if (a.executionOrder !== b.executionOrder) return a.executionOrder - b.executionOrder;
+      if (a.targetType === "contact_form" && b.targetType === "contact_form") {
+        const isDedA = /(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry)/i.test(a.url);
+        const isDedB = /(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry)/i.test(b.url);
+        if (isDedA !== isDedB) return isDedA ? -1 : 1;
+      }
+      return b.confidence - a.confidence || a.url.localeCompare(b.url);
+    });
 
     if (targets.length === 0 && lastDetectedVerification) {
       console.log(`[CONTACT-DISCOVERY-DIAGNOSTIC] ${normalizedWebsiteUrl} status=HUMAN_VERIFICATION reason="${lastDetectedVerification.reason}"`);

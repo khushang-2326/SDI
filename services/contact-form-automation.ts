@@ -275,15 +275,24 @@ async function safelyFillField(
   locator: Locator,
   value: string
 ): Promise<{ success: boolean; verified: boolean; actualValue?: string }> {
-  if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
-  if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
-
   const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "input");
   const inputType = await locator.evaluate((element) => (element.getAttribute("type") || "").toLowerCase()).catch(() => "text");
+
+  // Custom styled checkboxes / radios often have opacity:0 or are hidden by parent label
   if (inputType === "checkbox") {
     await locator.check({ force: true }).catch(async () => {
       await locator.click({ force: true }).catch(() => undefined);
     });
+    await locator.evaluate((el: HTMLInputElement) => {
+      el.checked = true;
+      const tracker = (el as any)._valueTracker;
+      if (tracker) tracker.setValue(false);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      if ((window as any).jQuery) {
+        try { (window as any).jQuery(el).trigger("change"); } catch {}
+      }
+    }).catch(() => undefined);
     const checked = await locator.isChecked().catch(() => true);
     return { success: true, verified: checked, actualValue: "checked" };
   }
@@ -292,69 +301,165 @@ async function safelyFillField(
     await locator.check({ force: true }).catch(async () => {
       await locator.click({ force: true }).catch(() => undefined);
     });
+    await locator.evaluate((el: HTMLInputElement) => {
+      el.checked = true;
+      const tracker = (el as any)._valueTracker;
+      if (tracker) tracker.setValue(false);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      if ((window as any).jQuery) {
+        try { (window as any).jQuery(el).trigger("change"); } catch {}
+      }
+    }).catch(() => undefined);
     return { success: true, verified: true, actualValue: "selected" };
   }
 
+  if (!(await locator.isVisible().catch(() => false))) return { success: false, verified: false };
+  if (!(await locator.isEnabled().catch(() => false))) return { success: false, verified: false };
+
   if (tagName === "select") {
-    let selected = false;
-    await locator.selectOption({ label: value }).then(() => { selected = true; }).catch(async () => {
-      await locator.selectOption({ value }).then(() => { selected = true; }).catch(() => undefined);
-    });
-    const selectVal = await locator.inputValue().catch(() => "");
-    return { success: true, verified: Boolean(selectVal) || selected, actualValue: selectVal };
+    const isPlaceholder = (text: string, val: string) => {
+      const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+      return !val || pPattern.test(text.trim()) || (val === "" && pPattern.test(text.trim()));
+    };
+
+    // 1. Try matching user target value
+    let matchedIndex = -1;
+    if (value && value.trim()) {
+      const targetNorm = value.trim().toLowerCase();
+      matchedIndex = await locator.evaluate((el: HTMLSelectElement, norm: string) => {
+        return Array.from(el.options).findIndex((opt) => {
+          if (opt.disabled) return false;
+          const label = (opt.textContent || "").trim().toLowerCase();
+          const val = (opt.value || "").trim().toLowerCase();
+          return label === norm || val === norm || label.includes(norm) || (norm.length > 3 && norm.includes(label));
+        });
+      }, targetNorm).catch(() => -1);
+    }
+
+    // 2. If no matching option, select the first valid non-placeholder option
+    if (matchedIndex < 0) {
+      matchedIndex = await locator.evaluate((el: HTMLSelectElement) => {
+        const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+        return Array.from(el.options).findIndex((opt) => {
+          if (opt.disabled) return false;
+          const label = (opt.textContent || "").trim();
+          const val = (opt.value || "").trim();
+          return Boolean(val || label) && !placeholderPattern.test(label) && !(val === "" && placeholderPattern.test(label));
+        });
+      }).catch(() => -1);
+    }
+
+    if (matchedIndex >= 0) {
+      try {
+        await locator.selectOption({ index: matchedIndex }, { timeout: 3000 });
+      } catch {
+        await locator.evaluate((el: HTMLSelectElement, idx: number) => {
+          el.selectedIndex = idx;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }, matchedIndex).catch(() => undefined);
+      }
+
+      const selectVal = await locator.inputValue().catch(() => "");
+      const selectedOptionText = await locator.evaluate((el: HTMLSelectElement) => {
+        const opt = el.options[el.selectedIndex];
+        return opt ? (opt.textContent || opt.value || "").trim() : "";
+      }).catch(() => "");
+
+      const isStillPlaceholder = isPlaceholder(selectedOptionText, selectVal);
+      if (!isStillPlaceholder) {
+        return { success: true, verified: true, actualValue: selectedOptionText || selectVal };
+      }
+    }
+
+    return { success: false, verified: false, actualValue: undefined };
+  }
+
+  let fillValue = value;
+
+  // Obey maxlength constraints to avoid browser truncation validation failures
+  const maxLen = await locator.evaluate((el: HTMLInputElement) => el.maxLength > 0 ? el.maxLength : 0).catch(() => 0);
+  if (maxLen > 0 && fillValue.length > maxLen) {
+    fillValue = fillValue.slice(0, maxLen);
+  }
+
+  // Obey phone input patterns/masks (e.g. (123) 456-7890 or 123-456-7890)
+  if (inputType === "tel" || tagName === "input") {
+    const inputPattern = await locator.getAttribute("pattern").catch(() => "") || "";
+    const placeholder = await locator.getAttribute("placeholder").catch(() => "") || "";
+    const nameAttr = await locator.getAttribute("name").catch(() => "") || "";
+    const isPhoneLike = inputType === "tel" || /phone|tel|mobile/i.test(nameAttr);
+    if (isPhoneLike) {
+      const digits = fillValue.replace(/\D/g, "");
+      if (digits.length === 10) {
+        if (inputPattern.includes("(") || placeholder.includes("(")) {
+          fillValue = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+        } else if (inputPattern.includes("-") || placeholder.includes("-")) {
+          fillValue = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+        } else if (placeholder.includes(" ")) {
+          fillValue = `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
+        }
+      }
+    }
   }
 
   await locator.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => undefined);
-  await locator.click({ timeout: 2000 }).catch(() => undefined);
-  await locator.fill("", { timeout: 2000 }).catch(() => undefined);
 
-  if (value.length > 80 || tagName === "textarea") {
-    await locator.fill(value, { timeout: 4000 }).catch(async () => {
-      await locator.pressSequentially(value.slice(0, 120), { delay: 10, timeout: 3000 }).catch(() => undefined);
-    });
-  } else {
-    await locator.pressSequentially(value, { delay: 15, timeout: 4000 }).catch(async () => {
-      await locator.fill(value, { timeout: 2000 }).catch(() => undefined);
-    });
+  // Strategy 1: Playwright native fill (clears, focuses, inputs, dispatches trusted native events)
+  let strategy1Ok = false;
+  try {
+    await locator.fill(fillValue, { timeout: 3500 });
+    const check1 = await locator.inputValue().catch(() => "");
+    if (check1 && (check1.toLowerCase().includes(fillValue.slice(0, 4).toLowerCase()) || fillValue.toLowerCase().includes(check1.slice(0, 4).toLowerCase()))) {
+      strategy1Ok = true;
+    }
+  } catch {}
+
+  // Strategy 2: If Strategy 1 failed, click + select all + backspace + pressSequentially
+  if (!strategy1Ok) {
+    try {
+      await locator.click({ timeout: 2000, force: true });
+      await locator.press("ControlOrMeta+A").catch(() => undefined);
+      await locator.press("Backspace").catch(() => undefined);
+      await locator.pressSequentially(fillValue, { delay: 10, timeout: 4000 });
+    } catch {}
   }
 
-  // Verify DOM value and perform comprehensive event synchronization (React, Vue, Webflow, jQuery, UpSolution, WPForms, etc.)
-  await locator.evaluate((el, val) => {
-    const input = el as HTMLInputElement;
-    const nativeInputSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      "value"
-    )?.set;
-    const nativeTextareaSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      "value"
-    )?.set;
-    if (input.tagName.toLowerCase() === "textarea" && nativeTextareaSetter) {
-      nativeTextareaSetter.call(input, val);
-    } else if (nativeInputSetter) {
-      nativeInputSetter.call(input, val);
-    } else if (!input.value) {
-      input.value = val;
-    }
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new Event("blur", { bubbles: true }));
-    input.dispatchEvent(new Event("focusout", { bubbles: true }));
-    if ((window as any).jQuery) {
-      try {
-        (window as any).jQuery(input).trigger("input").trigger("change").trigger("blur").trigger("focusout");
-      } catch {}
-    }
-  }, value).catch(() => undefined);
+  // Strategy 3: React / Vue / Angular controlled component value tracker synchronization
+  const check2 = await locator.inputValue().catch(() => "");
+  if (!check2 || !check2.toLowerCase().includes(fillValue.slice(0, 4).toLowerCase())) {
+    await locator.evaluate((el: HTMLElement, val: string) => {
+      const input = el as HTMLInputElement | HTMLTextAreaElement;
+      const proto = input.tagName.toLowerCase() === "textarea" 
+        ? window.HTMLTextAreaElement.prototype 
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+      if (setter) {
+        setter.call(input, val);
+      } else {
+        input.value = val;
+      }
+      const tracker = (input as any)._valueTracker;
+      if (tracker) {
+        tracker.setValue(val + "_sync");
+      }
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, data: val, inputType: "insertText" }));
+      input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event("blur", { bubbles: true, composed: true }));
+    }, fillValue).catch(() => undefined);
+  }
 
+  // Verification step
   let currentValue = await locator.inputValue().catch(() => "");
   const verified = Boolean(
     currentValue &&
-    (currentValue.toLowerCase().includes(value.slice(0, 8).toLowerCase()) ||
-     value.toLowerCase().includes(currentValue.slice(0, 8).toLowerCase()))
+    (currentValue.toLowerCase().includes(fillValue.slice(0, 4).toLowerCase()) ||
+     fillValue.toLowerCase().includes(currentValue.slice(0, 4).toLowerCase()))
   );
 
-  return { success: true, verified, actualValue: currentValue };
+  return { success: verified, verified, actualValue: currentValue };
 }
 
 async function safelyFillCityField(
@@ -466,45 +571,132 @@ async function safelyFillCountryField(
 }
 
 async function selectFirstRealOption(locator: Locator): Promise<boolean> {
-  const result = await locator
-    .evaluate((element) => {
-      const select = element as HTMLSelectElement;
-      if (!select || select.tagName.toLowerCase() !== "select") return false;
-      const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
-      const isRealOption = (option: HTMLOptionElement) => {
-        const label = (option.textContent ?? "").replace(/\s+/g, " ").trim();
-        const val = (option.value ?? "").trim();
-        const hasContent = Boolean(val || label);
-        const isPlaceholder = placeholderPattern.test(label) || (val === "" && placeholderPattern.test(label));
-        return !option.disabled && hasContent && !isPlaceholder;
-      };
+  const isVis = await locator.isVisible().catch(() => false);
+  const isEn = await locator.isEnabled().catch(() => false);
+  if (!isVis || !isEn) return false;
 
-      const selected = select.options[select.selectedIndex];
-      if (selected && isRealOption(selected)) return true;
+  // Find index of first non-disabled, non-placeholder option
+  const targetIdx = await locator.evaluate((element) => {
+    const select = element as HTMLSelectElement;
+    if (!select || select.tagName.toLowerCase() !== "select") return -1;
+    const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+    const isRealOption = (option: HTMLOptionElement) => {
+      const label = (option.textContent ?? "").replace(/\s+/g, " ").trim();
+      const val = (option.value ?? "").trim();
+      const hasContent = Boolean(val || label);
+      const isPlaceholder = pPattern.test(label) || (val === "" && pPattern.test(label));
+      return !option.disabled && hasContent && !isPlaceholder;
+    };
 
-      const idx = Array.from(select.options).findIndex(isRealOption);
-      if (idx >= 0) {
-        select.selectedIndex = idx;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-        select.dispatchEvent(new Event("input", { bubbles: true }));
-        return true;
-      }
-      return false;
-    })
-    .catch(() => false);
+    const selected = select.options[select.selectedIndex];
+    if (selected && isRealOption(selected)) return select.selectedIndex;
 
-  if (result) return true;
+    return Array.from(select.options).findIndex(isRealOption);
+  }).catch(() => -1);
 
+  if (targetIdx < 0) return false;
+
+  // Try Playwright native selectOption first (trusted user gesture)
+  let selectOk = false;
   try {
-    const isVis = await locator.isVisible().catch(() => false);
-    if (isVis) {
-      await locator.selectOption({ index: 1 }, { timeout: 1500 });
-      return true;
-    }
+    await locator.selectOption({ index: targetIdx }, { timeout: 2500 });
+    selectOk = true;
   } catch {
-    // ignore
+    selectOk = false;
   }
-  return false;
+
+  // Fallback to DOM manipulation if native select failed
+  if (!selectOk) {
+    selectOk = await locator.evaluate((element, idx) => {
+      const select = element as HTMLSelectElement;
+      select.selectedIndex = idx;
+      select.dispatchEvent(new Event("input", { bubbles: true }));
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      if ((window as any).jQuery) {
+        try { (window as any).jQuery(select).trigger("change"); } catch {}
+      }
+      return true;
+    }, targetIdx).catch(() => false);
+  }
+
+  // Verify that the selected option is not a placeholder
+  const verified = await locator.evaluate((element) => {
+    const select = element as HTMLSelectElement;
+    const opt = select.options[select.selectedIndex];
+    if (!opt) return false;
+    const label = (opt.textContent ?? "").replace(/\s+/g, " ").trim();
+    const val = (opt.value ?? "").trim();
+    const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+    return Boolean(val || label) && !pPattern.test(label) && !(val === "" && pPattern.test(label));
+  }).catch(() => false);
+
+  return verified;
+}
+
+async function sweepAndSelectRequiredDropdowns(scope: FormScope): Promise<string[]> {
+  const selects = scope.locator("select");
+  const count = await selects.count().catch(() => 0);
+  const selectedDropdowns: string[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const sel = selects.nth(i);
+    if (!(await sel.isVisible().catch(() => false)) || !(await sel.isEnabled().catch(() => false))) continue;
+
+    const needsSelection = await sel.evaluate((el: HTMLSelectElement) => {
+      const isReq = el.required || el.getAttribute("aria-required") === "true" || el.matches(":invalid");
+      const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+      const opt = el.options[el.selectedIndex];
+      const val = (opt?.value || el.value || "").trim();
+      const txt = (opt?.textContent || "").trim();
+      const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !(val === "" && pPattern.test(txt));
+      return isReq && !hasValid;
+    }).catch(() => false);
+
+    if (needsSelection) {
+      const didSelect = await selectFirstRealOption(sel);
+      if (didSelect) {
+        selectedDropdowns.push(`required_select:${i}`);
+      }
+    }
+  }
+  return selectedDropdowns;
+}
+
+async function reVerifyAndSelfHealFilledFields(
+  scope: FormScope,
+  items: FieldVerificationItem[]
+): Promise<number> {
+  const fields = scope.locator(COMMON_INPUT_SELECTOR);
+  let healedCount = 0;
+
+  for (const item of items) {
+    if (!item.finalValue || (item.fieldType as string) === "checkbox" || (item.fieldType as string) === "radio") continue;
+    try {
+      const loc = fields.nth(item.fieldIndex);
+      if (!(await loc.isVisible().catch(() => false))) continue;
+
+      const currentVal = await loc.inputValue().catch(() => "");
+      const expected = item.finalValue;
+      const isStillGood = currentVal && (
+        currentVal.toLowerCase().includes(expected.slice(0, 4).toLowerCase()) ||
+        expected.toLowerCase().includes(currentVal.slice(0, 4).toLowerCase())
+      );
+
+      if (!isStillGood) {
+        console.warn(`[contact-form-automation] Post-hydration recovery: field ${item.fieldIndex} (${item.fieldType}) lost value (current="${currentVal}"). Re-filling...`);
+        const refill = await safelyFillField(loc, expected);
+        if (refill.success) {
+          item.verified = refill.verified;
+          item.finalValue = refill.actualValue;
+          healedCount++;
+        }
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  return healedCount;
 }
 
 async function selectRequiredRadioDefaults(scope: FormScope) {
@@ -517,15 +709,32 @@ async function selectRequiredRadioDefaults(scope: FormScope) {
     if (!(await radio.isVisible().catch(() => false)) || !(await radio.isEnabled().catch(() => false))) continue;
     const metadata = await radio.evaluate((element) => ({
       name: (element as HTMLInputElement).name,
-      required: (element as HTMLInputElement).required || element.getAttribute("aria-required") === "true"
+      required: (element as HTMLInputElement).required || element.getAttribute("aria-required") === "true" || (element as HTMLInputElement).matches(":invalid")
     })).catch(() => ({ name: "", required: false }));
-    if (metadata.required && metadata.name && !groups.has(metadata.name)) groups.set(metadata.name, radio);
+    const groupKey = metadata.name || `radio_unnamed_${index}`;
+    if (metadata.required && !groups.has(groupKey)) groups.set(groupKey, radio);
   }
 
   const filled: string[] = [];
   for (const [name, radio] of groups) {
     if (await radio.isChecked().catch(() => false)) continue;
-    if (await radio.check({ force: true }).then(() => true).catch(() => false)) filled.push(`radio:${name}`);
+    let checked = false;
+    try {
+      await radio.check({ force: true });
+      checked = await radio.isChecked().catch(() => false);
+    } catch {}
+    if (!checked) {
+      await radio.evaluate((el: HTMLInputElement) => {
+        el.checked = true;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        if ((window as any).jQuery) {
+          try { (window as any).jQuery(el).trigger("change"); } catch {}
+        }
+      }).catch(() => undefined);
+      checked = await radio.isChecked().catch(() => false);
+    }
+    if (checked) filled.push(`radio:${name}`);
   }
   return filled;
 }
@@ -673,6 +882,22 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     return false;
   };
 
+  const tryFillFieldCandidates = async (
+    candidates: Array<{ signal: FieldSignals; cls: FieldClassification }>,
+    fieldType: SemanticFieldType,
+    sourceKey: string,
+    value: string | undefined,
+    telemetrySource: "USER_DATA" | "FALLBACK_DATA" | "SELECT_FIRST_VALID_OPTION" = "USER_DATA"
+  ): Promise<boolean> => {
+    if (!value || !value.trim()) return false;
+    for (const item of candidates) {
+      if (usedIndexes.has(item.signal.index)) continue;
+      const ok = await fillSignal(item.signal, fieldType, sourceKey, value, item.cls.confidence, item.cls.evidence, telemetrySource);
+      if (ok) return true;
+    }
+    return false;
+  };
+
   // 1. Email (prioritize type=email / autocomplete=email / highest confidence)
   const emailCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
@@ -680,15 +905,22 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "email")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (emailCandidates.length > 0) {
-    const best = emailCandidates[0];
-    await fillSignal(best.signal, "email", "email", leadData.email, best.cls.confidence, best.cls.evidence, "USER_DATA");
+  const emailVal = (leadData.email || "").trim();
+  if (emailVal) {
+    const filled = await tryFillFieldCandidates(emailCandidates, "email", "email", emailVal, "USER_DATA");
+    if (!filled && emailCandidates.length > 0) {
+      skippedFields.push("email");
+    }
   } else {
     skippedFields.push("email");
   }
 
-  // 2. Name Handling (Split name vs full name)
-  const nameParts = splitFullName(leadData.fullName);
+  // 2. Name Handling (First Name, Last Name, Full Name)
+  const nameParts = splitFullName(leadData.fullName || "");
+  const userFirstName = (leadData.firstName || nameParts.firstName || "").trim();
+  const userLastName = (leadData.lastName || nameParts.lastName || "").trim();
+  const userFullName = (leadData.fullName || (userFirstName && userLastName ? `${userFirstName} ${userLastName}` : userFirstName || userLastName || "")).trim();
+
   const firstNameCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -707,111 +939,79 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "full_name")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (firstNameCandidates.length > 0 && lastNameCandidates.length > 0) {
-    const bestFirst = firstNameCandidates[0];
-    const fVal = nameParts.firstName || "John";
-    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
+  if (firstNameCandidates.length > 0 && userFirstName) {
+    await tryFillFieldCandidates(firstNameCandidates, "first_name", "firstName", userFirstName, "USER_DATA");
+  }
+  if (lastNameCandidates.length > 0 && userLastName) {
+    await tryFillFieldCandidates(lastNameCandidates, "last_name", "lastName", userLastName, "USER_DATA");
+  }
 
-    const bestLast = lastNameCandidates[0];
-    const lVal = nameParts.lastName || "Miller";
-    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
-  } else if (firstNameCandidates.length > 0 && lastNameCandidates.length === 0 && fullNameCandidates.length > 0) {
-    const bestFirst = firstNameCandidates[0];
-    const fVal = nameParts.firstName || "John";
-    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
-
-    const bestLast = fullNameCandidates[0];
-    const lVal = nameParts.lastName || "Miller";
-    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
-  } else if (firstNameCandidates.length === 0 && lastNameCandidates.length > 0 && fullNameCandidates.length > 0) {
-    const bestFirst = fullNameCandidates[0];
-    const fVal = nameParts.firstName || "John";
-    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
-
-    const bestLast = lastNameCandidates[0];
-    const lVal = nameParts.lastName || "Miller";
-    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
-  } else if (firstNameCandidates.length > 0) {
-    const bestFirst = firstNameCandidates[0];
-    const fVal = nameParts.firstName || leadData.fullName || "John";
-    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
-  } else if (fullNameCandidates.length >= 2) {
-    const bestFirst = fullNameCandidates[0];
-    const fVal = nameParts.firstName || "John";
-    await fillSignal(bestFirst.signal, "first_name", "firstName", fVal, bestFirst.cls.confidence, bestFirst.cls.evidence, nameParts.firstName ? "USER_DATA" : "FALLBACK_DATA");
-
-    const bestLast = fullNameCandidates[1];
-    const lVal = nameParts.lastName || "Miller";
-    await fillSignal(bestLast.signal, "last_name", "lastName", lVal, bestLast.cls.confidence, bestLast.cls.evidence, nameParts.lastName ? "USER_DATA" : "FALLBACK_DATA");
-  } else if (fullNameCandidates.length > 0) {
-    const bestFull = fullNameCandidates[0];
-    const fnVal = leadData.fullName || "John Miller";
-    await fillSignal(bestFull.signal, "full_name", "fullName", fnVal, bestFull.cls.confidence, bestFull.cls.evidence, leadData.fullName ? "USER_DATA" : "FALLBACK_DATA");
-  } else {
-    skippedFields.push("fullName");
+  // If there are remaining full name candidates
+  const unmappedFull = fullNameCandidates.filter((c) => !usedIndexes.has(c.signal.index));
+  if (unmappedFull.length >= 2 && userFirstName && userLastName) {
+    await fillSignal(unmappedFull[0].signal, "first_name", "firstName", userFirstName, unmappedFull[0].cls.confidence, unmappedFull[0].cls.evidence, "USER_DATA");
+    await fillSignal(unmappedFull[1].signal, "last_name", "lastName", userLastName, unmappedFull[1].cls.confidence, unmappedFull[1].cls.evidence, "USER_DATA");
+  } else if (unmappedFull.length > 0 && userFullName) {
+    await tryFillFieldCandidates(unmappedFull, "full_name", "fullName", userFullName, "USER_DATA");
   }
 
   // 3. Phone / Mobile
-  const phoneValue = leadData.mobile ?? leadData.mobileNumber ?? "2125550199";
+  const phoneVal = (leadData.mobile || leadData.mobileNumber || leadData.phone || "").trim();
   const phoneCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "phone")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (phoneCandidates.length > 0) {
-    const best = phoneCandidates[0];
-    const isUserVal = Boolean(leadData.mobile || leadData.mobileNumber);
-    await fillSignal(best.signal, "phone", "mobile", phoneValue, best.cls.confidence, best.cls.evidence, isUserVal ? "USER_DATA" : "FALLBACK_DATA");
+  if (phoneVal) {
+    await tryFillFieldCandidates(phoneCandidates, "phone", "mobile", phoneVal, "USER_DATA");
   } else {
     skippedFields.push("mobile");
   }
 
   // 4. Message / Inquiry
+  const messageVal = (leadData.message || leadData.inquiry || leadData.comments || leadData.comment || "").trim();
   const messageCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && (item.cls.fieldType === "message" || item.cls.fieldType === "inquiry"))
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  const messageValue = leadData.message || "Hello, I would like to inquire about your professional services and availability. Thank you.";
-  if (messageCandidates.length > 0) {
-    const best = messageCandidates[0];
-    await fillSignal(best.signal, "message", "message", messageValue, best.cls.confidence, best.cls.evidence, leadData.message ? "USER_DATA" : "FALLBACK_DATA");
+  if (messageVal) {
+    await tryFillFieldCandidates(messageCandidates, "message", "message", messageVal, "USER_DATA");
   } else {
     skippedFields.push("message");
   }
 
   // 5. Company Name
-  const companyValue = leadData.companyName || "Test Company";
+  const companyVal = (leadData.companyName || leadData.company || "").trim();
   const companyCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "company")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (companyCandidates.length > 0) {
-    const best = companyCandidates[0];
-    await fillSignal(best.signal, "company", "companyName", companyValue, best.cls.confidence, best.cls.evidence, leadData.companyName ? "USER_DATA" : "FALLBACK_DATA");
+  if (companyVal) {
+    await tryFillFieldCandidates(companyCandidates, "company", "companyName", companyVal, "USER_DATA");
   } else {
     skippedFields.push("companyName");
   }
 
   // 6. Website
-  const rawCo = leadData.companyName?.toLowerCase().replace(/[^a-z0-9]/g, "") || "example";
-  const websiteValue = `https://${rawCo}.com`;
+  const rawCo = (leadData.companyName || leadData.company || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const websiteValue = (leadData.website || (rawCo ? `https://${rawCo}.com` : "")).trim();
   const websiteCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "website")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (websiteCandidates.length > 0) {
-    const best = websiteCandidates[0];
-    await fillSignal(best.signal, "website", "website", websiteValue, best.cls.confidence, best.cls.evidence, "FALLBACK_DATA");
+  if (websiteValue && websiteCandidates.length > 0) {
+    await tryFillFieldCandidates(websiteCandidates, "website", "website", websiteValue, leadData.website ? "USER_DATA" : "FALLBACK_DATA");
   }
 
   // 7. Subject
+  const subjectVal = (leadData.subject || "").trim();
   const subjectCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -819,121 +1019,124 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
   if (subjectCandidates.length > 0) {
-    const best = subjectCandidates[0];
-    await fillSignal(best.signal, "subject", "subject", "General Inquiry", best.cls.confidence, best.cls.evidence, "FALLBACK_DATA");
+    const sValue = subjectVal || "General Inquiry";
+    await tryFillFieldCandidates(subjectCandidates, "subject", "subject", sValue, subjectVal ? "USER_DATA" : "FALLBACK_DATA");
   }
 
   // 8. City
-  const userCity = leadData.city || leadData.town;
+  const userCity = (leadData.city || leadData.town || "").trim();
   const cityCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "city")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (cityCandidates.length > 0) {
-    const best = cityCandidates[0];
-    const loc = fields.nth(best.signal.index);
-    if (best.signal.tagName === "select") {
+  for (const c of cityCandidates) {
+    if (usedIndexes.has(c.signal.index)) continue;
+    const loc = fields.nth(c.signal.index);
+    if (c.signal.tagName === "select") {
       const fillRes = await safelyFillCityField(loc, userCity);
       if (fillRes.success) {
-        usedIndexes.add(best.signal.index);
+        usedIndexes.add(c.signal.index);
         filledFields.push("city");
         verificationItems.push({
-          fieldIndex: best.signal.index,
+          fieldIndex: c.signal.index,
           fieldType: "city",
           mappedSource: `city [${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
-          confidence: best.cls.confidence,
-          evidence: [...best.cls.evidence, `source:${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          confidence: c.cls.confidence,
+          evidence: [...c.cls.evidence, `source:${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
           filled: true,
           verified: fillRes.verified,
           finalValue: fillRes.actualValue
         });
+        break;
       }
-    } else {
-      const cityVal = userCity || "New York";
-      await fillSignal(best.signal, "city", "city", cityVal, best.cls.confidence, best.cls.evidence, userCity ? "USER_DATA" : "FALLBACK_DATA");
+    } else if (userCity) {
+      const ok = await fillSignal(c.signal, "city", "city", userCity, c.cls.confidence, c.cls.evidence, "USER_DATA");
+      if (ok) break;
     }
   }
 
   // 8b. State / Region
-  const userState = leadData.state || leadData.province || leadData.region;
+  const userState = (leadData.state || leadData.province || leadData.region || "").trim();
   const stateCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "state")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (stateCandidates.length > 0) {
-    const best = stateCandidates[0];
-    const loc = fields.nth(best.signal.index);
-    if (best.signal.tagName === "select") {
+  for (const c of stateCandidates) {
+    if (usedIndexes.has(c.signal.index)) continue;
+    const loc = fields.nth(c.signal.index);
+    if (c.signal.tagName === "select") {
       const fillRes = await safelyFillStateField(loc, userState);
       if (fillRes.success) {
-        usedIndexes.add(best.signal.index);
+        usedIndexes.add(c.signal.index);
         filledFields.push("state");
         verificationItems.push({
-          fieldIndex: best.signal.index,
+          fieldIndex: c.signal.index,
           fieldType: "state",
           mappedSource: `state [${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
-          confidence: best.cls.confidence,
-          evidence: [...best.cls.evidence, `source:${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          confidence: c.cls.confidence,
+          evidence: [...c.cls.evidence, `source:${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
           filled: true,
           verified: fillRes.verified,
           finalValue: fillRes.actualValue
         });
+        break;
       }
-    } else {
-      const stateVal = userState || "New York";
-      await fillSignal(best.signal, "state", "state", stateVal, best.cls.confidence, best.cls.evidence, userState ? "USER_DATA" : "FALLBACK_DATA");
+    } else if (userState) {
+      const ok = await fillSignal(c.signal, "state", "state", userState, c.cls.confidence, c.cls.evidence, "USER_DATA");
+      if (ok) break;
     }
   }
 
   // 8c. Country
-  const userCountry = leadData.country || leadData.nation;
+  const userCountry = (leadData.country || leadData.nation || "").trim();
   const countryCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "country")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (countryCandidates.length > 0) {
-    const best = countryCandidates[0];
-    const loc = fields.nth(best.signal.index);
-    if (best.signal.tagName === "select") {
+  for (const c of countryCandidates) {
+    if (usedIndexes.has(c.signal.index)) continue;
+    const loc = fields.nth(c.signal.index);
+    if (c.signal.tagName === "select") {
       const fillRes = await safelyFillCountryField(loc, userCountry);
       if (fillRes.success) {
-        usedIndexes.add(best.signal.index);
+        usedIndexes.add(c.signal.index);
         filledFields.push("country");
         verificationItems.push({
-          fieldIndex: best.signal.index,
+          fieldIndex: c.signal.index,
           fieldType: "country",
           mappedSource: `country [${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
-          confidence: best.cls.confidence,
-          evidence: [...best.cls.evidence, `source:${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          confidence: c.cls.confidence,
+          evidence: [...c.cls.evidence, `source:${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
           filled: true,
           verified: fillRes.verified,
           finalValue: fillRes.actualValue
         });
+        break;
       }
-    } else {
-      const countryVal = userCountry || "United States";
-      await fillSignal(best.signal, "country", "country", countryVal, best.cls.confidence, best.cls.evidence, userCountry ? "USER_DATA" : "FALLBACK_DATA");
+    } else if (userCountry) {
+      const ok = await fillSignal(c.signal, "country", "country", userCountry, c.cls.confidence, c.cls.evidence, "USER_DATA");
+      if (ok) break;
     }
   }
 
-  // 8d. Address
-  const userAddress = leadData.address || leadData.street;
+  // 8d. Address (Street Address)
+  const userAddress = (leadData.address || leadData.streetAddress || leadData.street_address || leadData.street || leadData.address1 || "").trim();
   const addrCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "address")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (addrCandidates.length > 0) {
-    const best = addrCandidates[0];
-    const addrVal = userAddress || "123 Main Street";
-    await fillSignal(best.signal, "address", "address", addrVal, best.cls.confidence, best.cls.evidence, userAddress ? "USER_DATA" : "FALLBACK_DATA");
+  if (userAddress) {
+    await tryFillFieldCandidates(addrCandidates, "address", "address", userAddress, "USER_DATA");
+  } else {
+    skippedFields.push("address");
   }
 
   // 8e. Postal / ZIP code field
@@ -1141,6 +1344,10 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
   }
 
+  // Sweep all required dropdowns in scope to ensure non-placeholder selection
+  const reqDropdowns = await sweepAndSelectRequiredDropdowns(scope);
+  filledFields.push(...reqDropdowns);
+
   // 10. Remaining required fields handling
   // If a field cannot be safely classified as generic text, location, contact info, or categorical selection, DO NOT INVENT A VALUE.
   for (const signal of signals) {
@@ -1153,6 +1360,16 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       await loc.check({ force: true }).catch(async () => {
         await loc.click({ force: true }).catch(() => undefined);
       });
+      await loc.evaluate((el: HTMLInputElement) => {
+        el.checked = true;
+        const tracker = (el as any)._valueTracker;
+        if (tracker) tracker.setValue(false);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        if ((window as any).jQuery) {
+          try { (window as any).jQuery(el).trigger("change"); } catch {}
+        }
+      }).catch(() => undefined);
       usedIndexes.add(signal.index);
       filledFields.push(`consentCheckbox:${signal.index}`);
       continue;
@@ -1359,24 +1576,37 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     for (const signal of signals) {
       if (signal.type !== "checkbox" || usedIndexes.has(signal.index)) continue;
       const cb = fields.nth(signal.index);
-      if (await cb.isVisible().catch(() => false)) {
-        const text = [
-          signal.name,
-          signal.id,
-          signal.explicitLabel,
-          ...signal.associatedLabels,
-          signal.surroundingLabel,
-          signal.followingSiblingText,
-          signal.parentContainerText
-        ].join(" ");
+      const text = [
+        signal.name,
+        signal.id,
+        signal.explicitLabel,
+        ...signal.associatedLabels,
+        signal.surroundingLabel,
+        signal.followingSiblingText,
+        signal.parentContainerText
+      ].join(" ");
 
-        if (signal.isRequired || /consent|agree|terms|privacy|policy|gdpr|rules|accept/i.test(text)) {
-          await cb.check({ force: true }).catch(async () => {
-            await cb.click({ force: true }).catch(() => undefined);
-          });
-          usedIndexes.add(signal.index);
-          filledFields.push(`consentCheckbox:${signal.index}`);
-        }
+      const isExplicitMarketing = /newsletter|subscribe|marketing|promotions|updates|offers/i.test(text);
+      const isConsentOrPolicy = /consent|agree|terms|privacy|policy|gdpr|rules|accept|disclaimer|legal|authorization|conditions|declar|confirm|trattamento|datenschutz|privacidad|akkoord|acconsento/i.test(text);
+      const isReq = signal.isRequired || Boolean(signal.associatedLabels?.some((l) => /required|\*/i.test(l)));
+
+      // Select an appropriate option only when required to satisfy the form's actual validation rules
+      if (isReq || (isConsentOrPolicy && !isExplicitMarketing)) {
+        await cb.check({ force: true }).catch(async () => {
+          await cb.click({ force: true }).catch(() => undefined);
+        });
+        await cb.evaluate((el: HTMLInputElement) => {
+          el.checked = true;
+          const tracker = (el as any)._valueTracker;
+          if (tracker) tracker.setValue(false);
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          if ((window as any).jQuery) {
+            try { (window as any).jQuery(el).trigger("change"); } catch {}
+          }
+        }).catch(() => undefined);
+        usedIndexes.add(signal.index);
+        filledFields.push(`consentCheckbox:${signal.index}`);
       }
     }
   } catch {
@@ -1581,6 +1811,24 @@ async function findPrimaryForm(page: Page) {
 }
 
 export async function fillAllVisibleForms(page: Page, leadData: LeadData) {
+  // If a heavy client-side hydration framework (Wix, Next.js, Nuxt, React, Webflow) is detected,
+  // ensure the initial JavaScript hydration cycle has committed before attempting DOM interaction.
+  const isHydratedFramework = await page.evaluate(() => {
+    return Boolean(
+      (window as any).wixBiSession ||
+      document.querySelector("[data-mesh-id]") ||
+      (window as any).__next_data__ ||
+      document.querySelector("#__next") ||
+      (window as any).__nuxt__ ||
+      document.querySelector("#__nuxt")
+    );
+  }).catch(() => false);
+
+  if (isHydratedFramework) {
+    console.log(`[contact-form-automation] Client-side hydration framework detected. Waiting for hydration to settle...`);
+    await page.waitForTimeout(2500);
+  }
+
   let primaryForm = await findPrimaryForm(page);
   // A small number of sites use controls without a wrapping <form>.
   let result = await fillDetectedFields(primaryForm ?? page, leadData);
@@ -1599,7 +1847,151 @@ export async function fillAllVisibleForms(page: Page, leadData: LeadData) {
     }
   }
 
+  // Post-fill Hydration & Self-Healing Guard:
+  // Detect if any filled fields were wiped by late client-side hydration (e.g. Wix masterPage, React 16-19, Vue).
+  // Wait a moment for hydration to settle, then re-verify all inputs and re-fill any that were cleared.
+  await page.waitForTimeout(1000);
+  await reVerifyAndSelfHealFilledFields(primaryForm ?? page, result.metrics.items);
+
   return { ...result, primaryForm };
+}
+
+/**
+ * Sweeps for and checks any required, terms, policy, GDPR, or consent checkboxes
+ * located in the form container or adjacent to the submit button.
+ * Dispatches synthetic input/change events, updates React state trackers,
+ * and clicks associated <label> elements for custom styled checkboxes.
+ */
+export async function sweepAndCheckPreSubmitCheckboxes(
+  page: Page,
+  formScope?: Locator | null,
+  submitButton?: Locator | null
+): Promise<string[]> {
+  const checkedFields: string[] = [];
+  try {
+    const root = (formScope && (await formScope.count().catch(() => 0)) > 0) ? formScope : page;
+
+    const targets: Locator[] = [
+      root.locator("input[type='checkbox']"),
+      root.locator("[role='checkbox']")
+    ];
+
+    if (submitButton && (await submitButton.count().catch(() => 0)) > 0) {
+      try {
+        const actionContainer = submitButton.locator(
+          "xpath=ancestor::*[contains(@class, 'action') or contains(@class, 'button') or contains(@class, 'submit') or contains(@class, 'footer') or contains(@class, 'form-group') or self::form][1]"
+        );
+        if ((await actionContainer.count().catch(() => 0)) > 0) {
+          targets.push(
+            actionContainer.locator("input[type='checkbox']"),
+            actionContainer.locator("[role='checkbox']")
+          );
+        }
+      } catch {}
+    }
+
+    const CONSENT_PATTERN = /consent|agree|terms|privacy|policy|gdpr|rules|accept|disclaimer|legal|conditions|authorization|declar|confirm|trattamento|datenschutz|privacidad|akkoord|acconsento/i;
+    const seenHandles = new Set<string>();
+
+    for (const locatorGroup of targets) {
+      const count = await locatorGroup.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const item = locatorGroup.nth(i);
+
+        const info = await item.evaluate((el: HTMLElement) => {
+          const isNative = el.tagName.toLowerCase() === "input";
+          let isChecked = false;
+          let isRequired = false;
+
+          if (isNative) {
+            const input = el as HTMLInputElement;
+            isChecked = input.checked;
+            isRequired = Boolean(
+              input.required ||
+              input.getAttribute("aria-required") === "true" ||
+              input.getAttribute("data-required") === "true" ||
+              input.classList.contains("required") ||
+              input.matches(":invalid")
+            );
+          } else {
+            isChecked = el.getAttribute("aria-checked") === "true";
+            isRequired = Boolean(
+              el.getAttribute("aria-required") === "true" ||
+              el.getAttribute("data-required") === "true" ||
+              el.classList.contains("required")
+            );
+          }
+
+          const id = el.id || "";
+          const name = el.getAttribute("name") || "";
+          const ariaLabel = el.getAttribute("aria-label") || "";
+          let labelText = "";
+          if (id) {
+            try {
+              const lbl = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+              if (lbl) labelText += " " + (lbl.textContent || "");
+            } catch {}
+          }
+          const parentLabel = el.closest("label");
+          if (parentLabel) labelText += " " + (parentLabel.textContent || "");
+
+          const parentContainer = el.parentElement;
+          const containerText = parentContainer ? (parentContainer.textContent || "").slice(0, 300) : "";
+          const grandParentText = parentContainer?.parentElement ? (parentContainer.parentElement.textContent || "").slice(0, 300) : "";
+
+          const fullText = [name, id, ariaLabel, labelText, containerText, grandParentText].join(" ").replace(/\s+/g, " ").trim();
+          const fingerprint = `${el.tagName}:${id || name || fullText.slice(0, 30)}`;
+
+          return {
+            isNative,
+            isChecked,
+            isRequired,
+            id,
+            name,
+            fullText,
+            fingerprint
+          };
+        }).catch(() => null);
+
+        if (!info || info.isChecked || seenHandles.has(info.fingerprint)) continue;
+        seenHandles.add(info.fingerprint);
+
+        const isPolicyOrConsent = CONSENT_PATTERN.test(info.fullText);
+        if (info.isRequired || isPolicyOrConsent) {
+          const identifier = info.id || info.name || `checkbox_${checkedFields.length}`;
+
+          if (info.isNative) {
+            await item.check({ force: true }).catch(async () => {
+              await item.click({ force: true }).catch(() => undefined);
+            });
+
+            await item.evaluate((el: HTMLInputElement) => {
+              el.checked = true;
+              const tracker = (el as any)._valueTracker;
+              if (tracker) tracker.setValue(false);
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+              if ((window as any).jQuery) {
+                try { (window as any).jQuery(el).trigger("change"); } catch {}
+              }
+            }).catch(() => undefined);
+          } else {
+            await item.evaluate((el: HTMLElement) => {
+              el.setAttribute("aria-checked", "true");
+              el.dispatchEvent(new Event("click", { bubbles: true }));
+            }).catch(() => undefined);
+            await item.click({ force: true }).catch(() => undefined);
+          }
+
+          checkedFields.push(`preSubmitCheckbox:${identifier}`);
+          console.log(`[contact-form-automation] [PRE-SUBMIT-CHECKBOX] Checked required/policy checkbox: "${identifier}" (required=${info.isRequired}, consent/policy=${isPolicyOrConsent})`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`[contact-form-automation] [PRE-SUBMIT-CHECKBOX] Sweep warning:`, err);
+  }
+  return checkedFields;
 }
 
 export type SubmitCandidateInfo = {
@@ -2079,10 +2471,47 @@ async function submitBookingWidget({
   };
 }
 
+async function checkButtonOrFormStateChange(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    // 1. Check if submit button changed text to positive confirmation
+    const buttons = Array.from(document.querySelectorAll("button, input[type='submit'], [role='button']"));
+    const hasSuccessButton = buttons.some((b) => {
+      const txt = (b.textContent || (b as HTMLInputElement).value || "").toLowerCase().trim();
+      return /^(sent!?|message sent!?|submitted!?|success!?|thank you!?|enviado!?|gesendet!?)$/i.test(txt);
+    });
+    if (hasSuccessButton) return true;
+
+    // 2. Check if active form has completed class or data-status attribute
+    const forms = Array.from(document.querySelectorAll("form, [data-form]"));
+    const hasSubmittedForm = forms.some((f) => {
+      const cls = (f.className || "").toLowerCase();
+      const statusAttr = (f.getAttribute("data-status") || f.getAttribute("data-state") || "").toLowerCase();
+      return (
+        cls.includes("sent") ||
+        cls.includes("submitted") ||
+        cls.includes("success") ||
+        cls.includes("completed") ||
+        statusAttr === "success" ||
+        statusAttr === "sent"
+      );
+    });
+    if (hasSubmittedForm) return true;
+
+    // 3. Check for positive toast / alert in DOM
+    const alerts = Array.from(document.querySelectorAll("[role='alert'], [role='status'], .toast, .swal2-container, .alert, .notification, .notyf"));
+    const hasSuccessAlert = alerts.some((a) => {
+      const txt = (a.textContent || "").toLowerCase();
+      return (txt.includes("thank") || txt.includes("sent") || txt.includes("success") || txt.includes("received")) &&
+             !txt.includes("error") && !txt.includes("fail") && !txt.includes("invalid");
+    });
+    return hasSuccessAlert;
+  }).catch(() => false);
+}
+
 async function detectSuccess(page: Page, isNetworkSuccess?: () => boolean) {
-  // Fast-path polling loop: check immediately and every 300ms for up to 10s
+  // Fast-path polling loop: check immediately and every 300ms for up to 4.5s
   const startTime = Date.now();
-  const maxWaitMs = 10000;
+  const maxWaitMs = 4500;
 
   while (Date.now() - startTime < maxWaitMs) {
     // 0. Check network AJAX success flag
@@ -2103,6 +2532,10 @@ async function detectSuccess(page: Page, isNetworkSuccess?: () => boolean) {
     // 3. Check page and child frames body text
     const textMatched = await checkSuccessText(page);
     if (textMatched) return true;
+
+    // 4. Check button text or form state change
+    const stateChanged = await checkButtonOrFormStateChange(page);
+    if (stateChanged) return true;
 
     await page.waitForTimeout(300);
   }
@@ -2155,7 +2588,12 @@ async function checkSuccessFrameworkSelectors(page: Page): Promise<boolean> {
     "[data-status='mail_sent']:visible",
     "[data-status='sent']:visible",
     "form.sent:visible",
-    ".wpcf7 form.sent:visible"
+    ".wpcf7 form.sent:visible",
+    ".chakra-alert[data-status='success']",
+    ".ant-message-success",
+    ".ant-alert-success",
+    ".MuiAlert-standardSuccess",
+    ".notyf__toast--success"
   ];
 
   for (const selector of successSelectors) {
@@ -2200,6 +2638,23 @@ async function checkSuccessText(page: Page): Promise<boolean> {
     "your request has been sent",
     "thanks for connecting",
     "thanks for your message",
+    "thank you for your submission",
+    "your form has been submitted",
+    "your message has been successfully sent",
+    "your details have been sent",
+    "we'll contact you shortly",
+    "we will contact you shortly",
+    "we will get back to you shortly",
+    "we'll get back to you shortly",
+    "someone will be in touch",
+    "a member of our team will be in touch",
+    "thank you! your submission has been received",
+    "thank you for submitting",
+    "thanks for reaching out to us",
+    "thanks for contacting us",
+    "your response has been recorded",
+    "form submitted",
+    "message received",
     // Multilingual Success Patterns
     "gracias por contactar",
     "mensaje enviado",
@@ -2249,9 +2704,9 @@ async function takeScreenshot(page: Page, websiteUrl: string, label: string) {
     const fileName = `${Date.now()}-${slugify(websiteUrl)}-${label}.png`;
     const absolutePath = path.join(SCREENSHOT_DIR, fileName);
     try {
-      await page.screenshot({ path: absolutePath, fullPage: true, timeout: 5000, animations: "disabled" });
-    } catch {
       await page.screenshot({ path: absolutePath, fullPage: false, timeout: 3000 });
+    } catch {
+      await page.screenshot({ path: absolutePath, fullPage: false, timeout: 2000 });
     }
     return `/screenshots/${fileName}`;
   } catch (err) {
@@ -2274,7 +2729,7 @@ async function persistResult(result: SubmitContactFormResult, leadData: LeadData
     where: { userId: user.id, email: leadData.email }
   });
   const leadDataForSave = {
-    fullName: leadData.fullName,
+    fullName: leadData.fullName || [leadData.firstName, leadData.lastName].filter(Boolean).join(" ") || "Lead",
     mobileNumber: leadData.mobile ?? leadData.mobileNumber ?? "",
     email: leadData.email,
     address: leadData.address ?? "",
@@ -2348,6 +2803,129 @@ async function shouldAttemptCaptchaSolve(websiteUrl: string, userId?: string): P
   }
 }
 
+export async function validateFormBeforeSubmission(
+  page: Page,
+  formScope: Locator | null,
+  leadData: LeadData
+): Promise<{ valid: boolean; failureReason?: string; failedField?: string }> {
+  const hasFormScope = Boolean(formScope && (await formScope.count().catch(() => 0)) > 0);
+  const rootScope: FormScope = hasFormScope && formScope ? formScope : page;
+
+  // 1. Pre-validation sweep: ensure unselected required dropdowns select first valid real option
+  await sweepAndSelectRequiredDropdowns(rootScope).catch(() => undefined);
+
+  // 2. Pre-validation sweep: ensure required checkboxes are checked
+  await sweepAndCheckPreSubmitCheckboxes(page, formScope).catch(() => undefined);
+
+  // 3. HTML5 constraint validation check on all visible form controls
+  const validationError = hasFormScope && formScope
+    ? await formScope.evaluate((container: HTMLElement) => {
+        const invalidControls = Array.from(
+          container.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
+        );
+        for (const ctrl of invalidControls) {
+          const el = ctrl as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          const isVisible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+          if (!isVisible) continue;
+
+          const identifier = el.name || el.id || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.tagName.toLowerCase();
+          const msg = el.validationMessage || "Invalid or incomplete required field";
+          return {
+            identifier,
+            msg,
+            tagName: el.tagName.toLowerCase(),
+            type: el.getAttribute("type") || ""
+          };
+        }
+        return null;
+      }).catch(() => null)
+    : await page.evaluate(() => {
+        const invalidControls = Array.from(
+          document.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
+        );
+        for (const ctrl of invalidControls) {
+          const el = ctrl as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          const isVisible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+          if (!isVisible) continue;
+
+          const identifier = el.name || el.id || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.tagName.toLowerCase();
+          const msg = el.validationMessage || "Invalid or incomplete required field";
+          return {
+            identifier,
+            msg,
+            tagName: el.tagName.toLowerCase(),
+            type: el.getAttribute("type") || ""
+          };
+        }
+        return null;
+      }).catch(() => null);
+
+  if (validationError) {
+    return {
+      valid: false,
+      failureReason: `Browser validation failed on "${validationError.identifier}": ${validationError.msg}`,
+      failedField: validationError.identifier
+    };
+  }
+
+  // 4. Verify all required <select> dropdowns have valid non-placeholder selections
+  const invalidSelect = hasFormScope && formScope
+    ? await formScope.evaluate((container: HTMLElement) => {
+        const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+        const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+        for (const sel of selects) {
+          const isReq = sel.required || sel.getAttribute("aria-required") === "true";
+          if (!isReq) continue;
+          const rect = sel.getBoundingClientRect();
+          const style = window.getComputedStyle(sel);
+          if (style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
+
+          const opt = sel.options[sel.selectedIndex];
+          const val = (opt?.value || sel.value || "").trim();
+          const txt = (opt?.textContent || "").trim();
+          const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !(val === "" && pPattern.test(txt));
+          if (!hasValid) {
+            return sel.name || sel.id || "Required dropdown";
+          }
+        }
+        return null;
+      }).catch(() => null)
+    : await page.evaluate(() => {
+        const selects = Array.from(document.querySelectorAll("select")) as HTMLSelectElement[];
+        const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+        for (const sel of selects) {
+          const isReq = sel.required || sel.getAttribute("aria-required") === "true";
+          if (!isReq) continue;
+          const rect = sel.getBoundingClientRect();
+          const style = window.getComputedStyle(sel);
+          if (style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
+
+          const opt = sel.options[sel.selectedIndex];
+          const val = (opt?.value || sel.value || "").trim();
+          const txt = (opt?.textContent || "").trim();
+          const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !(val === "" && pPattern.test(txt));
+          if (!hasValid) {
+            return sel.name || sel.id || "Required dropdown";
+          }
+        }
+        return null;
+      }).catch(() => null);
+
+  if (invalidSelect) {
+    return {
+      valid: false,
+      failureReason: `Required dropdown "${invalidSelect}" has no valid selection.`,
+      failedField: invalidSelect
+    };
+  }
+
+  return { valid: true };
+}
+
 export async function submitContactForm({
   websiteUrl,
   leadData,
@@ -2357,8 +2935,10 @@ export async function submitContactForm({
   timeoutMs = 30000,
   browserContext,
   skipPersist,
-  userId
-}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean; userId?: string; liveSubmit?: boolean }): Promise<SubmitContactFormResult> {
+  userId,
+  skipActionButtons = false,
+  activePage: customPage
+}: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean; userId?: string; liveSubmit?: boolean; skipActionButtons?: boolean; activePage?: Page }): Promise<SubmitContactFormResult> {
   const shouldSubmit = liveSubmit !== undefined ? liveSubmit : submit;
   let browser: Browser | null = null;
   let page: Page | null = null;
@@ -2376,7 +2956,9 @@ export async function submitContactForm({
   let submitDiag: SubmitCandidateDiagnostic | null = null;
 
   try {
-    if (browserContext) {
+    if (customPage) {
+      page = customPage;
+    } else if (browserContext) {
       page = await browserContext.newPage();
     } else {
       browser = await chromium.launch({
@@ -2422,45 +3004,49 @@ export async function submitContactForm({
     let navResponse: any = null;
     const tNavStart = Date.now();
     const initialNavTimeout = Math.max(3000, Math.min(30000, timeoutMs));
-    try {
-      navResponse = await Promise.race([
-        activePage.goto(websiteUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: initialNavTimeout
-        }),
-        proxy407Promise
-      ]);
-    } catch (gotoErr: any) {
-      if (isProxyAuthenticationFailure(gotoErr) || proxy407Hit) {
-        throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
-      }
-      const errStr = gotoErr?.message || String(gotoErr);
-      if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
-        throw gotoErr;
-      }
-      if (/interrupted by another navigation|net::ERR_ABORTED/i.test(errStr)) {
-        try {
-          await activePage.waitForLoadState("domcontentloaded", { timeout: 4000 });
-        } catch {
-          // ignore if already committed
+    if (!customPage) {
+      try {
+        navResponse = await Promise.race([
+          activePage.goto(websiteUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: initialNavTimeout
+          }),
+          proxy407Promise
+        ]);
+      } catch (gotoErr: any) {
+        if (isProxyAuthenticationFailure(gotoErr) || proxy407Hit) {
+          throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
         }
-      } else {
-        try {
-          const remainingCommitTimeout = Math.max(5000, timeoutMs - (Date.now() - tNavStart));
-          navResponse = await Promise.race([
-            activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
-            proxy407Promise
-          ]);
-        } catch (commitErr: any) {
-          if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
-            throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+        const errStr = gotoErr?.message || String(gotoErr);
+        if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
+          throw gotoErr;
+        }
+        if (/interrupted by another navigation|net::ERR_ABORTED/i.test(errStr)) {
+          try {
+            await activePage.waitForLoadState("domcontentloaded", { timeout: 4000 });
+          } catch {
+            // ignore if already committed
           }
-          if (!activePage.url() || activePage.url() === "about:blank") {
-            throw commitErr;
+        } else {
+          try {
+            const remainingCommitTimeout = Math.max(5000, timeoutMs - (Date.now() - tNavStart));
+            navResponse = await Promise.race([
+              activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
+              proxy407Promise
+            ]);
+          } catch (commitErr: any) {
+            if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
+              throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+            }
+            if (!activePage.url() || activePage.url() === "about:blank") {
+              throw commitErr;
+            }
           }
         }
+      } finally {
+        activePage.off("response", responseHandler);
       }
-    } finally {
+    } else {
       activePage.off("response", responseHandler);
     }
     tNav = Date.now() - tNavStart;
@@ -2551,9 +3137,68 @@ export async function submitContactForm({
     filledFields = fillResult.filledFields;
     skippedFields = fillResult.skippedFields;
     fillMetrics = fillResult.metrics;
+    const substantiveFieldsCount = fillResult.filledFields.filter(
+      (f) => !f.startsWith("consentCheckbox:") && !f.startsWith("preSubmitCheckbox:")
+    ).length;
+
+    // Action Button Fallback for pages where no substantive contact form fields were filled:
+    // If no form was found or 0 substantive contact fields (name, email, message, etc.) were filled on the page,
+    // invoke Action Button Fallback to discover action buttons ("Book Now", "Book a Call", "Get in Touch", etc.)
+    // that open new tabs, modals, or navigated forms!
+    if (substantiveFieldsCount === 0 && !skipActionButtons) {
+      console.log(`[contact-form-automation] No substantive contact form completed on initial page ${websiteUrl}. Invoking Action Button Fallback...`);
+      const { executeActionButtonFallback } = await import("./action-button-fallback");
+      const fallbackRes = await executeActionButtonFallback({
+        page,
+        websiteUrl,
+        leadData: effectiveLeadData,
+        submit,
+        liveSubmit,
+        timeoutMs,
+        browserContext: browserContext ?? page.context(),
+        skipPersist,
+        userId
+      });
+
+      if (fallbackRes.handled && fallbackRes.result) {
+        if (!skipPersist) {
+          await persistResult(fallbackRes.result, leadData);
+        }
+        return fallbackRes.result;
+      }
+    }
+
+    // Post-fill checkbox sweep: check terms/privacy/required checkboxes so conditionally-enabled
+    // submit buttons unlock and unmapped required fields audit does not falsely flag them.
+    const postFillCheckboxes = await sweepAndCheckPreSubmitCheckboxes(activePage, fillResult.primaryForm);
+    if (postFillCheckboxes.length > 0) {
+      filledFields.push(...postFillCheckboxes);
+      if (fillMetrics) {
+        fillMetrics.unmappedRequiredFields = fillMetrics.unmappedRequiredFields.filter((f) => {
+          const lowerF = f.toLowerCase();
+          return !postFillCheckboxes.some((cb) => {
+            const lowerCb = cb.toLowerCase();
+            return lowerCb.includes(lowerF) || lowerF.includes(lowerCb.replace("presubmitcheckbox:", ""));
+          }) && !/consent|term|privacy|policy|gdpr|accept|disclaimer|legal|condition/i.test(f);
+        });
+      }
+    }
+
     screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit");
 
+    // Pre-Submission Comprehensive Validation:
+    // Verify that all applicable required fields (name, email, phone, company, message, address, dropdowns, radios, checkboxes)
+    // are completed and valid before proceeding with submission.
+    if (shouldSubmit) {
+      const preSubmitValidation = await validateFormBeforeSubmission(activePage, fillResult.primaryForm, effectiveLeadData);
+      if (!preSubmitValidation.valid) {
+        screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit-validation-failure").catch(() => screenshotPath);
+        throw new Error(`VALIDATION_BEFORE_SUBMISSION_FAILED: ${preSubmitValidation.failureReason}`);
+      }
+    }
+
     if (fillMetrics && fillMetrics.unmappedRequiredFields.length > 0) {
+
       const unmappedSummary = fillMetrics.unmappedRequiredFields.join(", ");
       const detailedLog = (fillMetrics.unmappedRequiredDetails || []).map((d) => 
         `[name="${d.fieldName}", label="${d.fieldLabel}", type="${d.fieldType}"${d.availableOptions ? `, options=[${d.availableOptions.join(",")}]` : ""}, reason="${d.reason}"]`
@@ -2621,7 +3266,7 @@ export async function submitContactForm({
     }
     tSubmitDiscovery = Date.now() - tSubmitStart;
 
-    if (!submitButton) {
+    if (!submitButton || filledFields.length === 0) {
       const bookingWidget = await detectBookingWidget(page, filledFields.length);
 
       if (bookingWidget.found) {
@@ -2640,7 +3285,36 @@ export async function submitContactForm({
         return result;
       }
 
-      throw new Error("No visible submit button found.");
+      // Reusable Action Button Fallback:
+      // If no form or booking widget was completed on the current page,
+      // search for action buttons ("Book Now", "Book a Call", "Schedule a Meeting", "Contact Us", "Get a Quote", etc.)
+      // that open forms, new tabs (Calendly), modals, or navigated pages before marking as failed!
+      if (!skipActionButtons) {
+        console.log(`[contact-form-automation] No contact form completed on ${websiteUrl}. Invoking Action Button Fallback...`);
+        const { executeActionButtonFallback } = await import("./action-button-fallback");
+        const fallbackRes = await executeActionButtonFallback({
+          page,
+          websiteUrl,
+          leadData: effectiveLeadData,
+          submit,
+          liveSubmit,
+          timeoutMs,
+          browserContext: browserContext ?? page.context(),
+          skipPersist,
+          userId
+        });
+
+        if (fallbackRes.handled && fallbackRes.result) {
+          if (!skipPersist) {
+            await persistResult(fallbackRes.result, leadData);
+          }
+          return fallbackRes.result;
+        }
+      }
+
+      if (!submitButton) {
+        throw new Error("No visible submit button found.");
+      }
     }
 
     let networkReportedSuccess = false;
@@ -2649,28 +3323,53 @@ export async function submitContactForm({
       try {
         const url = res.url().toLowerCase();
         const status = res.status();
-        if (
-          status >= 200 &&
-          status < 400 &&
-          (url.includes("wp-json") ||
-            url.includes("admin-ajax") ||
-            url.includes("feedback") ||
-            url.includes("contact") ||
-            url.includes("submit") ||
-            url.includes("forms") ||
-            url.includes("hsforms") ||
-            url.includes("formspree") ||
-            url.includes("web3forms") ||
-            url.includes("getform") ||
-            url.includes("elementor") ||
-            url.includes("ninja") ||
-            url.includes("fluent") ||
-            url.includes("forminator") ||
-            url.includes("caldera") ||
-            url.includes("leadconnector"))
-        ) {
+        const req = res.request();
+        const method = (req.method() || "").toUpperCase();
+
+        const isTracker = /google-analytics|googletagmanager|doubleclick|facebook|clarity|hotjar|datadog|sentry|segment|criteo/i.test(url);
+        if (isTracker) return;
+
+        // Check if this is an API / form endpoint or any POST / PUT method triggered after submit
+        const isFormEndpoint = (
+          method === "POST" ||
+          method === "PUT" ||
+          method === "PATCH" ||
+          url.includes("wp-json") ||
+          url.includes("admin-ajax") ||
+          url.includes("feedback") ||
+          url.includes("contact") ||
+          url.includes("submit") ||
+          url.includes("forms") ||
+          url.includes("hsforms") ||
+          url.includes("formspree") ||
+          url.includes("web3forms") ||
+          url.includes("getform") ||
+          url.includes("elementor") ||
+          url.includes("ninja") ||
+          url.includes("fluent") ||
+          url.includes("forminator") ||
+          url.includes("caldera") ||
+          url.includes("leadconnector") ||
+          url.includes("/api/") ||
+          url.includes("sendmail") ||
+          url.includes("webflow.com")
+        );
+
+        if (status >= 200 && status < 400 && isFormEndpoint) {
+          // HTTP 204 No Content is inherently successful
+          if (status === 204) {
+            networkReportedSuccess = true;
+            return;
+          }
+
           res.text().then((text: string) => {
-            if (!text) return;
+            if (!text) {
+              if (method === "POST" || method === "PUT") {
+                networkReportedSuccess = true;
+              }
+              return;
+            }
+
             if (text.includes("apbct") && (text.includes('"blocked":true') || text.includes("Forbidden") || text.includes("blacklisted"))) {
               serverReportedSpamOrBlock = "Server Anti-Spam (CleanTalk) blocked submission: Sender IP or email blacklisted.";
             } else if (text.includes('"status":"spam"')) {
@@ -2679,21 +3378,29 @@ export async function submitContactForm({
               serverReportedSpamOrBlock = "Server mail delivery failed (SMTP connection error on target host).";
             }
 
-            if (
-              (text.includes('"status":"mail_sent"') ||
+            const hasErrorFlag = (
+              text.includes('"status":"spam"') ||
+              text.includes('"status":"validation_failed"') ||
+              text.includes('"status":"error"') ||
+              text.includes('"success":false') ||
+              text.includes('"blocked":true') ||
+              text.includes('"error":true')
+            );
+
+            if (!hasErrorFlag) {
+              if (
+                text.includes('"status":"mail_sent"') ||
                 text.includes('"success":true') ||
                 text.includes('"status":"success"') ||
                 text.includes('"result":"success"') ||
                 text.includes('"sent":true') ||
                 text.includes('"code":"ok"') ||
-                /thank|received|mail_sent|success|submitted/i.test(text)) &&
-              !text.includes('"status":"spam"') &&
-              !text.includes('"status":"validation_failed"') &&
-              !text.includes('"status":"error"') &&
-              !text.includes('"success":false') &&
-              !text.includes('"blocked":true')
-            ) {
-              networkReportedSuccess = true;
+                text.includes('"ok":true') ||
+                /thank|received|mail_sent|success|submitted/i.test(text) ||
+                ((method === "POST" || method === "PUT") && status === 200)
+              ) {
+                networkReportedSuccess = true;
+              }
             }
           }).catch(() => {});
         }
@@ -2734,6 +3441,13 @@ export async function submitContactForm({
       const activityTracker = () => { networkActivityFired = true; };
       activePage.on("request", activityTracker);
 
+      // Pre-Submit Checkbox Sweep: sweep immediately prior to click to ensure any dynamically mounted
+      // policy, terms, consent or required checkboxes are checked before firing submission.
+      const preSubmitCheckboxes = await sweepAndCheckPreSubmitCheckboxes(activePage, fillResult.primaryForm, submitButton);
+      if (preSubmitCheckboxes.length > 0) {
+        filledFields.push(...preSubmitCheckboxes);
+      }
+
       // Primary click execution
       let clickSucceeded = false;
       try {
@@ -2743,31 +3457,71 @@ export async function submitContactForm({
         clickSucceeded = false;
       }
 
-      // Secondary fallback: if click didn't trigger any network request within 1.5s, trigger jQuery/requestSubmit dispatch
+      // Phase 2: HTML5 :invalid Self-Healing Recovery
+      // If browser native validation blocked submission due to an unchecked required checkbox,
+      // it applies the :invalid pseudo-class. Catch and auto-check it, then retry click.
+      const hasInvalidCheckboxes = await submitButton.evaluate((btn) => {
+        const form = btn.closest("form") || document.body;
+        const invalids = Array.from(form.querySelectorAll("input[type='checkbox']:invalid, [role='checkbox'][aria-invalid='true']"));
+        if (invalids.length === 0) return false;
+
+        for (const el of invalids) {
+          if (el.tagName.toLowerCase() === "input") {
+            const input = el as HTMLInputElement;
+            input.checked = true;
+            const tracker = (input as any)._valueTracker;
+            if (tracker) tracker.setValue(false);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            if ((window as any).jQuery) {
+              try { (window as any).jQuery(input).trigger("change"); } catch {}
+            }
+          } else {
+            el.setAttribute("aria-checked", "true");
+            el.setAttribute("aria-invalid", "false");
+            el.dispatchEvent(new Event("click", { bubbles: true }));
+          }
+        }
+        return true;
+      }).catch(() => false);
+
+      if (hasInvalidCheckboxes) {
+        console.log(`[contact-form-automation] [PRE-SUBMIT-CHECKBOX] Recovered unclicked required checkbox via :invalid detection. Retrying submit click...`);
+        await activePage.waitForTimeout(300);
+        await submitButton.click({ timeout: 4000, force: true }).catch(() => undefined);
+      }
+
+      let fallbackDispatched = false;
       await activePage.waitForTimeout(1500);
       if (!networkActivityFired || !clickSucceeded) {
-        await submitButton.evaluate((btn) => {
+        fallbackDispatched = await submitButton.evaluate((btn) => {
+          let dispatched = false;
           const form = btn.closest("form");
           if (form) {
             if ((window as any).jQuery) {
-              try { (window as any).jQuery(form).trigger("submit"); } catch {}
+              try { (window as any).jQuery(form).trigger("submit"); dispatched = true; } catch {}
             }
             if (typeof form.requestSubmit === "function") {
-              try { form.requestSubmit(btn as HTMLButtonElement | HTMLInputElement); } catch {}
+              try { form.requestSubmit(btn as HTMLButtonElement | HTMLInputElement); dispatched = true; } catch {}
             } else if (typeof form.submit === "function") {
-              try { form.submit(); } catch {}
+              try { form.submit(); dispatched = true; } catch {}
             }
           }
           if ("click" in btn && typeof (btn as HTMLElement).click === "function") {
-            try { (btn as HTMLElement).click(); } catch {}
+            try { (btn as HTMLElement).click(); dispatched = true; } catch {}
           }
-        }).catch(() => undefined);
+          return dispatched;
+        }).catch(() => false);
+      }
+
+      if (!clickSucceeded && !fallbackDispatched) {
+        throw new Error("Submit button could not be clicked and form dispatch action failed.");
       }
 
       activePage.off("request", activityTracker);
     }
 
-    const success = shouldSubmit
+    const explicitSuccess = shouldSubmit
       ? (networkReportedSuccess || await detectSuccess(page, () => networkReportedSuccess))
       : true;
 
@@ -2776,32 +3530,83 @@ export async function submitContactForm({
     }
     screenshotPath = await takeScreenshot(page, websiteUrl, shouldSubmit ? "after-submit" : "dry-run");
 
-    if (!success) {
+    if (shouldSubmit) {
+      // 1. Check for server-level spam, mail delivery errors, or access blocks
       if (serverReportedSpamOrBlock) {
         throw new Error(serverReportedSpamOrBlock);
       }
 
-      // Check if on-page spam or error alert is visible
+      // 2. Check for newly appeared post-submit CAPTCHA or anti-bot challenge
+      const postSubmitVerification = await detectUnsupportedVerification(page, websiteUrl);
+      if (postSubmitVerification && postSubmitVerification.blocking === true) {
+        if (postSubmitVerification.screenshotPath) screenshotPath = postSubmitVerification.screenshotPath;
+        throw new Error(`Anti-bot verification challenge blocked submission: ${postSubmitVerification.reason}`);
+      }
+
+      // 3. Check for visible on-page validation errors, spam flags, or submission failure banners
       const onPageError = await activePage.evaluate(() => {
         const errorSelectors = [
           ".wpcf7-response-output.wpcf7-spam-blocked",
           ".wpcf7-response-output.wpcf7-mail-sent-ng",
           ".wpcf7-response-output.wpcf7-validation-errors",
           ".wpforms-error-container",
+          ".wpforms-error",
           ".gform_validation_errors",
+          ".gfield_error",
+          ".elementor-message-danger",
+          ".elementor-message-error",
+          ".w-form-fail",
+          ".form-submission-error",
           ".alert-danger",
+          ".alert-error",
           ".error-message",
+          ".form-error",
+          ".field-error",
+          ".invalid-feedback",
+          ".has-error",
+          "[aria-invalid='true']:not([type='hidden'])",
           "[role='alert']"
         ];
         for (const sel of errorSelectors) {
-          const el = document.querySelector(sel);
-          if (el && (el as HTMLElement).offsetParent !== null) {
-            const txt = (el.textContent || "").trim();
-            if (txt && (txt.toLowerCase().includes("spam") || txt.toLowerCase().includes("error") || txt.toLowerCase().includes("failed"))) {
-              return txt;
+          const els = Array.from(document.querySelectorAll(sel));
+          for (const el of els) {
+            const htmlEl = el as HTMLElement;
+            if (htmlEl && (htmlEl.offsetParent !== null || window.getComputedStyle(htmlEl).display !== "none")) {
+              const txt = (htmlEl.textContent || "").trim();
+              if (
+                txt &&
+                (
+                  txt.toLowerCase().includes("spam") ||
+                  txt.toLowerCase().includes("error") ||
+                  txt.toLowerCase().includes("failed") ||
+                  txt.toLowerCase().includes("invalid") ||
+                  txt.toLowerCase().includes("required") ||
+                  txt.toLowerCase().includes("could not be sent") ||
+                  txt.toLowerCase().includes("try again") ||
+                  txt.toLowerCase().includes("robot") ||
+                  txt.toLowerCase().includes("captcha")
+                )
+              ) {
+                // Ensure it's not a success message that happens to use role='alert'
+                if (!/thank|success|received|sent|confirmed|we will be in touch/i.test(txt)) {
+                  return txt;
+                }
+              }
             }
           }
         }
+
+        // Also check if any form inputs are currently marked invalid by HTML5 constraint validation
+        const invalidInputs = Array.from(document.querySelectorAll("input:invalid:not([type='hidden']), textarea:invalid, select:invalid"));
+        for (const inp of invalidInputs) {
+          const inputEl = inp as HTMLInputElement;
+          if (inputEl.offsetParent !== null || window.getComputedStyle(inputEl).display !== "none") {
+            const validationMsg = inputEl.validationMessage || "Required field is missing or invalid";
+            const fieldDesc = inputEl.name || inputEl.id || inputEl.placeholder || "field";
+            return `Validation failed on "${fieldDesc}": ${validationMsg}`;
+          }
+        }
+
         return null;
       }).catch(() => null);
 
@@ -2809,7 +3614,12 @@ export async function submitContactForm({
         throw new Error(`Website rejected submission: "${onPageError.slice(0, 150)}"`);
       }
 
-      throw new Error("Submit clicked, but no success message or successful page response was detected.");
+      if (explicitSuccess) {
+        console.log(`[contact-form-automation] Submission on ${websiteUrl} verified via explicit confirmation.`);
+      } else {
+        // Success message is NOT mandatory. If the submission action completed normally and no failure indicators were detected, mark as PASS/SUCCESS.
+        console.log(`[contact-form-automation] Submit clicked successfully on ${websiteUrl} without errors or anti-bot challenges. Classified as PASS/SUCCESS (success message not mandatory).`);
+      }
     }
 
     const totalMs = Date.now() - tStart;
@@ -2849,7 +3659,11 @@ export async function submitContactForm({
       websiteUrl,
       status: shouldSubmit ? "success" : "dry_run_ready_to_book",
       errorMessage: null,
-      message: shouldSubmit ? "Contact form submitted successfully." : "Dry run: Form fields filled and submit button verified.",
+      message: shouldSubmit
+        ? (explicitSuccess
+            ? "Contact form submitted successfully with verified confirmation."
+            : "Contact form submitted successfully (action completed without errors).")
+        : "Dry run: Form fields filled and submit button verified.",
       screenshotPath,
       submittedAt,
       filledFields,
@@ -2923,10 +3737,12 @@ export async function submitContactForm({
     }
     return result;
   } finally {
-    if (page && browserContext) {
-      await page.close().catch(() => undefined);
-    } else {
-      await browser?.close().catch(() => undefined);
+    if (!customPage) {
+      if (page && browserContext) {
+        await page.close().catch(() => undefined);
+      } else {
+        await browser?.close().catch(() => undefined);
+      }
     }
   }
 }

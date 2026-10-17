@@ -611,23 +611,42 @@ export async function runMultiTargetAutomation({
     }
   }
 
-  // If no discovered targets were found or executed, and we haven't tried the direct entered URL yet, execute direct fallback
-  if (
-    !targetSucceeded &&
-    !encounteredProxyFailure &&
-    !encounteredBlockFailure &&
-    attempts.length === 0 &&
-    websiteUrl
-  ) {
-    const directFallbackTarget: DiscoveredSubmissionTarget = {
-      targetType: "contact_form",
-      url: websiteUrl,
-      executionOrder: 1,
-      confidence: 75,
-      reason: "Direct URL fallback execution",
-      screenshotPath: null
-    };
-    await executeTargets([directFallbackTarget]);
+  // If target has not succeeded and no contact form has been attempted yet (e.g. booking widget had no slots or failed to mount),
+  // execute standard website contact form fallback
+  const hasAttemptedContactForm = attempts.some((a) => a.target.targetType === "contact_form");
+  if (!targetSucceeded && !encounteredProxyFailure && !encounteredBlockFailure && !hasAttemptedContactForm && websiteUrl) {
+    let fallbackOrigin = websiteUrl;
+    try {
+      const u = new URL(websiteUrl);
+      fallbackOrigin = u.origin;
+    } catch {}
+
+    const contactFallbackUrls = [
+      `${fallbackOrigin}/contact`,
+      `${fallbackOrigin}/contact-us`,
+      websiteUrl
+    ];
+
+    const fallbackTargets: DiscoveredSubmissionTarget[] = [];
+    const seenFallbackUrls = new Set<string>();
+
+    for (const fbUrl of contactFallbackUrls) {
+      const cleanFb = fbUrl.toLowerCase().replace(/\/+$/, "");
+      if (seenFallbackUrls.has(cleanFb)) continue;
+      seenFallbackUrls.add(cleanFb);
+
+      fallbackTargets.push({
+        targetType: "contact_form",
+        url: fbUrl,
+        executionOrder: 1,
+        confidence: 75,
+        reason: "Contact form fallback after booking slot exhaustion or missing contact target",
+        screenshotPath: null
+      });
+    }
+
+    console.log(`[BOOKING-FALLBACK] Booking unsuccessful or unmounted. Attempting contact form fallbacks on ${fallbackTargets.map((t) => t.url).join(", ")}`);
+    await executeTargets(fallbackTargets);
     if (encounteredProxyFailure && !isDirectRetry) {
       return triggerDirectRetry("Direct fallback encountered proxy authentication failure.");
     }

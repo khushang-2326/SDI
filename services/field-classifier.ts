@@ -108,33 +108,37 @@ const NEGATIVE_FIELD_PATTERN = /\b(password|passwd|pwd|passcode|search|query|fin
 // Compact normalized multilingual token patterns across EN, ES, FR, DE, IT, PT, NL
 const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegExp[]> = {
   first_name: [
-    /\b(first[ _-]?name|firstname|fname|given[ _-]?name|forename)\b/i,
-    /\b(prenom|vorname|nombre|nome|primeiro[ _-]?nome|voornaam)\b/i
+    /\b(first[ _-]?name|firstname|fname|f_name|given[ _-]?name|forename|your[ _-]?first[ _-]?name)\b/i,
+    /\b(prenom|vorname|nombre|nome|primeiro[ _-]?nome|voornaam)\b/i,
+    /(^|[ _-])(first-name|firstname|fname|f_name|given-name|forename)([ _-]|$)/i
   ],
   last_name: [
-    /\b(last[ _-]?name|lastname|lname|surname|family[ _-]?name)\b/i,
-    /\b(nom[ _-]?de[ _-]?famille|nachname|familienname|apellido|cognome|sobrenome|achternaam)\b/i
+    /\b(last[ _-]?name|lastname|lname|l_name|surname|family[ _-]?name|your[ _-]?last[ _-]?name)\b/i,
+    /\b(nom[ _-]?de[ _-]?famille|nachname|familienname|apellido|cognome|sobrenome|achternaam)\b/i,
+    /(^|[ _-])(last-name|lastname|lname|l_name|surname|family-name)([ _-]|$)/i
   ],
   full_name: [
-    /\b(full[ _-]?name|fullname|your[ _-]?name|contact[ _-]?name|complete[ _-]?name)\b/i,
+    /\b(full[ _-]?name|fullname|your[ _-]?name|yourname|contact[ _-]?name|complete[ _-]?name|client[ _-]?name|lead[ _-]?name|user[ _-]?name)\b/i,
     /\b(nom[ _-]?complet|vollstaendiger[ _-]?name|voller[ _-]?name|nombre[ _-]?completo|nome[ _-]?completo|volledige[ _-]?naam)\b/i,
     // Generic "name" with boundary check (not company name, user name, etc., handling optional trailing required asterisk)
     /(?<!(company|business|user|file|brand|org|organisation)[ _-])\b(name|nom|nombre|nome|naam)\b(?![ _-]?(of|company|business|user))/i,
     /\b(ihr[ _-]?name|votre[ _-]?nom|su[ _-]?nombre|il[ _-]?tuo[ _-]?nome|uw[ _-]?naam)\b/i
   ],
   email: [
-    /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email|corporate[ _-]?email)\b/i,
+    /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email|corporate[ _-]?email|your[ _-]?email|youremail|contact[ _-]?email)\b/i,
     /\b(courriel|correo|correo[ _-]?electronico|indirizzo[ _-]?email|e-post|e-mailadresse)\b/i,
-    /(^|[ _-])(email|work-email|business-email|user-email)([ _-]|$)/i
+    /(^|[ _-])(email|work-email|business-email|user-email|contact-email|lead-email|form_fields\[email\]|fields\[email\])([ _-]|$)/i
   ],
   phone: [
-    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no)\b/i,
-    /\b(telefon|telephone|telefono|numero[ _-]?telefono|celular|telefone|telefoonnummer)\b/i
+    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no|your[ _-]?phone|yourphone|mobile[ _-]?no)\b/i,
+    /\b(telefon|telephone|telefono|numero[ _-]?telefono|celular|telefone|telefoonnummer)\b/i,
+    /(^|[ _-])(phone|mobile|telephone|tel|contact-phone|phone-number|mobile-number|form_fields\[phone\]|fields\[phone\])([ _-]|$)/i
   ],
   company: [
     /\b(company|business|organization|organisation|brand|firm|agency|enterprise|compañía|compania)\b/i,
-    /\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name|organization[ _-]?name)\b/i,
-    /\b(societe|entreprise|unternehmen|firma|empresa|azienda|bedrijf|bedrijfsnaam)\b/i
+    /\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name|organization[ _-]?name|your[ _-]?company|businessname|companyname)\b/i,
+    /\b(societe|entreprise|unternehmen|firma|empresa|azienda|bedrijf|bedrijfsnaam)\b/i,
+    /(^|[ _-])(company|company-name|business-name|organization|firm|agency)([ _-]|$)/i
   ],
   job_title: [
     /\b(job[ _-]?title|title|role|position|occupation|designation)\b/i,
@@ -145,8 +149,9 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(site[ _-]?web|sitio[ _-]?web|webseite|siteweb)\b/i
   ],
   address: [
-    /\b(address|street|street[ _-]?address|addr|location)\b/i,
-    /\b(adresse|strasse|str\.|direccion|indirizzo|endereco|adres)\b/i
+    /\b(address|street|street[ _-]?address|addr|location|physical[ _-]?address|streetaddress|address1|address[ _-]?line[ _-]?1)\b/i,
+    /\b(adresse|strasse|str\.|direccion|indirizzo|endereco|adres)\b/i,
+    /(^|[ _-])(address|street|street-address|address-line-1|address1|street_address)([ _-]|$)/i
   ],
   city: [
     /\b(city|town|municipality|suburb)\b/i,
@@ -165,12 +170,13 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(code[ _-]?postal|plz|postleitzahl|codigo[ _-]?postal|cap|postcode)\b/i
   ],
   subject: [
-    /\b(subject|regarding|topic|reason[ _-]?for[ _-]?contact|how[ _-]?can[ _-]?we[ _-]?help|describe[ _-]?your[ _-]?needs)\b/i,
+    /\b(subject|regarding|topic|reason[ _-]?for[ _-]?contact|how[ _-]?can[ _-]?we[ _-]?help|describe[ _-]?your[ _-]?needs|inquiry[ _-]?type|contact[ _-]?reason)\b/i,
     /\b(sujet|betreff|asunto|oggetto|assunto|onderwerp)\b/i
   ],
   message: [
-    /\b(message|comment|comments|note|notes|details|description|project[ _-]?details|how[ _-]?can[ _-]?we[ _-]?help|brief|tell[ _-]?us)\b/i,
-    /\b(nachricht|mitteilung|mensaje|messaggio|mensagem|bericht|opmerkingen)\b/i
+    /\b(message|comment|comments|note|notes|details|description|project[ _-]?details|how[ _-]?can[ _-]?we[ _-]?help|brief|tell[ _-]?us|your[ _-]?message|yourmessage|ymessage|leave[ _-]?us[ _-]?a[ _-]?message|project[ _-]?description|inquiry[ _-]?details)\b/i,
+    /\b(nachricht|mitteilung|mensaje|messaggio|mensagem|bericht|opmerkingen)\b/i,
+    /(^|[ _-])(message|comments|inquiry-message|form_fields\[message\]|fields\[message\]|ymessage)([ _-]|$)/i
   ],
   inquiry: [
     /\b(enquiry|inquiry|consultation|request|question|demande|anfrage|consulta|richiesta)\b/i
@@ -207,6 +213,8 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
   ],
   consent: [
     /\b(consent|agree|terms|privacy|privacy[ _-]?policy|terms[ _-]?of[ _-]?service|gdpr|datenschutz|accept|conditions)\b/i,
+    /\b(disclaimer|legal|acceptance|authorization|terms[ _-]?of[ _-]?use|privacy[ _-]?statement|data[ _-]?protection|agree[ _-]?terms|declar|confirm|trattamento|privacidad)\b/i,
+    /(^|[ _-])(wpcf7-acceptance|gfield--type-consent|consent|terms|privacy|datenschutz)([ _-]|$)/i,
     /\b(j'accepte|ich[ _-]?stimme[ _-]?zu|acepto|acconsento|concordo|akkoord)\b/i
   ],
   newsletter: [
@@ -439,17 +447,12 @@ export async function extractFieldSignals(scope: Page | Locator): Promise<FieldS
       // Visibility & Position
       const style = window.getComputedStyle(input);
       const rect = input.getBoundingClientRect();
+      const isCheckboxOrRadio = type === "checkbox" || type === "radio";
       const isVisible = style.display !== "none" &&
         style.visibility !== "hidden" &&
-        style.opacity !== "0" &&
-        rect.width > 0 &&
-        rect.height > 0 &&
-        rect.right > 0 &&
-        rect.bottom > 0 &&
-        rect.left < 5000 &&
-        rect.top < 5000 &&
-        rect.left > -500 &&
-        rect.top > -500;
+        (isCheckboxOrRadio || (style.opacity !== "0" && (rect.width > 0 || input.offsetParent !== null) && (rect.height > 0 || input.offsetParent !== null))) &&
+        rect.left > -1000 &&
+        rect.top > -1000;
 
       // Select options
       let selectOptions: Array<{ text: string; value: string; disabled: boolean }> | undefined;
@@ -508,11 +511,25 @@ export function isHoneypotField(signals: FieldSignals): boolean {
   }
 
   const technical = [signals.name, signals.id, signals.dataAttributes].filter(Boolean).join(" ").toLowerCase();
-  if (/(honeypot|hp_|_hp|botcheck|fake_field|item_meta\[\d+\]_hp|gform_validation_container|wpforms-field-hp|gform_hp)/i.test(technical)) {
+  if (/(honeypot|hp_|_hp|botcheck|fake_field|item_meta\[\d+\]_hp|gform_validation_container|wpforms-field-hp|gform_hp|antispam|form-antispam)/i.test(technical)) {
     return true;
   }
 
-  // Hidden off-screen / CSS invisible with trap-like names or any invisible required input that isn't a known field
+  // Identifiable contact fields (email, phone, name, message, address, company, etc.) must NEVER be flagged as honeypots
+  const isLikelyContactField = (
+    signals.type === "email" ||
+    signals.type === "tel" ||
+    signals.tagName === "textarea" ||
+    /\b(email|phone|tel|mobile|name|first|last|fname|lname|message|comment|inquiry|company|website|address|city|state|zip|postal|subject)\b/i.test(
+      `${technical} ${combinedText}`
+    )
+  );
+
+  if (isLikelyContactField) {
+    return false;
+  }
+
+  // Hidden off-screen with negative coordinates or display:none that is NOT an identifiable contact field
   if (!signals.isVisible) {
     return true;
   }

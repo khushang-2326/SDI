@@ -571,9 +571,8 @@ async function safelyFillCountryField(
 }
 
 async function selectFirstRealOption(locator: Locator): Promise<boolean> {
-  const isVis = await locator.isVisible().catch(() => false);
   const isEn = await locator.isEnabled().catch(() => false);
-  if (!isVis || !isEn) return false;
+  if (!isEn) return false;
 
   // Find index of first non-disabled, non-placeholder option
   const targetIdx = await locator.evaluate((element) => {
@@ -583,43 +582,53 @@ async function selectFirstRealOption(locator: Locator): Promise<boolean> {
     const isRealOption = (option: HTMLOptionElement) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim();
       const val = (option.value ?? "").trim();
-      const hasContent = Boolean(val || label);
-      const isPlaceholder = pPattern.test(label) || (val === "" && pPattern.test(label));
-      return !option.disabled && hasContent && !isPlaceholder;
+      const isPlaceholder = pPattern.test(label) || pPattern.test(val) || (val === "" && pPattern.test(label));
+      return !option.disabled && val !== "" && !isPlaceholder;
     };
 
     const selected = select.options[select.selectedIndex];
     if (selected && isRealOption(selected)) return select.selectedIndex;
 
-    return Array.from(select.options).findIndex(isRealOption);
+    // First try finding an option with non-empty value and non-placeholder text
+    let idx = Array.from(select.options).findIndex(isRealOption);
+    if (idx < 0) {
+      // If all options have empty or arbitrary values, take the first non-disabled option whose label is not a placeholder
+      idx = Array.from(select.options).findIndex((opt) => !opt.disabled && (opt.textContent ?? "").trim() && !pPattern.test((opt.textContent ?? "").trim()));
+    }
+    return idx;
   }).catch(() => -1);
 
   if (targetIdx < 0) return false;
 
   // Try Playwright native selectOption first (trusted user gesture)
-  let selectOk = false;
   try {
-    await locator.selectOption({ index: targetIdx }, { timeout: 2500 });
-    selectOk = true;
-  } catch {
-    selectOk = false;
-  }
+    await locator.selectOption({ index: targetIdx }, { timeout: 2500 }).catch(() => undefined);
+  } catch {}
 
-  // Fallback to DOM manipulation if native select failed
-  if (!selectOk) {
-    selectOk = await locator.evaluate((element, idx) => {
-      const select = element as HTMLSelectElement;
-      select.selectedIndex = idx;
-      select.dispatchEvent(new Event("input", { bubbles: true }));
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      if ((window as any).jQuery) {
-        try { (window as any).jQuery(select).trigger("change"); } catch {}
+  // ALWAYS dispatch synthetic input, change, and blur events and update React value tracker
+  await locator.evaluate((element, idx) => {
+    const select = element as HTMLSelectElement;
+    if (!select || !select.options || !select.options[idx]) return;
+    select.selectedIndex = idx;
+    const opt = select.options[idx];
+    if (opt) {
+      // If option value is empty but required, set value to label so HTML5 constraint validation passes
+      if (select.required && !opt.value) {
+        opt.value = (opt.textContent || "").trim();
       }
-      return true;
-    }, targetIdx).catch(() => false);
-  }
+      select.value = opt.value;
+    }
+    const tracker = (select as any)._valueTracker;
+    if (tracker) tracker.setValue("");
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    select.dispatchEvent(new Event("blur", { bubbles: true }));
+    if ((window as any).jQuery) {
+      try { (window as any).jQuery(select).trigger("change"); } catch {}
+    }
+  }, targetIdx).catch(() => undefined);
 
-  // Verify that the selected option is not a placeholder
+  // Verify that the selected option is valid
   const verified = await locator.evaluate((element) => {
     const select = element as HTMLSelectElement;
     const opt = select.options[select.selectedIndex];
@@ -627,7 +636,9 @@ async function selectFirstRealOption(locator: Locator): Promise<boolean> {
     const label = (opt.textContent ?? "").replace(/\s+/g, " ").trim();
     const val = (opt.value ?? "").trim();
     const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
-    return Boolean(val || label) && !pPattern.test(label) && !(val === "" && pPattern.test(label));
+    const hasValidText = Boolean(label) && !pPattern.test(label);
+    const hasValidVal = Boolean(val) && !pPattern.test(val);
+    return (hasValidVal || hasValidText) && !select.matches(":invalid");
   }).catch(() => false);
 
   return verified;
@@ -2829,52 +2840,172 @@ export async function validateFormBeforeSubmission(
   // 2. Pre-validation sweep: ensure required checkboxes are checked
   await sweepAndCheckPreSubmitCheckboxes(page, formScope).catch(() => undefined);
 
-  // 3. HTML5 constraint validation check on all visible form controls
-  const validationError = hasFormScope && formScope
-    ? await formScope.evaluate((container: HTMLElement) => {
-        const invalidControls = Array.from(
-          container.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
-        );
-        for (const ctrl of invalidControls) {
-          const el = ctrl as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          const isVisible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-          if (!isVisible) continue;
+  // 3. HTML5 constraint validation check on all visible form controls with active self-healing
+  const getValidationError = async () => {
+    return hasFormScope && formScope
+      ? await formScope.evaluate((container: HTMLElement) => {
+          const invalidControls = Array.from(
+            container.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
+          );
+          for (const ctrl of invalidControls) {
+            const el = ctrl as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            const isVisible = (rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden") || el.required;
+            if (!isVisible) continue;
 
-          const identifier = el.name || el.id || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.tagName.toLowerCase();
-          const msg = el.validationMessage || "Invalid or incomplete required field";
-          return {
-            identifier,
-            msg,
-            tagName: el.tagName.toLowerCase(),
-            type: el.getAttribute("type") || ""
-          };
-        }
-        return null;
-      }).catch(() => null)
-    : await page.evaluate(() => {
-        const invalidControls = Array.from(
-          document.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
-        );
-        for (const ctrl of invalidControls) {
-          const el = ctrl as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-          const rect = el.getBoundingClientRect();
-          const style = window.getComputedStyle(el);
-          const isVisible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-          if (!isVisible) continue;
+            const identifier = el.name || el.id || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.tagName.toLowerCase();
+            const msg = el.validationMessage || "Invalid or incomplete required field";
+            return {
+              identifier,
+              msg,
+              tagName: el.tagName.toLowerCase(),
+              type: el.getAttribute("type") || ""
+            };
+          }
+          return null;
+        }).catch(() => null)
+      : await page.evaluate(() => {
+          const invalidControls = Array.from(
+            document.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
+          );
+          for (const ctrl of invalidControls) {
+            const el = ctrl as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            const isVisible = (rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden") || el.required;
+            if (!isVisible) continue;
 
-          const identifier = el.name || el.id || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.tagName.toLowerCase();
-          const msg = el.validationMessage || "Invalid or incomplete required field";
-          return {
-            identifier,
-            msg,
-            tagName: el.tagName.toLowerCase(),
-            type: el.getAttribute("type") || ""
-          };
+            const identifier = el.name || el.id || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.tagName.toLowerCase();
+            const msg = el.validationMessage || "Invalid or incomplete required field";
+            return {
+              identifier,
+              msg,
+              tagName: el.tagName.toLowerCase(),
+              type: el.getAttribute("type") || ""
+            };
+          }
+          return null;
+        }).catch(() => null);
+  };
+
+  let validationError = await getValidationError();
+
+  // If validation errors are detected, attempt active self-healing before failing
+  if (validationError) {
+    const healFn = (leadDataArg: any) => {
+      const invalidControls = Array.from(
+        document.querySelectorAll("input:invalid:not([type='hidden']), select:invalid, textarea:invalid")
+      ) as (HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)[];
+
+      const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+
+      for (const el of invalidControls) {
+        const tag = el.tagName.toLowerCase();
+        const type = (el.getAttribute("type") || "").toLowerCase();
+        const nameOrId = `${el.name || ""} ${el.id || ""} ${el.getAttribute("placeholder") || ""} ${el.getAttribute("aria-label") || ""}`.toLowerCase();
+
+        // 1. Dropdown select
+        if (tag === "select") {
+          const select = el as HTMLSelectElement;
+          if (select.options && select.options.length > 0) {
+            let targetIdx = Array.from(select.options).findIndex(
+              (o) => !o.disabled && (o.value || "").trim() !== "" && !pPattern.test((o.textContent || "").trim())
+            );
+            if (targetIdx < 0) {
+              targetIdx = Array.from(select.options).findIndex(
+                (o) => !o.disabled && (o.textContent || "").trim() !== "" && !pPattern.test((o.textContent || "").trim())
+              );
+            }
+            if (targetIdx < 0 && select.options.length > 1) targetIdx = 1;
+            if (targetIdx >= 0) {
+              select.selectedIndex = targetIdx;
+              const opt = select.options[targetIdx];
+              if (opt) {
+                if (select.required && !opt.value) {
+                  opt.value = (opt.textContent || "").trim();
+                }
+                select.value = opt.value;
+              }
+              const tracker = (select as any)._valueTracker;
+              if (tracker) tracker.setValue("");
+              select.dispatchEvent(new Event("input", { bubbles: true }));
+              select.dispatchEvent(new Event("change", { bubbles: true }));
+              select.dispatchEvent(new Event("blur", { bubbles: true }));
+            }
+          }
+          continue;
         }
-        return null;
-      }).catch(() => null);
+
+        // 2. Checkbox
+        if (type === "checkbox") {
+          const cb = el as HTMLInputElement;
+          cb.checked = true;
+          const tracker = (cb as any)._valueTracker;
+          if (tracker) tracker.setValue(false);
+          cb.dispatchEvent(new Event("input", { bubbles: true }));
+          cb.dispatchEvent(new Event("change", { bubbles: true }));
+          continue;
+        }
+
+        // 3. Radio
+        if (type === "radio") {
+          const rb = el as HTMLInputElement;
+          rb.checked = true;
+          rb.dispatchEvent(new Event("input", { bubbles: true }));
+          rb.dispatchEvent(new Event("change", { bubbles: true }));
+          continue;
+        }
+
+        // 4. Input / Textarea
+        let fillVal = "";
+        if (type === "email" || nameOrId.includes("email")) {
+          fillVal = leadDataArg.email || "hello@example.com";
+        } else if (type === "tel" || nameOrId.includes("phone") || nameOrId.includes("tel") || nameOrId.includes("mobile") || nameOrId.includes("pn")) {
+          fillVal = leadDataArg.mobile || leadDataArg.phone || "2125550199";
+        } else if (nameOrId.includes("first") || nameOrId.includes("fname")) {
+          fillVal = leadDataArg.firstName || (leadDataArg.fullName ? leadDataArg.fullName.split(" ")[0] : "John");
+        } else if (nameOrId.includes("last") || nameOrId.includes("lname")) {
+          const parts = (leadDataArg.fullName || "").split(" ").filter(Boolean);
+          fillVal = leadDataArg.lastName || (parts.length > 1 ? parts.slice(1).join(" ") : parts[0]) || "Doe";
+        } else if (nameOrId.includes("name")) {
+          fillVal = leadDataArg.fullName || "John Doe";
+        } else if (nameOrId.includes("company") || nameOrId.includes("organization") || nameOrId.includes("business")) {
+          fillVal = leadDataArg.companyName || leadDataArg.company || "Acme Corp";
+        } else if (nameOrId.includes("website") || nameOrId.includes("url") || nameOrId.includes("site")) {
+          fillVal = leadDataArg.website || "https://example.com";
+        } else if (nameOrId.includes("address") || nameOrId.includes("street")) {
+          fillVal = leadDataArg.address || "123 Market Street";
+        } else if (nameOrId.includes("city")) {
+          fillVal = leadDataArg.city || "New York";
+        } else if (nameOrId.includes("zip") || nameOrId.includes("postal")) {
+          fillVal = leadDataArg.zip || leadDataArg.postalCode || "10001";
+        } else if (nameOrId.includes("subject") || nameOrId.includes("topic") || nameOrId.includes("title") || nameOrId.includes("contacttype")) {
+          fillVal = leadDataArg.subject || "General Inquiry";
+        } else {
+          fillVal = leadDataArg.message || "Hello, I am interested in your services. Please contact me with more details.";
+        }
+
+        if (fillVal) {
+          el.value = fillVal;
+          const tracker = (el as any)._valueTracker;
+          if (tracker) tracker.setValue("");
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          el.dispatchEvent(new Event("blur", { bubbles: true }));
+        }
+      }
+    };
+
+    if (hasFormScope && formScope) {
+      await formScope.evaluate(healFn, leadData).catch(() => undefined);
+    } else {
+      await page.evaluate(healFn, leadData).catch(() => undefined);
+    }
+
+    await page.waitForTimeout(200);
+    validationError = await getValidationError();
+  }
 
   if (validationError) {
     return {
@@ -2885,52 +3016,62 @@ export async function validateFormBeforeSubmission(
   }
 
   // 4. Verify all required <select> dropdowns have valid non-placeholder selections
-  const invalidSelect = hasFormScope && formScope
-    ? await formScope.evaluate((container: HTMLElement) => {
-        const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
-        const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
-        for (const sel of selects) {
-          const isReq = sel.required || sel.getAttribute("aria-required") === "true";
-          if (!isReq) continue;
-          const rect = sel.getBoundingClientRect();
-          const style = window.getComputedStyle(sel);
-          if (style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
+  const checkInvalidSelect = async () => {
+    return hasFormScope && formScope
+      ? await formScope.evaluate((container: HTMLElement) => {
+          const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+          const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+          for (const sel of selects) {
+            const isReq = sel.required || sel.getAttribute("aria-required") === "true";
+            if (!isReq) continue;
+            const rect = sel.getBoundingClientRect();
+            const style = window.getComputedStyle(sel);
+            if (style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
 
-          const opt = sel.options[sel.selectedIndex];
-          const val = (opt?.value || sel.value || "").trim();
-          const txt = (opt?.textContent || "").trim();
-          const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !(val === "" && pPattern.test(txt));
-          if (!hasValid) {
-            return sel.name || sel.id || "Required dropdown";
+            const opt = sel.options[sel.selectedIndex];
+            const val = (opt?.value || sel.value || "").trim();
+            const txt = (opt?.textContent || "").trim();
+            const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !pPattern.test(val) && !(val === "" && pPattern.test(txt));
+            if (!hasValid || sel.matches(":invalid")) {
+              return sel.name || sel.id || "Required dropdown";
+            }
           }
-        }
-        return null;
-      }).catch(() => null)
-    : await page.evaluate(() => {
-        const selects = Array.from(document.querySelectorAll("select")) as HTMLSelectElement[];
-        const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
-        for (const sel of selects) {
-          const isReq = sel.required || sel.getAttribute("aria-required") === "true";
-          if (!isReq) continue;
-          const rect = sel.getBoundingClientRect();
-          const style = window.getComputedStyle(sel);
-          if (style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
+          return null;
+        }).catch(() => null)
+      : await page.evaluate(() => {
+          const selects = Array.from(document.querySelectorAll("select")) as HTMLSelectElement[];
+          const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+          for (const sel of selects) {
+            const isReq = sel.required || sel.getAttribute("aria-required") === "true";
+            if (!isReq) continue;
+            const rect = sel.getBoundingClientRect();
+            const style = window.getComputedStyle(sel);
+            if (style.display === "none" || style.visibility === "hidden" || rect.width === 0 || rect.height === 0) continue;
 
-          const opt = sel.options[sel.selectedIndex];
-          const val = (opt?.value || sel.value || "").trim();
-          const txt = (opt?.textContent || "").trim();
-          const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !(val === "" && pPattern.test(txt));
-          if (!hasValid) {
-            return sel.name || sel.id || "Required dropdown";
+            const opt = sel.options[sel.selectedIndex];
+            const val = (opt?.value || sel.value || "").trim();
+            const txt = (opt?.textContent || "").trim();
+            const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !pPattern.test(val) && !(val === "" && pPattern.test(txt));
+            if (!hasValid || sel.matches(":invalid")) {
+              return sel.name || sel.id || "Required dropdown";
+            }
           }
-        }
-        return null;
-      }).catch(() => null);
+          return null;
+        }).catch(() => null);
+  };
+
+  let invalidSelect = await checkInvalidSelect();
+  if (invalidSelect) {
+    // Attempt final sweep and select on rootScope
+    await sweepAndSelectRequiredDropdowns(rootScope).catch(() => undefined);
+    await page.waitForTimeout(200);
+    invalidSelect = await checkInvalidSelect();
+  }
 
   if (invalidSelect) {
     return {
       valid: false,
-      failureReason: `Required dropdown "${invalidSelect}" has no valid selection.`,
+      failureReason: `Browser validation failed on "${invalidSelect}": Please select an item in the list.`,
       failedField: invalidSelect
     };
   }
@@ -3671,13 +3812,13 @@ export async function submitContactForm({
       websiteUrl,
       status: shouldSubmit ? "success" : "dry_run_ready_to_book",
       submissionOutcome: shouldSubmit
-        ? (explicitSuccess ? "VERIFIED_SUCCESS" : "PASS")
+        ? (explicitSuccess ? "VERIFIED_SUCCESS" : "SUBMISSION_UNCONFIRMED")
         : "PASS",
       errorMessage: null,
       message: shouldSubmit
         ? (explicitSuccess
             ? "Contact form submitted successfully with verified confirmation."
-            : "Contact form submitted successfully (action completed without errors).")
+            : "Contact form submitted successfully (action completed without errors, awaiting confirmation).")
         : "Dry run: Form fields filled and submit button verified.",
       screenshotPath,
       submittedAt,

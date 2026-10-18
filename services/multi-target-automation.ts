@@ -613,6 +613,7 @@ export async function runMultiTargetAutomation({
 
   // If target has not succeeded and no contact form has been attempted yet (e.g. booking widget had no slots or failed to mount),
   // execute standard website contact form fallback
+  const executedFallbackTargets: DiscoveredSubmissionTarget[] = [];
   const hasAttemptedContactForm = attempts.some((a) => a.target.targetType === "contact_form");
   if (!targetSucceeded && !encounteredProxyFailure && !encounteredBlockFailure && !hasAttemptedContactForm && websiteUrl) {
     let fallbackOrigin = websiteUrl;
@@ -646,6 +647,7 @@ export async function runMultiTargetAutomation({
     }
 
     console.log(`[BOOKING-FALLBACK] Booking unsuccessful or unmounted. Attempting contact form fallbacks on ${fallbackTargets.map((t) => t.url).join(", ")}`);
+    executedFallbackTargets.push(...fallbackTargets);
     await executeTargets(fallbackTargets);
     if (encounteredProxyFailure && !isDirectRetry) {
       return triggerDirectRetry("Direct fallback encountered proxy authentication failure.");
@@ -657,7 +659,7 @@ export async function runMultiTargetAutomation({
 
   const targets = Array.from(
     new Map(
-      [...orderedCachedTargets, ...discovery.targets].map((target) => [
+      [...orderedCachedTargets, ...discovery.targets, ...executedFallbackTargets].map((target) => [
         `${target.targetType}:${target.url}`,
         target
       ])
@@ -669,10 +671,13 @@ export async function runMultiTargetAutomation({
         ? `${discovery.reason} The first successful target was used and remaining targets were skipped.`
         : timedOut
           ? "Website automation exceeded its time limit."
-          : redactProxyDetails(discovery.reason),
+          : attempts.length > 0 && attempts[attempts.length - 1].result.errorMessage
+            ? redactProxyDetails(attempts[attempts.length - 1].result.errorMessage!)
+            : redactProxyDetails(discovery.reason),
       checkedUrls: Array.from(new Set([
         ...orderedCachedTargets.map((target) => target.url),
-        ...discovery.checkedUrls
+        ...discovery.checkedUrls,
+        ...executedFallbackTargets.map((target) => target.url)
       ])),
       targets,
       attempts

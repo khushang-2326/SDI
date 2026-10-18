@@ -13,6 +13,12 @@ import {
   type AutomationResult,
   type AutomationRunnerState
 } from "@/app/(dashboard)/automation/actions";
+import {
+  classifyErrorTaxonomy,
+  computeTaxonomyCounts,
+  getTaxonomyDetail,
+  type ErrorTaxonomyCategory
+} from "@/services/error-taxonomy";
 import { SubmitButton } from "@/components/SubmitButton";
 
 const initialState: AutomationRunnerState = {
@@ -138,38 +144,30 @@ function AutomationAnalysisModal({
   const successRate = totalWebsites > 0 ? ((successWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
   const failureRate = totalWebsites > 0 ? ((failedWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
 
-  // Category breakdown for failures
-  const categoryCounts: Record<string, number> = {
-    NAVIGATION_TIMEOUT: 0,
-    FORM_NOT_FOUND: 0,
-    NETWORK_ERROR: 0,
-    HUMAN_VERIFICATION: 0,
-    CAPTCHA: 0,
-    HTTP_403: 0,
-    SUBMISSION_FAILED: 0,
-    OTHER: 0
-  };
+  // Root-cause taxonomy breakdown for failures
+  const taxonomyCounts = useMemo(() => {
+    return computeTaxonomyCounts(failedWebsites);
+  }, [failedWebsites]);
 
-  failedWebsites.forEach((item) => {
-    const d = (item.detail || "").toLowerCase();
-    if (d.includes("timeout") || d.includes("timed out") || d.includes("exceeded")) {
-      categoryCounts.NAVIGATION_TIMEOUT++;
-    } else if (d.includes("captcha") || d.includes("turnstile") || d.includes("hcaptcha") || d.includes("recaptcha")) {
-      categoryCounts.CAPTCHA++;
-    } else if (d.includes("cloudflare") || d.includes("challenge") || d.includes("human verification") || d.includes("bot detection")) {
-      categoryCounts.HUMAN_VERIFICATION++;
-    } else if (d.includes("403") || d.includes("forbidden")) {
-      categoryCounts.HTTP_403++;
-    } else if (d.includes("net::") || d.includes("econnrefused") || d.includes("could not be loaded")) {
-      categoryCounts.NETWORK_ERROR++;
-    } else if (d.includes("submit clicked, but") || d.includes("no success message")) {
-      categoryCounts.SUBMISSION_FAILED++;
-    } else if (d.includes("not found") || d.includes("no supported") || d.includes("no visible submit")) {
-      categoryCounts.FORM_NOT_FOUND++;
-    } else {
-      categoryCounts.OTHER++;
+  const activeTaxonomyList = useMemo(() => {
+    return (Object.entries(taxonomyCounts) as [ErrorTaxonomyCategory, number][])
+      .filter(([_, count]) => count > 0)
+      .map(([cat, count]) => ({
+        category: cat,
+        count,
+        detail: getTaxonomyDetail(cat),
+        percentage: failedWebsites.length > 0 ? ((count / failedWebsites.length) * 100).toFixed(1) : "0.0"
+      }))
+      .sort((a, b) => b.count - a.count);
+  }, [taxonomyCounts, failedWebsites.length]);
+
+  const categoryCounts: Record<string, number> = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const item of activeTaxonomyList) {
+      counts[item.detail.displayName] = item.count;
     }
-  });
+    return counts;
+  }, [activeTaxonomyList]);
 
   const filteredItems = items.filter((item) => {
     if (filter === "success" && !item.isSuccess) return false;
@@ -177,11 +175,15 @@ function AutomationAnalysisModal({
     if (filter === "pending" && (item.isSuccess || item.status === "failed")) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
+      const itemCat = classifyErrorTaxonomy(item.detail, item.status);
+      const itemDetail = getTaxonomyDetail(itemCat);
       return (
         item.name.toLowerCase().includes(q) ||
         item.url.toLowerCase().includes(q) ||
         item.status.toLowerCase().includes(q) ||
-        item.detail.toLowerCase().includes(q)
+        item.detail.toLowerCase().includes(q) ||
+        itemDetail.displayName.toLowerCase().includes(q) ||
+        itemCat.toLowerCase().includes(q)
       );
     }
     return true;
@@ -443,6 +445,46 @@ ${items
               ) : null}
             </div>
           </div>
+
+          {/* Root-Cause Failure Breakdown */}
+          {activeTaxonomyList.length > 0 ? (
+            <div className="space-y-2 rounded-2xl border border-red-900/40 bg-red-950/20 p-4">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-bold uppercase tracking-wider text-red-300">
+                  Root-Cause Failure Breakdown ({failedWebsites.length} failed targets)
+                </p>
+                <span className="text-[11px] text-slate-400">Click any card to filter targets</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+                {activeTaxonomyList.map((item) => (
+                  <button
+                    key={item.category}
+                    type="button"
+                    onClick={() => {
+                      setFilter("failed");
+                      setSearchQuery(item.detail.displayName);
+                    }}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-red-800/40 bg-slate-900/70 p-2.5 text-left transition hover:border-red-500 hover:bg-slate-800/80 group"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-xs font-bold text-slate-200 group-hover:text-white">
+                        {item.detail.displayName}
+                      </p>
+                      <p className="text-[10px] text-slate-400">
+                        Stage: <span className="text-slate-300 font-semibold">{item.detail.stage}</span>
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-xs font-extrabold text-red-300">
+                        {item.count}
+                      </span>
+                      <p className="text-[10px] text-slate-400 mt-0.5">{item.percentage}%</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
           {/* Filters & Search */}
           <div className="flex flex-wrap items-center justify-between gap-3">

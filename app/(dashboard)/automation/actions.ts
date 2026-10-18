@@ -35,7 +35,7 @@ export type AutomationResult = {
     discoveryReason: string | null;
     targetType: string | null;
     status: SubmitContactFormResult["status"];
-    submissionOutcome?: "FAILED" | "SUBMITTED_ATTEMPT" | "PASS" | "VERIFIED_SUCCESS";
+    submissionOutcome?: SubmitContactFormResult["submissionOutcome"];
     errorMessage: string | null;
     screenshotPath: string | null;
     screenshotPaths: string[];

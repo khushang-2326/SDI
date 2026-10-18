@@ -7,6 +7,7 @@ import {
   PROXY_407_MESSAGE,
   redactProxyDetails
 } from "@/services/proxy-helper";
+import { classifyErrorTaxonomy } from "@/services/error-taxonomy";
 import type { AutomationResult } from "@/app/(dashboard)/automation/actions";
 
 export type StoredPayload = {
@@ -416,7 +417,7 @@ async function processSingleTarget(
         `Target ${website.websiteUrl}`
       );
 
-      if (run.targets.length === 0) {
+      if (run.targets.length === 0 && run.attempts.length === 0) {
         throw new Error(run.discoveryReason || "No valid submission target discovered");
       }
 
@@ -440,31 +441,9 @@ async function processSingleTarget(
           : `[${workerId}] Successfully submitted contact target`;
       } else {
         const attemptErr = lastAttempt?.result?.errorMessage || "";
-        const combinedErr = (attemptErr || run.discoveryReason || "").toLowerCase();
-
-        if (combinedErr.includes("403") || combinedErr.includes("forbidden")) {
-          finalStatus = "Http_403";
-        } else if (combinedErr.includes("captcha") || combinedErr.includes("turnstile") || combinedErr.includes("recaptcha") || combinedErr.includes("hcaptcha")) {
-          finalStatus = "Captcha_Required";
-        } else if (combinedErr.includes("human verification") || combinedErr.includes("robot challenge") || combinedErr.includes("bot detection")) {
-          finalStatus = "Human_Verification";
-        } else if (combinedErr.includes("no supported contact form") || combinedErr.includes("no form detected") || combinedErr.includes("no contact form found") || combinedErr.includes("no valid submission target")) {
-          finalStatus = "No_Form_Detected";
-        } else if (combinedErr.includes("no visible submit button") || combinedErr.includes("submit button not found")) {
-          finalStatus = "Submit_Button_Not_Found";
-        } else if (combinedErr.includes("no date with available time slots") || combinedErr.includes("no_available_slots")) {
-          finalStatus = "Booking_Widget_Empty";
-        } else if (combinedErr.includes("booking widget source was found, but it did not render") || combinedErr.includes("did not render")) {
-          finalStatus = "Widget_Mount_Failure";
-        } else if (combinedErr.includes("validation error") || combinedErr.includes("required field missing")) {
-          finalStatus = "Validation_Error";
-        } else if (combinedErr.includes("exceeded timeout") || combinedErr.includes("timed out")) {
-          finalStatus = "Timeout";
-        } else if (combinedErr.includes("net::err_connection_closed") || combinedErr.includes("net::err_connection_refused") || combinedErr.includes("econnrefused")) {
-          finalStatus = "Network_Error";
-        }
-
-        finalMessage = `[${workerId}] ${attemptErr || run.discoveryReason || "Target execution failed"}`;
+        const combinedErr = attemptErr || run.discoveryReason || "Target execution failed";
+        finalStatus = classifyErrorTaxonomy(combinedErr, null);
+        finalMessage = `[${workerId}] ${combinedErr}`;
       }
 
       await prisma.submissionResult.updateMany({
@@ -499,30 +478,7 @@ async function processSingleTarget(
         ? error.message
         : "Target automation failed";
 
-    let failureStatus = "Failed";
-    const errText = rawError.toLowerCase();
-    if (errText.includes("net::err_name_not_resolved") || errText.includes("enotfound") || errText.includes("dns")) {
-      failureStatus = "Dns_Unresolvable";
-    } else if (errText.includes("403") || errText.includes("forbidden")) {
-      failureStatus = "Http_403";
-    } else if (errText.includes("captcha") || errText.includes("turnstile") || errText.includes("recaptcha") || errText.includes("hcaptcha")) {
-      failureStatus = "Captcha_Required";
-    } else if (errText.includes("human verification") || errText.includes("robot challenge") || errText.includes("bot detection")) {
-      failureStatus = "Human_Verification";
-    } else if (errText.includes("no supported contact form") || errText.includes("no form detected") || errText.includes("no contact form found") || errText.includes("no valid submission target")) {
-      failureStatus = "No_Form_Detected";
-    } else if (errText.includes("no visible submit button") || errText.includes("submit button not found")) {
-      failureStatus = "Submit_Button_Not_Found";
-    } else if (errText.includes("validation error") || errText.includes("required field missing")) {
-      failureStatus = "Validation_Error";
-    } else if (errText.includes("exceeded timeout") || errText.includes("timed out") || errText.includes("timeout 90000ms") || errText.includes("timeout 120000ms")) {
-      failureStatus = "Timeout";
-    } else if (errText.includes("err_connection_closed") || errText.includes("err_connection_refused") || errText.includes("err_failed") || errText.includes("err_http_response_code_failure")) {
-      failureStatus = "Network_Error";
-    } else if (errText.includes("facebook.com") || errText.includes("yelp.com")) {
-      failureStatus = "Unsupported_Platform";
-    }
-
+    const failureStatus = classifyErrorTaxonomy(rawError, null);
     console.warn(`[${workerId}] Error on target ${resultId}: ${rawError} (Status: ${failureStatus})`);
 
     await prisma.submissionResult.updateMany({

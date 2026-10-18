@@ -103,42 +103,42 @@ export const COMMON_INPUT_SELECTOR = [
 ].join(",");
 
 // Regex for controls that must NEVER be filled with lead data
-const NEGATIVE_FIELD_PATTERN = /\b(password|passwd|pwd|passcode|search|query|find|coupon|promo|voucher|discount|captcha|recaptcha|turnstile|hcaptcha|cf-turnstile|botcheck|honeypot|filter|search-input|site-search)\b/i;
+const NEGATIVE_FIELD_PATTERN = /\b(password|passwd|pwd|passcode|site[-_]?search|search[-_]?input|coupon|promo|voucher|discount|captcha|recaptcha|turnstile|hcaptcha|cf-turnstile|botcheck|honeypot)\b/i;
 
 // Compact normalized multilingual token patterns across EN, ES, FR, DE, IT, PT, NL
 const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegExp[]> = {
   first_name: [
-    /\b(first[ _-]?name|firstname|fname|f_name|given[ _-]?name|forename|your[ _-]?first[ _-]?name)\b/i,
+    /\b(first[ _-]?name|firstname|fname|f_name|given[ _-]?name|forename|your[ _-]?first[ _-]?name|your[ _-]?name|c_firstname|txtname|name_first|footer[-_]?first[-_]?name)\b/i,
     /\b(prenom|vorname|nombre|nome|primeiro[ _-]?nome|voornaam)\b/i,
-    /(^|[ _-])(first-name|firstname|fname|f_name|given-name|forename)([ _-]|$)/i
+    /(^|[ _-])(first-name|firstname|fname|f_name|given-name|forename|your-name|wpforms\[fields\]\[\d+\]\[first\])([ _-]|$)/i
   ],
   last_name: [
-    /\b(last[ _-]?name|lastname|lname|l_name|surname|family[ _-]?name|your[ _-]?last[ _-]?name)\b/i,
+    /\b(last[ _-]?name|lastname|lname|l_name|surname|family[ _-]?name|your[ _-]?last[ _-]?name|your[ _-]?last|c_lastname|name_last)\b/i,
     /\b(nom[ _-]?de[ _-]?famille|nachname|familienname|apellido|cognome|sobrenome|achternaam)\b/i,
-    /(^|[ _-])(last-name|lastname|lname|l_name|surname|family-name)([ _-]|$)/i
+    /(^|[ _-])(last-name|lastname|lname|l_name|surname|family-name|your-last|wpforms\[fields\]\[\d+\]\[last\])([ _-]|$)/i
   ],
   full_name: [
-    /\b(full[ _-]?name|fullname|your[ _-]?name|yourname|contact[ _-]?name|complete[ _-]?name|client[ _-]?name|lead[ _-]?name|user[ _-]?name)\b/i,
+    /\b(full[ _-]?name|fullname|your[ _-]?name|yourname|contact[ _-]?name|complete[ _-]?name|client[ _-]?name|lead[ _-]?name|user[ _-]?name|contactusform\[name\]|queryform\[name\]|user_query\[name\])\b/i,
     /\b(nom[ _-]?complet|vollstaendiger[ _-]?name|voller[ _-]?name|nombre[ _-]?completo|nome[ _-]?completo|volledige[ _-]?naam)\b/i,
     // Generic "name" with boundary check (not company name, user name, etc., handling optional trailing required asterisk)
     /(?<!(company|business|user|file|brand|org|organisation)[ _-])\b(name|nom|nombre|nome|naam)\b(?![ _-]?(of|company|business|user))/i,
     /\b(ihr[ _-]?name|votre[ _-]?nom|su[ _-]?nombre|il[ _-]?tuo[ _-]?nome|uw[ _-]?naam)\b/i
   ],
   email: [
-    /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email|corporate[ _-]?email|your[ _-]?email|youremail|contact[ _-]?email)\b/i,
+    /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email|corporate[ _-]?email|your[ _-]?email|youremail|contact[ _-]?email|footer[-_]?email)\b/i,
     /\b(courriel|correo|correo[ _-]?electronico|indirizzo[ _-]?email|e-post|e-mailadresse)\b/i,
-    /(^|[ _-])(email|work-email|business-email|user-email|contact-email|lead-email|form_fields\[email\]|fields\[email\])([ _-]|$)/i
+    /(^|[ _-])(email|work-email|business-email|user-email|contact-email|lead-email|form_fields\[email.*\]|fields\[email.*\]|footer-email|newsletter_email)([ _-]|$)/i
   ],
   phone: [
-    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no|your[ _-]?phone|yourphone|mobile[ _-]?no)\b/i,
+    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no|your[ _-]?phone|yourphone|mobile[ _-]?no|phonenumber|pn)\b/i,
     /\b(telefon|telephone|telefono|numero[ _-]?telefono|celular|telefone|telefoonnummer)\b/i,
-    /(^|[ _-])(phone|mobile|telephone|tel|contact-phone|phone-number|mobile-number|form_fields\[phone\]|fields\[phone\])([ _-]|$)/i
+    /(^|[ _-])(phone|mobile|telephone|tel|contact-phone|phone-number|mobile-number|form_fields\[phone.*\]|fields\[phone.*\]|your-phone|tel-\d+|phone-[0-9a-f-]+)([ _-]|$)/i
   ],
   company: [
     /\b(company|business|organization|organisation|brand|firm|agency|enterprise|compañía|compania)\b/i,
     /\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name|organization[ _-]?name|your[ _-]?company|businessname|companyname)\b/i,
     /\b(societe|entreprise|unternehmen|firma|empresa|azienda|bedrijf|bedrijfsnaam)\b/i,
-    /(^|[ _-])(company|company-name|business-name|organization|firm|agency)([ _-]|$)/i
+    /(^|[ _-])(company|company-name|business-name|organization|firm|agency|0-1\/company)([ _-]|$)/i
   ],
   job_title: [
     /\b(job[ _-]?title|title|role|position|occupation|designation)\b/i,
@@ -170,23 +170,23 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(code[ _-]?postal|plz|postleitzahl|codigo[ _-]?postal|cap|postcode)\b/i
   ],
   subject: [
-    /\b(subject|regarding|topic|reason[ _-]?for[ _-]?contact|how[ _-]?can[ _-]?we[ _-]?help|describe[ _-]?your[ _-]?needs|inquiry[ _-]?type|contact[ _-]?reason)\b/i,
+    /\b(subject|regarding|topic|reason[ _-]?for[ _-]?contact|how[ _-]?can[ _-]?we[ _-]?help|describe[ _-]?your[ _-]?needs|inquiry[ _-]?type|contact[ _-]?reason|contacttype|title)\b/i,
     /\b(sujet|betreff|asunto|oggetto|assunto|onderwerp)\b/i
   ],
   message: [
-    /\b(message|comment|comments|note|notes|details|description|project[ _-]?details|how[ _-]?can[ _-]?we[ _-]?help|brief|tell[ _-]?us|your[ _-]?message|yourmessage|ymessage|leave[ _-]?us[ _-]?a[ _-]?message|project[ _-]?description|inquiry[ _-]?details)\b/i,
+    /\b(message|comment|comments|note|notes|details|description|project[ _-]?details|how[ _-]?can[ _-]?we[ _-]?help|brief|tell[ _-]?us|your[ _-]?message|yourmessage|ymessage|leave[ _-]?us[ _-]?a[ _-]?message|project[ _-]?description|inquiry[ _-]?details|contact-message|question|your-message)\b/i,
     /\b(nachricht|mitteilung|mensaje|messaggio|mensagem|bericht|opmerkingen)\b/i,
-    /(^|[ _-])(message|comments|inquiry-message|form_fields\[message\]|fields\[message\]|ymessage)([ _-]|$)/i
+    /(^|[ _-])(message|comments|inquiry-message|form_fields\[message.*\]|fields\[message.*\]|ymessage|contact-message|your-message|question)([ _-]|$)/i
   ],
   inquiry: [
-    /\b(enquiry|inquiry|consultation|request|question|demande|anfrage|consulta|richiesta)\b/i
+    /\b(enquiry|inquiry|consultation|request|question|query|user_query|demande|anfrage|consulta|richiesta)\b/i
   ],
   budget: [
     /\b(budget|estimated[ _-]?budget|price[ _-]?range|investment|monthly[ _-]?budget|project[ _-]?budget|current[ _-]?budget|marketing[ _-]?budget|approximate[ _-]?budget)\b/i,
     /\b(tarif|kosten|presupuesto|preventivo|orcamento)\b/i
   ],
   service_interest: [
-    /\b(services?[ _-]?interested[ _-]?in|services?[ _-]?of[ _-]?interest|preferred[ _-]?services?|services?[ _-]?required|select[ _-]?services?|interested[ _-]?in|area[ _-]?of[ _-]?service|service|services)\b/i,
+    /\b(services?[ _-]?interested[ _-]?in|services?[ _-]?of[ _-]?interest|preferred[ _-]?services?|services?[ _-]?required|select[ _-]?services?|interested[ _-]?in|area[ _-]?of[ _-]?service|service|services|interested-service)\b/i,
     /\b(dienstleistung|servicio|servicios|prestation|servizi|diensten)\b/i
   ],
   referral_source: [
@@ -576,8 +576,16 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
   ].filter(Boolean).join(" ");
 
   const isZipOrPostal = /\b(zip|postal|postcode|zipcode|plz)\b/i.test(combinedAttributes);
+  const isLikelyContactField = (
+    signals.type === "email" ||
+    signals.type === "tel" ||
+    signals.tagName === "textarea" ||
+    /\b(email|phone|tel|mobile|name|first|last|fname|lname|message|comment|inquiry|company|website|address|city|state|zip|postal|subject)\b/i.test(
+      combinedAttributes
+    )
+  );
 
-  if (!isZipOrPostal && NEGATIVE_FIELD_PATTERN.test(combinedAttributes)) {
+  if (!isZipOrPostal && !isLikelyContactField && NEGATIVE_FIELD_PATTERN.test(combinedAttributes)) {
     const match = combinedAttributes.match(NEGATIVE_FIELD_PATTERN)?.[0] ?? "negative";
     return {
       fieldType: "unknown",

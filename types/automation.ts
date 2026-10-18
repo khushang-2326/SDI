@@ -67,6 +67,8 @@ export type AuthoritativeTaxonomyCategory =
   | "FAILURE_BROWSER"
   | "FAILURE_OTHER";
 
+export type { ErrorTaxonomyCategory, TaxonomyDetail } from "../services/error-taxonomy";
+
 export type SubmitContactFormInput = {
   websiteUrl: string;
   leadData: LeadData;
@@ -85,7 +87,7 @@ export type SubmitContactFormResult = {
     | "no_available_slots"
     | "iframe_not_accessible"
     | "confirmation_not_found";
-  submissionOutcome?: "FAILED" | "SUBMITTED_ATTEMPT" | "PASS" | "VERIFIED_SUCCESS";
+  submissionOutcome?: "FAILED" | "SUBMITTED_ATTEMPT" | "PASS" | "VERIFIED_SUCCESS" | "SUBMISSION_UNCONFIRMED";
   errorMessage: string | null;
   message?: string | null;
   screenshotPath: string | null;

@@ -18,17 +18,13 @@ conn.on('ready', () => {
     echo "=== Host Git Status ==="
     git log -1 --oneline
 
-    echo "=== Syncing source files into running container sdi ==="
-    docker cp "/root/SDI/lib/browserPool.ts" "sdi:/app/lib/browserPool.ts"
-    docker cp "/root/SDI/services/submission-target-discovery.ts" "sdi:/app/services/submission-target-discovery.ts"
-    docker cp "/root/SDI/services/contact-form-automation.ts" "sdi:/app/services/contact-form-automation.ts"
-    docker cp "/root/SDI/services/multi-target-automation.ts" "sdi:/app/services/multi-target-automation.ts"
-    docker cp "/root/SDI/services/discovery/deterministic-ranker.ts" "sdi:/app/services/discovery/deterministic-ranker.ts"
-    docker cp "/root/SDI/services/worker-pool.ts" "sdi:/app/services/worker-pool.ts"
-    docker cp "/root/SDI/services/action-button-fallback.ts" "sdi:/app/services/action-button-fallback.ts"
-    docker cp "/root/SDI/services/calendly-booking-automation.ts" "sdi:/app/services/calendly-booking-automation.ts"
-    docker cp "/root/SDI/services/generic-booking-widget-automation.ts" "sdi:/app/services/generic-booking-widget-automation.ts"
-    docker cp "/root/SDI/scripts/test_25s_navigation_rule.ts" "sdi:/app/scripts/test_25s_navigation_rule.ts"
+    echo "=== Syncing source directories into running container sdi ==="
+    docker cp "/root/SDI/services/." "sdi:/app/services/"
+    docker cp "/root/SDI/lib/." "sdi:/app/lib/"
+    docker cp "/root/SDI/app/." "sdi:/app/app/"
+    docker cp "/root/SDI/types/." "sdi:/app/types/"
+    docker cp "/root/SDI/components/." "sdi:/app/components/"
+    docker cp "/root/SDI/scripts/." "sdi:/app/scripts/"
 
     echo "=== Running In-Container Automated Regression Test Suite ==="
     docker exec sdi npx tsx scripts/test_25s_navigation_rule.ts

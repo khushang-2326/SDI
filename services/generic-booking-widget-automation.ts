@@ -527,7 +527,7 @@ export async function submitGenericBookingWidget({
   bookingPreferences = {},
   liveSubmit = false,
   headless = true,
-  timeoutMs = 45000,
+  timeoutMs = 25000,
   browserContext,
   skipPersist
 }: SubmitCalendlyBookingInput & { browserContext?: BrowserContext; skipPersist?: boolean }): Promise<SubmitContactFormResult> {

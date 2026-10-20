@@ -17,6 +17,7 @@ import {
   redactProxyDetails
 } from "@/services/proxy-helper";
 import { detectUnsupportedVerification } from "@/services/verification-detector";
+import { setContextResourceFiltering } from "@/lib/browserPool";
 import { isAuthorizedCaptchaTestTarget } from "@/services/captcha/test-environment";
 import { analyzePageContext } from "./discovery/page-context-analyzer";
 import { extractRawCandidates } from "./discovery/candidate-extractor";
@@ -675,29 +676,68 @@ export async function navigateForDiscovery(
   stage: DiscoveryTimeoutStage = "INITIAL_NAVIGATION"
 ): Promise<DiscoveryNavigationResult> {
   const tStart = Date.now();
+  const maxNavTimeout = Math.min(25000, Math.max(3000, budgetMs));
   let committed = false;
+  let usable = false;
   let responseStatus = 0;
   let navResponse: any = null;
   let navError: any = null;
   let timedOut = false;
   let timeoutStage: DiscoveryTimeoutStage | undefined = undefined;
 
-  const commitTimeout = Math.max(3000, Math.min(15000, budgetMs - 1000));
-
   try {
-    navResponse = await page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: commitTimeout
+    // Initiate commit navigation (resolves as soon as HTTP response headers arrive)
+    const gotoPromise = page.goto(url, {
+      waitUntil: "commit",
+      timeout: maxNavTimeout
+    }).then((res) => {
+      navResponse = res;
+      committed = true;
+      responseStatus = res?.status() ?? 200;
+    }).catch((err: any) => {
+      navError = err;
+      const errStr = err?.message || String(err);
+      if (page.url() && page.url() !== "about:blank") {
+        committed = true;
+        responseStatus = 200;
+      } else if (errStr.includes("Timeout") || err?.name === "TimeoutError") {
+        timedOut = true;
+        timeoutStage = stage;
+      }
     });
-    committed = true;
-    responseStatus = navResponse?.status() ?? 200;
-  } catch (err: any) {
-    if (isProxyAuthenticationFailure(err)) {
+
+    const checkUsable = async () => {
+      return page.evaluate(() => {
+        const body = document.body;
+        if (!body) return { isUsable: false };
+        const innerText = body.innerText || "";
+        if (/502 bad gateway|504 gateway time-out|dns_probe_finished|err_connection_/i.test(innerText)) {
+          return { isUsable: false };
+        }
+        const forms = document.querySelectorAll("form, [role='form'], [class*='w-form'], [data-name*='form']");
+        const inputs = document.querySelectorAll("input:not([type='hidden']), textarea, select, [role='textbox']");
+        const buttons = document.querySelectorAll("button, input[type='submit'], [role='button'], a[class*='btn'], a[class*='button']");
+        const navLinks = document.querySelectorAll("header a, nav a, footer a, [role='banner'] a, [role='navigation'] a, [role='contentinfo'] a, a[href*='contact']");
+        const textLength = innerText.trim().length;
+
+        const hasForms = forms.length > 0;
+        const isUsable = hasForms || (inputs.length >= 1 && buttons.length >= 1) || navLinks.length >= 1 || textLength >= 80;
+        return {
+          isUsable,
+          hasForms,
+          hasBooking: false,
+          interactiveCount: inputs.length + buttons.length
+        };
+      }).catch(() => ({ isUsable: false, hasForms: false, hasBooking: false, interactiveCount: 0 }));
+    };
+
+    await gotoPromise;
+
+    if (isProxyAuthenticationFailure(navError)) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
     }
-    const errStr = err?.message || String(err);
+    const errStr = navError?.message || String(navError || "");
     if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
-      navError = err;
       return {
         success: false,
         committed: false,
@@ -715,47 +755,77 @@ export async function navigateForDiscovery(
         interactiveCount: 0,
         timedOut: false,
         navResponse: null,
-        navError: err
+        navError
       };
     }
-    if (/interrupted by another navigation|net::ERR_ABORTED/i.test(errStr)) {
-      try {
-        await page.waitForLoadState("domcontentloaded", { timeout: Math.max(2000, Math.min(6000, budgetMs - (Date.now() - tStart))) });
-        committed = true;
-        responseStatus = 200;
-      } catch {
-        if (page.url() && page.url() !== "about:blank") {
-          committed = true;
-          responseStatus = 200;
-        }
-      }
-    } else {
-      // If domcontentloaded timed out or was delayed by media/trackers, try commit fallback
-      try {
-        navResponse = await page.goto(url, {
-          waitUntil: "commit",
-          timeout: Math.max(3000, Math.min(10000, budgetMs - (Date.now() - tStart)))
-        });
-        committed = true;
-        responseStatus = navResponse?.status() ?? 200;
-      } catch (commitErr: any) {
-        navError = commitErr;
-        if (page.url() && page.url() !== "about:blank") {
-          committed = true;
-          responseStatus = 200;
-        } else if (commitErr?.message?.includes("Timeout") || commitErr?.name === "TimeoutError") {
-          timedOut = true;
-          timeoutStage = stage;
-        }
-      }
-    }
-  }
 
-  const tNavDone = Date.now();
-  if (!committed) {
+    let pollResult: any = { isUsable: false, hasForms: false, hasBooking: false, interactiveCount: 0 };
+    while (Date.now() - tStart < maxNavTimeout) {
+      pollResult = await checkUsable();
+      if (pollResult.isUsable) {
+        usable = true;
+        break;
+      }
+      await page.waitForTimeout(100);
+    }
+
+    const tNavDone = Date.now();
+    if (usable) {
+      console.log(`[NAVIGATION] Page became usable in ${tNavDone - tStart}ms for ${url}`);
+      return {
+        success: true,
+        committed: true,
+        status: responseStatus || 200,
+        responseStatus: responseStatus || 200,
+        finalUrl: page.url() || url,
+        navigationMs: tNavDone - tStart,
+        readinessMs: 0,
+        hydrationMs: 0,
+        redirectCount: 0,
+        timeoutStage: undefined,
+        readinessState: "FORM_DISCOVERY_READY",
+        hasForms: pollResult.hasForms,
+        hasBooking: pollResult.hasBooking,
+        interactiveCount: pollResult.interactiveCount,
+        timedOut: false,
+        navResponse,
+        navError: null
+      };
+    } else {
+      timedOut = true;
+      timeoutStage = stage;
+      console.warn(`[NAVIGATION] 25-second navigation timeout occurred for ${url} (page not usable within ${maxNavTimeout}ms)`);
+      if (committed) {
+        await page.evaluate(() => window.stop()).catch(() => undefined);
+      }
+      return {
+        success: false,
+        committed,
+        status: responseStatus,
+        responseStatus,
+        finalUrl: page.url() || url,
+        navigationMs: tNavDone - tStart,
+        readinessMs: 0,
+        hydrationMs: 0,
+        redirectCount: 0,
+        timeoutStage: stage,
+        readinessState: "NAVIGATION_TIMEOUT",
+        hasForms: false,
+        hasBooking: false,
+        interactiveCount: 0,
+        timedOut: true,
+        navResponse,
+        navError: new Error(`NAVIGATION_TIMEOUT: Navigation to usable page timed out after 25 seconds for ${url}`)
+      };
+    }
+  } catch (error: any) {
+    if (isProxyAuthenticationFailure(error)) {
+      throw error;
+    }
+    const tNavDone = Date.now();
     return {
       success: false,
-      committed: false,
+      committed,
       status: responseStatus,
       responseStatus,
       finalUrl: page.url() || url,
@@ -763,56 +833,16 @@ export async function navigateForDiscovery(
       readinessMs: 0,
       hydrationMs: 0,
       redirectCount: 0,
-      timeoutStage: timedOut ? timeoutStage : undefined,
-      readinessState: "DEAD_SITE_FAST_FAIL",
+      timeoutStage: stage,
+      readinessState: "NAVIGATION_TIMEOUT",
       hasForms: false,
       hasBooking: false,
       interactiveCount: 0,
-      timedOut,
+      timedOut: true,
       navResponse,
-      navError
+      navError: error
     };
   }
-
-  const remainingBudget = Math.max(800, budgetMs - (tNavDone - tStart));
-  const readiness = await waitForUniversalPageReadiness(page, {
-    maxWaitMs: Math.min(remainingBudget, 45000),
-    pollIntervalMs: 200,
-    targetPurpose: purpose
-  }).catch(() => ({
-    ready: false,
-    state: "TIMEOUT_FALLBACK" as const,
-    durationMs: 0,
-    hasForms: false,
-    hasBooking: false,
-    interactiveCount: 0
-  }));
-
-  const totalMs = Date.now() - tStart;
-  const readinessMs = readiness.durationMs || (Date.now() - tNavDone);
-  const hydrationMs = readiness.state === "HYDRATION_IN_PROGRESS" ? readinessMs : 0;
-  const finalUrl = page.url() || url;
-  const success = committed && !navError && (responseStatus < 400 || responseStatus === 404);
-
-  return {
-    success,
-    committed,
-    status: responseStatus,
-    responseStatus,
-    finalUrl,
-    navigationMs: tNavDone - tStart,
-    readinessMs,
-    hydrationMs,
-    redirectCount: 0,
-    timeoutStage: timedOut ? timeoutStage : undefined,
-    readinessState: readiness.state,
-    hasForms: readiness.hasForms,
-    hasBooking: readiness.hasBooking,
-    interactiveCount: readiness.interactiveCount,
-    timedOut,
-    navResponse,
-    navError
-  };
 }
 
 async function getVisibleFormScore(container: Page | Frame) {
@@ -1142,7 +1172,13 @@ function mergeCandidates(candidates: Candidate[], limit: number) {
   for (const candidate of candidates) {
     const current = byUrl.get(candidate.url);
 
-    if (!current || candidate.score > current.score) {
+    const hasSpecificLocation = candidate.candidateLocation && ["header", "nav", "mobile menu", "footer"].includes(candidate.candidateLocation.toLowerCase());
+    const currentHasSpecificLocation = current?.candidateLocation && ["header", "nav", "mobile menu", "footer"].includes(current.candidateLocation.toLowerCase());
+    const shouldReplace = !current ||
+      (!currentHasSpecificLocation && hasSpecificLocation) ||
+      (candidate.score > current.score && (!currentHasSpecificLocation || hasSpecificLocation));
+
+    if (shouldReplace) {
       byUrl.set(candidate.url, candidate);
     }
   }
@@ -1795,9 +1831,6 @@ export async function discoverSubmissionTarget({
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-gpu",
-          "--disable-software-rasterizer",
-          "--disable-webgl",
-          "--disable-3d-apis",
           "--disable-accelerated-2d-canvas"
         ]
       });
@@ -2012,6 +2045,7 @@ async function discoverSubmissionTargetsInternal({
     };
   }
 
+  const tStart = Date.now();
   let browser: Browser | null = null;
   let page: Page | null = null;
   const checkedUrls: string[] = [];
@@ -2060,9 +2094,6 @@ async function discoverSubmissionTargetsInternal({
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-gpu",
-          "--disable-software-rasterizer",
-          "--disable-webgl",
-          "--disable-3d-apis",
           "--disable-accelerated-2d-canvas"
         ]
       });
@@ -2092,6 +2123,16 @@ async function discoverSubmissionTargetsInternal({
 
     if (proxy407Hit || isProxyAuthenticationFailure(navError) || navResponse?.status() === 407) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+    }
+
+    if (initialNav.timedOut || (!initialNav.success && initialNav.readinessState === "NAVIGATION_TIMEOUT")) {
+      return {
+        websiteUrl: normalizedWebsiteUrl,
+        targets: [],
+        checkedUrls: [normalizedWebsiteUrl],
+        reason: "Navigation to usable page timed out after 25 seconds (NAVIGATION_TIMEOUT).",
+        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "navigation-timeout").catch(() => null)
+      };
     }
 
     const pageBodyText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
@@ -2190,9 +2231,9 @@ async function discoverSubmissionTargetsInternal({
     }
 
     const navigationCandidates = mergeCandidates([
-      ...httpCandidates,
+      ...(await collectNavigationCandidates(page, page.url())),
       ...supportedExternalCandidates,
-      ...(await collectNavigationCandidates(page, page.url()))
+      ...httpCandidates
     ], maxNavigationLinks);
     const fallbackCandidates = mergeCandidates(commonPathCandidates(page.url()), maxFallbackPaths);
     const maxPageVisits = 4;
@@ -2201,8 +2242,8 @@ async function discoverSubmissionTargetsInternal({
 
     // Strict Sequential 3-Tier Discovery Priority:
     // Priority 1: Navbar / Header (<header>, <nav>, [role="banner"], [role="navigation"], mobile menu)
-    // Priority 2: Body / Main Content (.hero, .cta, body, modal triggers, iframes)
-    // Priority 3: Footer (<footer>, .site-footer, [role="contentinfo"])
+    // Priority 2: Footer (<footer>, .site-footer, [role="contentinfo"])
+    // Priority 3: Body / Main Content (.hero, .cta, body, modal triggers, iframes)
     // Priority 4: Synthetic common-path fallbacks (only if real links absent)
     const getStructuralTier = (c: Candidate): number => {
       const isSynthetic = c.reason.startsWith("common path");
@@ -2212,9 +2253,9 @@ async function discoverSubmissionTargetsInternal({
         return 1;
       }
       if (loc === "footer") {
-        return 3;
+        return 2;
       }
-      return 2;
+      return 3;
     };
 
     const isNegativeInfoPath = (urlStr: string) => {
@@ -2237,6 +2278,13 @@ async function discoverSubmissionTargetsInternal({
     });
 
     const candidatesQueue = rawQueue;
+
+    const tier1Count = candidatesQueue.filter((c) => getStructuralTier(c) === 1).length;
+    const tier2Count = candidatesQueue.filter((c) => getStructuralTier(c) === 2).length;
+    const tier3Count = candidatesQueue.filter((c) => getStructuralTier(c) === 3).length;
+    console.log(
+      `[FORM-DISCOVERY] Strict candidate search order: Tier 1 (Header/Navbar: ${tier1Count}) -> Tier 2 (Footer: ${tier2Count}) -> Tier 3 (Body/Main: ${tier3Count})`
+    );
 
     let candidateIndex = 0;
     while (candidateIndex < candidatesQueue.length) {
@@ -2268,7 +2316,9 @@ async function discoverSubmissionTargetsInternal({
       checkedUrls.push(candidateUrl);
 
       const currentDepth = candidate.depth || 1;
-      console.log(`[CONTACT-DISCOVERY] Trying candidate (depth ${currentDepth}): ${candidate.url} (reason: ${candidate.reason})`);
+      const tier = getStructuralTier(candidate);
+      const tierName = tier === 1 ? "Header/Navbar" : tier === 2 ? "Footer" : tier === 3 ? "Body/Main" : "Synthetic Fallback";
+      console.log(`[FORM-DISCOVERY] Searching candidate ${candidateIndex}/${candidatesQueue.length} [Tier ${tier} - ${tierName}] (depth ${currentDepth}): ${candidate.url} (reason: ${candidate.reason})`);
 
       const features = candidate.features || extractUniversalFeatureVector(
         {
@@ -2282,7 +2332,7 @@ async function discoverSubmissionTargetsInternal({
 
       const remainingBudget = discoveryDeadlineAt - Date.now();
       if (remainingBudget <= 500) break;
-      const candTimeout = Math.min(6500, Math.max(1500, remainingBudget - 200));
+      const candTimeout = Math.min(25000, Math.max(3000, remainingBudget - 200));
       const candNav = await navigateForDiscovery(page, candidate.url, candTimeout, "any");
 
       if (!candNav.committed) {
@@ -2438,7 +2488,7 @@ async function discoverSubmissionTargetsInternal({
       }
     }
 
-    const targets = Array.from(discovered.values()).sort((a, b) => {
+    let targets = Array.from(discovered.values()).sort((a, b) => {
       if (a.executionOrder !== b.executionOrder) return a.executionOrder - b.executionOrder;
       if (a.targetType === "contact_form" && b.targetType === "contact_form") {
         const isDedA = /(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry)/i.test(a.url);
@@ -2447,6 +2497,27 @@ async function discoverSubmissionTargetsInternal({
       }
       return b.confidence - a.confidence || a.url.localeCompare(b.url);
     });
+
+    // Automatic Relaxed Resource-Filter Fallback:
+    // If conservative mode blocked raster images and yielded 0 targets, relax filters and re-check page if budget permits
+    if (targets.length === 0 && !lastDetectedVerification && page && browserContext && (Date.now() - tStart < timeoutMs - 5000)) {
+      console.log(`[RESOURCE-FILTER-FALLBACK] 0 targets found under conservative filtering on ${normalizedWebsiteUrl}. Relaxing resource filters to allow images and re-scanning page...`);
+      await setContextResourceFiltering(browserContext, "relaxed").catch(() => undefined);
+      await page.waitForTimeout(600);
+      const relaxedResult = await detectTargetWithLazyScroll(page, page.url(), "relaxed-filter-fallback");
+      if (relaxedResult && relaxedResult.targetType !== "not_found") {
+        addResult(relaxedResult);
+        targets = Array.from(discovered.values()).sort((a, b) => {
+          if (a.executionOrder !== b.executionOrder) return a.executionOrder - b.executionOrder;
+          if (a.targetType === "contact_form" && b.targetType === "contact_form") {
+            const isDedA = /(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry)/i.test(a.url);
+            const isDedB = /(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry)/i.test(b.url);
+            if (isDedA !== isDedB) return isDedA ? -1 : 1;
+          }
+          return b.confidence - a.confidence || a.url.localeCompare(b.url);
+        });
+      }
+    }
 
     if (targets.length === 0 && lastDetectedVerification) {
       console.log(`[CONTACT-DISCOVERY-DIAGNOSTIC] ${normalizedWebsiteUrl} status=HUMAN_VERIFICATION reason="${lastDetectedVerification.reason}"`);
@@ -2476,7 +2547,9 @@ async function discoverSubmissionTargetsInternal({
       checkedUrls,
       reason: targets.length > 0
         ? `Discovered ${targets.length} supported submission target${targets.length === 1 ? "" : "s"}.`
-        : `No supported contact form found on the supplied page or relevant discovered pages.`,
+        : ((Date.now() - tStart >= timeoutMs - 500)
+            ? `Website automation exceeded overall deadline budget of ${Math.round(timeoutMs / 1000)}s during target discovery.`
+            : `No supported contact form found on the supplied page or relevant discovered pages.`),
       screenshotPath: targets[0]?.screenshotPath ?? await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
     };
   } catch (error) {
@@ -2499,6 +2572,6 @@ async function discoverSubmissionTargetsInternal({
 export async function discoverSubmissionTargets(
   input: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }
 ): Promise<DiscoverSubmissionTargetsResult> {
-  const timeoutMs = input.timeoutMs ?? 25000;
+  const timeoutMs = input.timeoutMs ?? 35000;
   return discoverSubmissionTargetsInternal({ ...input, timeoutMs });
 }

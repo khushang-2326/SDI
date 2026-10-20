@@ -261,7 +261,8 @@ export async function runMultiTargetAutomation({
     }
   };
   const isSuccessful = (result: SubmitContactFormResult) =>
-    ["success", "dry_run_ready_to_book"].includes(result.status);
+    (result.status === "success" && (result.submissionOutcome === "VERIFIED_SUCCESS" || !result.submissionOutcome)) ||
+    result.status === "dry_run_ready_to_book";
 
   try {
 
@@ -547,7 +548,7 @@ export async function runMultiTargetAutomation({
     };
   }
 
-  const discoveryBudgetMs = Math.max(5000, Math.min(20_000, Math.floor(discoveryRemainingMs * 0.50)));
+  const discoveryBudgetMs = Math.min(discoveryRemainingMs, Math.max(25_000, Math.min(50_000, Math.floor(discoveryRemainingMs * 0.60))));
 
   let discovery: DiscoverSubmissionTargetsResult;
   try {

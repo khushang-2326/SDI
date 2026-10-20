@@ -60,10 +60,8 @@ async function launchBrowser(headless: boolean): Promise<Browser> {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-accelerated-2d-canvas",
-      "--disable-gpu",
-      "--disable-blink-features=AutomationControlled"
-    ],
-    ignoreDefaultArgs: ["--enable-automation"]
+      "--disable-gpu"
+    ]
   };
 
   if (executablePath) {
@@ -265,6 +263,96 @@ async function resolveProxyConfig(options: AcquireContextOptions): Promise<{
 }
 
 /**
+ * Attaches the resource route handler to a browser context based on filtering mode.
+ */
+export function attachResourceRouteHandler(
+  context: BrowserContext,
+  mode: "conservative" | "relaxed" | "disabled"
+): void {
+  if (mode === "disabled") return;
+
+  void context.route("**/*", (route) => {
+    const req = route.request();
+    const resourceType = req.resourceType();
+    const url = req.url().toLowerCase();
+
+    // 1. Explicit Whitelist: Preserved CRM, form endpoints, and security/verification providers
+    if (
+      url.includes("recaptcha") ||
+      url.includes("hcaptcha") ||
+      url.includes("turnstile") ||
+      url.includes("challenges.cloudflare") ||
+      url.includes("gstatic.com/recaptcha") ||
+      url.includes("hubspot") ||
+      url.includes("hsforms") ||
+      url.includes("calendly") ||
+      url.includes("typeform") ||
+      url.includes("leadconnector") ||
+      url.includes("pardot") ||
+      url.includes("marketo") ||
+      url.includes("wp-json") ||
+      url.includes("admin-ajax")
+    ) {
+      return route.continue();
+    }
+
+    // 2. Always block tracking analytics that stall navigation
+    if (
+      url.includes("google-analytics.com") ||
+      url.includes("googletagmanager.com/gtag") ||
+      url.includes("connect.facebook.net") ||
+      url.includes("hotjar.com") ||
+      url.includes("doubleclick.net") ||
+      url.includes("clarity.ms") ||
+      url.includes("tiktok.com") ||
+      url.includes("snapchat.com") ||
+      url.includes("criteo.net")
+    ) {
+      return route.abort();
+    }
+
+    // 3. Always block heavy video/audio streams and video file downloads
+    if (
+      resourceType === "media" ||
+      /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url)
+    ) {
+      return route.abort();
+    }
+
+    // 4. Block heavy 3D assets in both conservative and relaxed modes
+    if (/\.(glb|gltf|splinecode|obj|fbx|dae|stl|draco)(\?.*)?$/i.test(url)) {
+      return route.abort();
+    }
+
+    // 5. In conservative mode, block nonessential raster images but preserve UI SVGs/icons and data URIs
+    if (mode === "conservative") {
+      const isSvgOrIcon = url.includes(".svg") || url.includes(".ico") || url.startsWith("data:image");
+      if (!isSvgOrIcon && (resourceType === "image" || /\.(png|jpe?g|webp|gif|bmp|tiff|avif)(\?.*)?$/i.test(url))) {
+        return route.abort();
+      }
+    }
+
+    // In relaxed mode: all images (.png, .jpg, etc.) are allowed!
+    // Fonts (.woff, .woff2, .ttf), Stylesheets (.css), Application Scripts (.js), .bin, and .wasm are always preserved.
+    return route.continue();
+  }).catch(() => undefined);
+}
+
+/**
+ * Dynamically updates the resource filtering mode on an active browser context.
+ * Enables automatic fallback from conservative to relaxed mode if forms or widgets fail to render.
+ */
+export async function setContextResourceFiltering(
+  context: BrowserContext,
+  mode: "conservative" | "relaxed" | "disabled"
+): Promise<void> {
+  try {
+    await context.unroute("**/*").catch(() => undefined);
+  } catch {}
+  attachResourceRouteHandler(context, mode);
+}
+
+/**
  * Creates and returns a new BrowserContext from the browser pool.
  * Automatically applies proxy configuration and bandwidth-saving filters.
  */
@@ -300,101 +388,9 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     (lateContext) => lateContext.close().catch(() => undefined)
   );
 
-  // Comprehensive Anti-bot detection script injection
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    // @ts-ignore
-    window.chrome = { runtime: {}, app: {}, cs: {}, loadTimes: function() {}, csi: function() {} };
-    // @ts-ignore
-    if (!navigator.languages || navigator.languages.length === 0) {
-      Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-    }
-    // @ts-ignore
-    if (!navigator.plugins || navigator.plugins.length === 0) {
-      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
-    }
-    // Mask permissions query for notifications
-    const originalQuery = window.navigator.permissions?.query;
-    if (originalQuery) {
-      window.navigator.permissions.query = (parameters: any) =>
-        parameters.name === "notifications"
-          ? Promise.resolve({ state: Notification.permission } as any)
-          : originalQuery(parameters);
-    }
-  }).catch(() => undefined);
-
-  // Conservative, recoverable resource filtering: block heavy images, videos, 3D models, and telemetry
+  // Conservative or relaxed recoverable resource filtering: block heavy media, 3D models, and telemetry
   const filterMode = options.resourceFilteringMode ?? (options.bandwidthSaver === false ? "disabled" : "conservative");
-
-  if (filterMode !== "disabled") {
-    await context.route("**/*", (route) => {
-      const req = route.request();
-      const resourceType = req.resourceType();
-      const url = req.url().toLowerCase();
-
-      // 1. Explicit Whitelist: Preserved CRM, form endpoints, and security/verification providers
-      if (
-        url.includes("recaptcha") ||
-        url.includes("hcaptcha") ||
-        url.includes("turnstile") ||
-        url.includes("challenges.cloudflare") ||
-        url.includes("gstatic.com/recaptcha") ||
-        url.includes("hubspot") ||
-        url.includes("hsforms") ||
-        url.includes("calendly") ||
-        url.includes("typeform") ||
-        url.includes("leadconnector") ||
-        url.includes("pardot") ||
-        url.includes("marketo") ||
-        url.includes("wp-json") ||
-        url.includes("admin-ajax")
-      ) {
-        return route.continue();
-      }
-
-      // 2. Always block tracking analytics that stall navigation
-      if (
-        url.includes("google-analytics.com") ||
-        url.includes("googletagmanager.com/gtag") ||
-        url.includes("connect.facebook.net") ||
-        url.includes("hotjar.com") ||
-        url.includes("doubleclick.net") ||
-        url.includes("clarity.ms") ||
-        url.includes("tiktok.com") ||
-        url.includes("snapchat.com") ||
-        url.includes("criteo.net")
-      ) {
-        return route.abort();
-      }
-
-      // 3. Always block heavy video/audio streams and video file downloads
-      if (
-        resourceType === "media" ||
-        /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url)
-      ) {
-        return route.abort();
-      }
-
-      // 4. In conservative mode, block nonessential 3D models and images
-      if (filterMode === "conservative") {
-        // Block clearly identified 3D models (never block .bin or .wasm indiscriminately)
-        if (/\.(glb|gltf|splinecode|obj|fbx|dae|stl|draco)(\?.*)?$/i.test(url)) {
-          return route.abort();
-        }
-
-        // Block nonessential images (preserve fonts, css, scripts)
-        if (
-          resourceType === "image" ||
-          /\.(png|jpe?g|webp|gif|svg|ico|bmp|tiff|avif)(\?.*)?$/i.test(url)
-        ) {
-          return route.abort();
-        }
-      }
-
-      // Fonts (.woff, .woff2, .ttf), Stylesheets (.css), Application Scripts (.js), .bin, and .wasm are preserved!
-      return route.continue();
-    }).catch(() => undefined);
-  }
+  attachResourceRouteHandler(context, filterMode);
 
   const contextId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const metadata: ContextMetadata = {

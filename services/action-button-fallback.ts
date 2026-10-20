@@ -464,7 +464,7 @@ export async function executeActionButtonFallback({
           liveSubmit: shouldSubmit,
           browserContext: context,
           skipPersist: true,
-          timeoutMs: Math.min(timeoutMs, 45000)
+          timeoutMs: Math.min(timeoutMs, 15000)
         });
         return {
           handled: true,
@@ -548,7 +548,7 @@ export async function executeActionButtonFallback({
             liveSubmit: shouldSubmit,
             browserContext: context,
             skipPersist: true,
-            timeoutMs: Math.min(timeoutMs, 45000)
+            timeoutMs: Math.min(timeoutMs, 15000)
           });
           await newTab.close().catch(() => {});
           return {
@@ -636,7 +636,7 @@ export async function executeActionButtonFallback({
             liveSubmit: shouldSubmit,
             browserContext: context,
             skipPersist: true,
-            timeoutMs: Math.min(timeoutMs, 45000)
+            timeoutMs: Math.min(timeoutMs, 15000)
           });
           return {
             handled: true,

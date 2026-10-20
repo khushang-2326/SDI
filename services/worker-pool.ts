@@ -9,6 +9,7 @@ import {
 } from "@/services/proxy-helper";
 import { classifyErrorTaxonomy } from "@/services/error-taxonomy";
 import type { AutomationResult } from "@/app/(dashboard)/automation/actions";
+import type { SubmitContactFormResult } from "@/types/automation";
 
 export type StoredPayload = {
   fields: Array<[string, string]>;
@@ -52,8 +53,11 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function resultCompleted(result: AutomationResult): boolean {
-  return ["success", "dry_run_ready_to_book"].includes(result.status);
+function resultCompleted(result: AutomationResult | SubmitContactFormResult): boolean {
+  if (result.status === "success") {
+    return (result as any).submissionOutcome === "VERIFIED_SUCCESS" || (result as any).submissionOutcome === undefined;
+  }
+  return result.status === "dry_run_ready_to_book";
 }
 
 async function withTargetTimeout<T>(operation: Promise<T>, timeoutMs: number, description: string): Promise<T> {
@@ -374,7 +378,7 @@ async function processSingleTarget(
             updateWorkerStatus(`Submitting & verifying ${attempt.target.targetType}`, attempt.target.url);
             const attemptId = attemptIds.get(key(attempt.target));
             if (!attemptId) return;
-            const successful = ["success", "dry_run_ready_to_book"].includes(attempt.result.status);
+            const successful = resultCompleted(attempt.result);
             await prisma.submissionAttempt.update({
               where: { id: attemptId },
               data: {
@@ -422,7 +426,7 @@ async function processSingleTarget(
       }
 
       const successes = run.attempts.filter((a) =>
-        ["success", "dry_run_ready_to_book"].includes(a.result.status)
+        resultCompleted(a.result)
       );
       const anySuccessful = successes.length > 0;
       // Requirement: Show ONLY the screenshot representing the successful submission for successes

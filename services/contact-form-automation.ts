@@ -3218,68 +3218,75 @@ export async function submitContactForm({
     };
     activePage.on("response", responseHandler);
 
-    let navResponse: any = null;
+    // Exact 25-second navigation-to-usable-page rule
+    const NAVIGATION_TIMEOUT_MS = 25000;
     const tNavStart = Date.now();
-    const initialNavTimeout = Math.max(3000, Math.min(30000, timeoutMs));
+    let navResponse: any = null;
+    let pageUsable = false;
+
     if (!customPage) {
       try {
-        navResponse = await Promise.race([
-          activePage.goto(websiteUrl, {
-            waitUntil: "domcontentloaded",
-            timeout: initialNavTimeout
-          }),
-          proxy407Promise
-        ]);
-      } catch (gotoErr: any) {
-        if (isProxyAuthenticationFailure(gotoErr) || proxy407Hit) {
-          throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
-        }
-        const errStr = gotoErr?.message || String(gotoErr);
-        if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
-          throw gotoErr;
-        }
-        if (/interrupted by another navigation|net::ERR_ABORTED/i.test(errStr)) {
-          try {
-            await activePage.waitForLoadState("domcontentloaded", { timeout: 4000 });
-          } catch {
-            // ignore if already committed
+        const gotoPromise = activePage.goto(websiteUrl, {
+          waitUntil: "commit",
+          timeout: NAVIGATION_TIMEOUT_MS
+        }).catch((err: any) => {
+          if (isProxyAuthenticationFailure(err) || proxy407Hit) {
+            throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
           }
-        } else {
-          try {
-            const remainingCommitTimeout = Math.max(5000, timeoutMs - (Date.now() - tNavStart));
-            navResponse = await Promise.race([
-              activePage.goto(websiteUrl, { waitUntil: "commit", timeout: remainingCommitTimeout }),
-              proxy407Promise
-            ]);
-          } catch (commitErr: any) {
-            if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
-              throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
-            }
-            // Verify if DOM is actually usable before declaring failure on navigation timeout
-            const usabilityCheck = await activePage.evaluate(() => {
-              const body = document.body;
-              if (!body) return { isUsable: false };
-              const formCount = document.querySelectorAll("form").length;
-              const inputCount = document.querySelectorAll("input, select, textarea").length;
-              const buttonCount = document.querySelectorAll("button, a[role='button']").length;
-              const textLength = (body.innerText || "").trim().length;
-              const isErrorDoc = /502 bad gateway|504 gateway time-out|dns_probe_finished|err_connection_/i.test(body.innerText || "");
-              const isUsable = !isErrorDoc && (formCount > 0 || (inputCount >= 2 && buttonCount > 0) || textLength > 100);
-              return { isUsable, formCount, inputCount, textLength };
-            }).catch(() => ({ isUsable: false }));
+          const errStr = err?.message || String(err);
+          if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
+            throw err;
+          }
+          return null;
+        });
 
-            if (usabilityCheck.isUsable) {
-              console.log(`[contact-form-automation] Navigation reached timeout, but live DOM contains usable content (forms=${(usabilityCheck as any).formCount}, inputs=${(usabilityCheck as any).inputCount}). Proceeding with form discovery.`);
-            } else {
-              throw commitErr;
+        const checkUsable = async () => {
+          return activePage.evaluate(() => {
+            const body = document.body;
+            if (!body) return { isUsable: false };
+            const innerText = body.innerText || "";
+            if (/502 bad gateway|504 gateway time-out|dns_probe_finished|err_connection_/i.test(innerText)) {
+              return { isUsable: false };
             }
+            const formCount = document.querySelectorAll("form, [role='form'], [class*='w-form'], [data-name*='form']").length;
+            const inputCount = document.querySelectorAll("input:not([type='hidden']), textarea, select, [role='textbox']").length;
+            const buttonCount = document.querySelectorAll("button, input[type='submit'], [role='button'], a[class*='btn'], a[class*='button']").length;
+            const navCount = document.querySelectorAll("header a, nav a, footer a, [role='banner'] a, [role='navigation'] a, [role='contentinfo'] a, a[href*='contact']").length;
+            const textLength = innerText.trim().length;
+
+            const isUsable = formCount > 0 || (inputCount >= 1 && buttonCount >= 1) || navCount >= 1 || textLength >= 80;
+            return { isUsable, formCount, inputCount, buttonCount, textLength };
+          }).catch(() => ({ isUsable: false }));
+        };
+
+        navResponse = await Promise.race([gotoPromise, proxy407Promise]);
+        if (proxy407Hit) throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
+
+        while (Date.now() - tNavStart < NAVIGATION_TIMEOUT_MS) {
+          const u = await checkUsable();
+          if (u.isUsable) {
+            pageUsable = true;
+            break;
           }
+          await activePage.waitForTimeout(100);
+        }
+
+        if (pageUsable) {
+          const usableDuration = Date.now() - tNavStart;
+          console.log(`[NAVIGATION] Page became usable in ${usableDuration}ms for ${websiteUrl}`);
+        } else {
+          console.warn(`[NAVIGATION] 25-second navigation timeout occurred for ${websiteUrl} (usable DOM state not reached)`);
+          if (navResponse) {
+            await activePage.evaluate(() => window.stop()).catch(() => undefined);
+          }
+          throw new Error(`NAVIGATION_TIMEOUT: Navigation to usable page timed out after 25 seconds for ${websiteUrl}`);
         }
       } finally {
         activePage.off("response", responseHandler);
       }
     } else {
       activePage.off("response", responseHandler);
+      pageUsable = true;
     }
     tNav = Date.now() - tNavStart;
 
@@ -3299,15 +3306,8 @@ export async function submitContactForm({
       throw new Error("Website blocked access (HTTP 403 Forbidden).");
     }
 
-    // Progressive Dynamic Page Readiness
+    // Dismiss cookie banners immediately without artificial universal readiness delay
     const tReadinessStart = Date.now();
-    await dismissCookieBanners(activePage).catch(() => undefined);
-    const readinessMaxWait = Math.max(3000, Math.min(timeoutMs - tNav, 60000));
-    await waitForUniversalPageReadiness(activePage, {
-      maxWaitMs: readinessMaxWait,
-      pollIntervalMs: 250,
-      targetPurpose: "form"
-    }).catch(() => undefined);
     await dismissCookieBanners(activePage).catch(() => undefined);
     tReadiness = Date.now() - tReadinessStart;
 
@@ -3887,17 +3887,22 @@ export async function submitContactForm({
       throw new Error(`INVARIANT_GATE_REJECTED: [${invariantCheck.taxonomyCategory}] ${invariantCheck.failureReason}`);
     }
 
+    const isVerified = Boolean(explicitSuccess);
     const result: SubmitContactFormResult = {
       websiteUrl,
-      status: shouldSubmit ? "success" : "dry_run_ready_to_book",
+      status: shouldSubmit
+        ? (isVerified ? "success" : "confirmation_not_found")
+        : "dry_run_ready_to_book",
       submissionOutcome: shouldSubmit
-        ? (explicitSuccess ? "VERIFIED_SUCCESS" : "SUBMISSION_UNCONFIRMED")
+        ? (isVerified ? "VERIFIED_SUCCESS" : "SUBMISSION_UNCONFIRMED")
         : "PASS",
-      errorMessage: null,
+      errorMessage: shouldSubmit && !isVerified
+        ? "Contact form submitted, but confirmation signal was not detected."
+        : null,
       message: shouldSubmit
-        ? (explicitSuccess
+        ? (isVerified
             ? "Contact form submitted successfully with verified confirmation."
-            : "Contact form submitted successfully (action completed without errors, awaiting confirmation).")
+            : "Contact form submitted (action completed, but confirmation signal was not detected).")
         : "Dry run: Form fields filled and submit button verified.",
       screenshotPath,
       submittedAt,

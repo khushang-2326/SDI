@@ -615,7 +615,10 @@ export async function runMultiTargetAutomation({
   // execute standard website contact form fallback
   const executedFallbackTargets: DiscoveredSubmissionTarget[] = [];
   const hasAttemptedContactForm = attempts.some((a) => a.target.targetType === "contact_form");
-  if (!targetSucceeded && !encounteredProxyFailure && !encounteredBlockFailure && !hasAttemptedContactForm && websiteUrl) {
+  const hadBookingAttempt = attempts.some((a) => a.target.targetType !== "contact_form");
+  const isFormlessSite = discovery && discovery.checkedUrls && discovery.checkedUrls.length > 0 && discovery.targets.length === 0 && !hadBookingAttempt;
+
+  if (!targetSucceeded && !encounteredProxyFailure && !encounteredBlockFailure && !hasAttemptedContactForm && !isFormlessSite && websiteUrl) {
     let fallbackOrigin = websiteUrl;
     try {
       const u = new URL(websiteUrl);

@@ -152,6 +152,11 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
             location = "hero";
           } else if (anchor.closest(".cta, [class*='cta']")) {
             location = "main CTA";
+          } else if (top < 120) {
+            // Geometric fallback for websites with custom div-based header bars
+            location = "header";
+          } else if (top > docHeight - 350 && docHeight > 800) {
+            location = "footer";
           }
 
           // Check if rightmost nav item
@@ -265,6 +270,10 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
             location = "hero";
           } else if (el.closest(".cta, [class*='cta']")) {
             location = "main CTA";
+          } else if (top < 120) {
+            location = "header";
+          } else if (top > docHeight - 350 && docHeight > 800) {
+            location = "footer";
           }
 
           results.push({

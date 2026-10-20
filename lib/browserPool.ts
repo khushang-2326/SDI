@@ -118,6 +118,7 @@ export type AcquireContextOptions = {
   disableProxy?: boolean;
   forceProxy?: boolean;
   bandwidthSaver?: boolean;
+  resourceFilteringMode?: "conservative" | "relaxed" | "disabled";
   startupTimeoutMs?: number;
   targetId?: string | number;
   workerId?: string;
@@ -322,36 +323,78 @@ export async function acquireContext(options: AcquireContextOptions = {}): Promi
     }
   }).catch(() => undefined);
 
-  // Bandwidth & latency optimization: block heavy video/media and hanging analytics beacons
-  const shouldSaveBandwidth = proxySettings?.bandwidthSaver ?? options.bandwidthSaver ?? false;
-  await context.route("**/*", (route) => {
-    const req = route.request();
-    const resourceType = req.resourceType();
-    const url = req.url().toLowerCase();
+  // Conservative, recoverable resource filtering: block heavy images, videos, 3D models, and telemetry
+  const filterMode = options.resourceFilteringMode ?? (options.bandwidthSaver === false ? "disabled" : "conservative");
 
-    // Always block tracking analytics that hang navigation
-    if (
-      url.includes("google-analytics.com") ||
-      url.includes("googletagmanager.com/gtag") ||
-      url.includes("connect.facebook.net") ||
-      url.includes("hotjar.com") ||
-      url.includes("doubleclick.net")
-    ) {
-      return route.abort();
-    }
+  if (filterMode !== "disabled") {
+    await context.route("**/*", (route) => {
+      const req = route.request();
+      const resourceType = req.resourceType();
+      const url = req.url().toLowerCase();
 
-    // Always block heavy video/audio streams
-    if (resourceType === "media") {
-      return route.abort();
-    }
+      // 1. Explicit Whitelist: Preserved CRM, form endpoints, and security/verification providers
+      if (
+        url.includes("recaptcha") ||
+        url.includes("hcaptcha") ||
+        url.includes("turnstile") ||
+        url.includes("challenges.cloudflare") ||
+        url.includes("gstatic.com/recaptcha") ||
+        url.includes("hubspot") ||
+        url.includes("hsforms") ||
+        url.includes("calendly") ||
+        url.includes("typeform") ||
+        url.includes("leadconnector") ||
+        url.includes("pardot") ||
+        url.includes("marketo") ||
+        url.includes("wp-json") ||
+        url.includes("admin-ajax")
+      ) {
+        return route.continue();
+      }
 
-    // Strict bandwidth saver: block images and fonts when requested
-    if (shouldSaveBandwidth && ["image", "font"].includes(resourceType)) {
-      return route.abort();
-    }
+      // 2. Always block tracking analytics that stall navigation
+      if (
+        url.includes("google-analytics.com") ||
+        url.includes("googletagmanager.com/gtag") ||
+        url.includes("connect.facebook.net") ||
+        url.includes("hotjar.com") ||
+        url.includes("doubleclick.net") ||
+        url.includes("clarity.ms") ||
+        url.includes("tiktok.com") ||
+        url.includes("snapchat.com") ||
+        url.includes("criteo.net")
+      ) {
+        return route.abort();
+      }
 
-    return route.continue();
-  }).catch(() => undefined);
+      // 3. Always block heavy video/audio streams and video file downloads
+      if (
+        resourceType === "media" ||
+        /\.(mp4|webm|avi|mov|mkv|ogg|wmv|flv|m4v)(\?.*)?$/i.test(url)
+      ) {
+        return route.abort();
+      }
+
+      // 4. In conservative mode, block nonessential 3D models and images
+      if (filterMode === "conservative") {
+        // Block clearly identified 3D models (never block .bin or .wasm indiscriminately)
+        if (/\.(glb|gltf|splinecode|obj|fbx|dae|stl|draco)(\?.*)?$/i.test(url)) {
+          return route.abort();
+        }
+
+        // Block nonessential images (preserve fonts, css, scripts)
+        if (
+          resourceType === "image" ||
+          /\.(png|jpe?g|webp|gif|svg|ico|bmp|tiff|avif)(\?.*)?$/i.test(url)
+        ) {
+          return route.abort();
+        }
+      }
+
+      // Fonts (.woff, .woff2, .ttf), Stylesheets (.css), Application Scripts (.js), .bin, and .wasm are preserved!
+      return route.continue();
+    }).catch(() => undefined);
+  }
 
   const contextId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const metadata: ContextMetadata = {

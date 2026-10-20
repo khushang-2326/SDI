@@ -1671,18 +1671,82 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       }
     }
 
-    // Check if element already has a value
+    // Check if element already has a value (filtering out placeholder select options)
     const existingVal = await loc.evaluate((el) => {
       if (el.tagName.toLowerCase() === "select") {
         const sel = el as HTMLSelectElement;
         const opt = sel.options[sel.selectedIndex];
-        return opt ? opt.value || opt.textContent || "" : sel.value || "";
+        if (!opt) return "";
+        const val = (opt.value || "").trim();
+        const txt = (opt.textContent || "").trim();
+        // If option value is empty or text matches placeholder words, it is NOT a valid selection
+        if (!val || /^(select|choose|please select|none|--)/i.test(txt)) {
+          return "";
+        }
+        return val || txt;
       }
       return (el as HTMLInputElement).value || "";
     }).catch(() => "");
     if (existingVal.trim()) {
       usedIndexes.add(signal.index);
       continue;
+    }
+
+    // Auto-select first valid, non-placeholder option for required select dropdowns
+    if (signal.tagName.toLowerCase() === "select" && signal.isRequired && signal.isVisible && !signal.isDisabled) {
+      const selectedOption = await loc.evaluate((el) => {
+        const sel = el as HTMLSelectElement;
+        for (let i = 0; i < sel.options.length; i++) {
+          const opt = sel.options[i];
+          const val = (opt.value || "").trim();
+          const txt = (opt.textContent || "").trim();
+          if (val && !/^(select|choose|please select|none|--)/i.test(txt) && !opt.disabled) {
+            sel.selectedIndex = i;
+            sel.dispatchEvent(new Event("input", { bubbles: true }));
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+            if ((window as any).jQuery) {
+              try { (window as any).jQuery(sel).trigger("change"); } catch {}
+            }
+            return txt || val;
+          }
+        }
+        return null;
+      }).catch(() => null);
+
+      if (selectedOption) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`select:${signal.name || signal.id || signal.index}`);
+        verificationItems.push({
+          fieldIndex: signal.index,
+          fieldType: "custom_select" as SemanticFieldType,
+          mappedSource: "SELECT_FIRST_VALID_OPTION",
+          confidence: 0.95,
+          evidence: ["auto_selected_first_valid_option"],
+          filled: true,
+          verified: true,
+          finalValue: selectedOption
+        });
+        continue;
+      }
+    }
+
+    // Plain text arithmetic honeypots (e.g. "3 + 4 = ?" or "What is 5 plus 2?")
+    const labelAndPlaceholder = `${signal.explicitLabel || ""} ${signal.placeholder || ""} ${signal.ariaLabel || ""}`;
+    const mathMatch = labelAndPlaceholder.match(/(\d+)\s*([\+\-\*])\s*(\d+)/);
+    if (mathMatch && signal.tagName.toLowerCase() === "input" && (signal.type === "text" || signal.type === "number")) {
+      const n1 = parseInt(mathMatch[1], 10);
+      const op = mathMatch[2];
+      const n2 = parseInt(mathMatch[3], 10);
+      let ans = 0;
+      if (op === "+") ans = n1 + n2;
+      else if (op === "-") ans = n1 - n2;
+      else if (op === "*") ans = n1 * n2;
+      const fillRes = await safelyFillField(loc, String(ans));
+      if (fillRes.success) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`mathHoneypot:${signal.index}`);
+        continue;
+      }
     }
 
     const identifier = signal.name || signal.id || signal.placeholder || signal.explicitLabel || `field_${signal.index}`;
@@ -1695,11 +1759,11 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
         fieldLabel: signal.explicitLabel || signal.ariaLabel || signal.placeholder || signal.name || `field_${signal.index}`,
         fieldType: signal.type || signal.tagName,
         availableOptions: optionsList && optionsList.length > 0 ? optionsList : undefined,
-        reason: "Required field cannot safely be mapped to generic text, location, contact info, or ordinary categorical selection without domain knowledge"
+        reason: "Required field cannot safely be mapped without explicit user data"
       };
       unmappedRequiredDetails.push(detail);
 
-      console.warn(`[contact-form-automation] REQUIRED_FIELD_UNMAPPED: fieldName="${detail.fieldName}", label="${detail.fieldLabel}", type="${detail.fieldType}", options=${optionsList?.length ?? 0}`);
+      console.warn(`[contact-form-automation] UNRESOLVED_REQUIRED_FIELD: fieldName="${detail.fieldName}", label="${detail.fieldLabel}", type="${detail.fieldType}", options=${optionsList?.length ?? 0}`);
     } else {
       unmappedOptionalFields.push(identifier);
     }
@@ -3191,7 +3255,22 @@ export async function submitContactForm({
             if (isProxyAuthenticationFailure(commitErr) || proxy407Hit) {
               throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
             }
-            if (!activePage.url() || activePage.url() === "about:blank") {
+            // Verify if DOM is actually usable before declaring failure on navigation timeout
+            const usabilityCheck = await activePage.evaluate(() => {
+              const body = document.body;
+              if (!body) return { isUsable: false };
+              const formCount = document.querySelectorAll("form").length;
+              const inputCount = document.querySelectorAll("input, select, textarea").length;
+              const buttonCount = document.querySelectorAll("button, a[role='button']").length;
+              const textLength = (body.innerText || "").trim().length;
+              const isErrorDoc = /502 bad gateway|504 gateway time-out|dns_probe_finished|err_connection_/i.test(body.innerText || "");
+              const isUsable = !isErrorDoc && (formCount > 0 || (inputCount >= 2 && buttonCount > 0) || textLength > 100);
+              return { isUsable, formCount, inputCount, textLength };
+            }).catch(() => ({ isUsable: false }));
+
+            if (usabilityCheck.isUsable) {
+              console.log(`[contact-form-automation] Navigation reached timeout, but live DOM contains usable content (forms=${(usabilityCheck as any).formCount}, inputs=${(usabilityCheck as any).inputCount}). Proceeding with form discovery.`);
+            } else {
               throw commitErr;
             }
           }
@@ -3373,7 +3452,7 @@ export async function submitContactForm({
           throw new Error(`Unsupported verification: CAPTCHA required field detected (${unmappedSummary}). Manual verification required.`);
         }
       } else {
-        throw new Error(`REQUIRED_FIELD_UNMAPPED: Missing required field(s): ${unmappedSummary}${detailedLog ? ` | ${detailedLog}` : ""}`);
+        throw new Error(`UNRESOLVED_REQUIRED_FIELD: Missing required field(s): ${unmappedSummary}${detailedLog ? ` | ${detailedLog}` : ""}`);
       }
     }
 

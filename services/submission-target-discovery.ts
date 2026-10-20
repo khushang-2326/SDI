@@ -2164,21 +2164,16 @@ async function discoverSubmissionTargetsInternal({
     }
 
     // Dedicated Contact Form Fast-Path:
-    // If the entered page already contains a dedicated contact form (or is an explicit /contact URL),
+    // If the entered page already contains a viable contact form,
     // use it immediately to avoid unnecessary crawl delays.
-    const isRootHomepage = withoutHash(page.url()) === normalizedWebsiteUrl || withoutHash(page.url()) === `${normalizedWebsiteUrl}/`;
-    const isDedicatedContactUrl = /contact|reach|touch|book|schedule|inquir|connect/i.test(normalizedWebsiteUrl) || /contact|reach|touch|book|schedule|inquir|connect/i.test(page.url());
-    const isDedicatedContactForm = directResult?.targetType === "contact_form" && (
-      !isRootHomepage ||
-      directResult.confidence >= 80 ||
-      isDedicatedContactUrl
-    );
+    const hasViableContactForm = directResult?.targetType === "contact_form" && directResult.confidence >= 50;
 
-    if (isDedicatedContactForm) {
+    if (hasViableContactForm) {
       const targets = Array.from(discovered.values()).sort(
         (a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence || a.url.localeCompare(b.url)
       );
       if (targets.length > 0) {
+        console.log(`[CONTACT-DISCOVERY] Fast-path: Viable contact form found directly on current page (${page.url()}). Skipping link crawl.`);
         return {
           websiteUrl: normalizedWebsiteUrl,
           targets,
@@ -2204,28 +2199,22 @@ async function discoverSubmissionTargetsInternal({
     let consecutiveSyntheticFailures = 0;
     let lastDetectedVerification: import("@/services/verification-detector").UnsupportedVerificationResult | null = null;
 
-    // 5-Tier Discovery Priority:
-    // Tier 1: Explicit High-Intent Contact / Booking paths (/contact, /book, /schedule)
-    // Tier 2: Real CTA / Action links ("Let's Talk", "Get in Touch", "Start a Project")
-    // Tier 3: Supported External / Iframe links (Calendly, HubSpot meetings)
-    // Tier 4: General site navigation links
-    // Tier 5: Synthetic common-path fallbacks (tried only if real links absent)
-    const getCandidateTier = (c: Candidate): number => {
+    // Strict Sequential 3-Tier Discovery Priority:
+    // Priority 1: Navbar / Header (<header>, <nav>, [role="banner"], [role="navigation"], mobile menu)
+    // Priority 2: Body / Main Content (.hero, .cta, body, modal triggers, iframes)
+    // Priority 3: Footer (<footer>, .site-footer, [role="contentinfo"])
+    // Priority 4: Synthetic common-path fallbacks (only if real links absent)
+    const getStructuralTier = (c: Candidate): number => {
       const isSynthetic = c.reason.startsWith("common path");
-      if (isSynthetic) return 5;
-      const isExternal = isCalendlyEventUrl(new URL(c.url)) || c.reason.includes("external booking");
-      if (isExternal) return 3;
-      try {
-        const p = new URL(c.url).pathname.toLowerCase();
-        if (/(contact|get-in-touch|reach-us|talk-to-us|contact-sales|book-a-demo|book-now|schedule|inquiry|consultation|sales|demo)/i.test(p)) {
-          return 1;
-        }
-      } catch {}
-      const txt = (c.candidateText || "").toLowerCase();
-      if (/(contact|talk to us|talk to sales|contact sales|get in touch|book|schedule|request quote|request demo|estimate|start a project|expert)/i.test(txt)) {
-        return 2;
+      if (isSynthetic) return 4;
+      const loc = (c.candidateLocation || "body").toLowerCase();
+      if (loc === "header" || loc === "nav" || loc === "mobile menu") {
+        return 1;
       }
-      return 4;
+      if (loc === "footer") {
+        return 3;
+      }
+      return 2;
     };
 
     const isNegativeInfoPath = (urlStr: string) => {
@@ -2241,8 +2230,8 @@ async function discoverSubmissionTargetsInternal({
       ...navigationCandidates.filter((c) => !isNegativeInfoPath(c.url)),
       ...(navigationCandidates.length === 0 ? fallbackCandidates : [])
     ].sort((a, b) => {
-      const tierA = getCandidateTier(a);
-      const tierB = getCandidateTier(b);
+      const tierA = getStructuralTier(a);
+      const tierB = getStructuralTier(b);
       if (tierA !== tierB) return tierA - tierB;
       return b.score - a.score;
     });
@@ -2260,7 +2249,7 @@ async function discoverSubmissionTargetsInternal({
       });
 
       // Check if high-intent Tier 1 or Tier 2 candidates still remain in queue
-      const remainingHighPriorityCandidates = candidatesQueue.slice(candidateIndex).some((c) => getCandidateTier(c) <= 2);
+      const remainingHighPriorityCandidates = candidatesQueue.slice(candidateIndex).some((c) => getStructuralTier(c) <= 2);
 
       // Only exit candidate loop early if we already have a dedicated high-confidence contact form,
       // or if we have a provisional form and no high-intent Tier 1/2 candidates remain
@@ -2510,24 +2499,6 @@ async function discoverSubmissionTargetsInternal({
 export async function discoverSubmissionTargets(
   input: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }
 ): Promise<DiscoverSubmissionTargetsResult> {
-  const timeoutMs = input.timeoutMs ?? 8000;
-  const overallBudgetMs = Math.min(Math.max(timeoutMs * 3, 20000), 45000);
-  let timer: NodeJS.Timeout | null = null;
-  const timeoutPromise = new Promise<DiscoverSubmissionTargetsResult>((resolve) => {
-    timer = setTimeout(() => {
-      resolve({
-        websiteUrl: input.websiteUrl,
-        targets: [],
-        checkedUrls: [input.websiteUrl],
-        reason: `Target discovery exceeded overall budget limit (${Math.round(overallBudgetMs / 1000)}s).`,
-        screenshotPath: null
-      });
-    }, overallBudgetMs);
-  });
-
-  try {
-    return await Promise.race([discoverSubmissionTargetsInternal({ ...input, timeoutMs: overallBudgetMs }), timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const timeoutMs = input.timeoutMs ?? 25000;
+  return discoverSubmissionTargetsInternal({ ...input, timeoutMs });
 }

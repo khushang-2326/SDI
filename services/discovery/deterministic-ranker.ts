@@ -57,30 +57,32 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     features.advisoryIntent > 0 ||
     hasPathMatch;
 
-  // 3. Structural Topology Boosts (Language-Agnostic)
+  // 3. Structural Topology Boosts: Enforce Tier 1 (Header/Nav) -> Tier 2 (Body/Hero) -> Tier 3 (Footer)
   if (hasIntentOrPath) {
-    if (features.isHeader || features.isNav) {
-      score += 30;
+    if (features.isHeader || features.isNav || features.mobileMenuSource) {
+      // Tier 1 Base: 1000+ points
+      score += 1000;
       // Rightmost item in nav/header is predominantly the contact/lead CTA
       if (features.isRightmostNav) {
-        score += 15;
+        score += 50;
       }
+    } else if (features.isHero || features.isCTA || features.isModalTrigger) {
+      // Tier 2 Base: 500+ points
+      score += 500;
     } else if (features.isFooter) {
-      score += 20;
-    } else if (features.isHero || features.isCTA) {
-      score += 25;
-    } else if (features.mobileMenuSource) {
-      score += 20;
+      // Tier 3 Base: 100+ points
+      score += 100;
     } else {
-      score += 10;
+      // Generic body
+      score += 250;
     }
 
     if (features.isProminentButton) {
-      score += 10;
+      score += 20;
     }
 
     if (features.isModalTrigger) {
-      score += 20;
+      score += 30;
     }
   }
 

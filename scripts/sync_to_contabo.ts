@@ -56,6 +56,7 @@ conn.on('ready', () => {
       conn.end();
       process.exit(code || 0);
     });
+  });
 });
 
 let attempts = 0;

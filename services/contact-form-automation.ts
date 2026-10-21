@@ -18,7 +18,7 @@ import {
   SubmitContactFormResult,
   StageTimingMetrics
 } from "@/types/automation";
-import { dismissCookieBanners } from "./cookie-consent-helper";
+import { dismissCookieBanners, startParallelCookieGuardian, installCookieGuardianInitScript, type CookieGuardianController } from "./cookie-consent-helper";
 import { waitForUniversalPageReadiness } from "./page-readiness";
 import { evaluateFinalAutomationSuccess } from "./success-invariants";
 import {
@@ -3386,6 +3386,7 @@ export async function submitContactForm({
   let tFieldFilling = 0;
   let tSubmitDiscovery = 0;
   let submitDiag: SubmitCandidateDiagnostic | null = null;
+  let cookieGuardian: CookieGuardianController | null = null;
 
   try {
     if (customPage) {
@@ -3420,6 +3421,8 @@ export async function submitContactForm({
     // as soon as the server commits the document, then wait for form controls.
     const activePage = page;
     await blockHeavyAssets(activePage).catch(() => undefined);
+    await installCookieGuardianInitScript(activePage).catch(() => undefined);
+    cookieGuardian = startParallelCookieGuardian(activePage);
     let proxy407Hit = false;
     let on407Reject: ((err: any) => void) | null = null;
     const proxy407Promise = new Promise((_, reject) => {
@@ -4222,6 +4225,7 @@ export async function submitContactForm({
     }
     return result;
   } finally {
+    cookieGuardian?.stop();
     if (!customPage) {
       if (page && browserContext) {
         await page.close().catch(() => undefined);

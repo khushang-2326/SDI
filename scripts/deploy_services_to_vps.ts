@@ -13,6 +13,7 @@ conn.on('ready', () => {
       { local: 'd:/Projects/SDI/services/contact-form-automation.ts', remote: '/root/SDI/services/contact-form-automation.ts', container: 'sdi:/app/services/contact-form-automation.ts' },
       { local: 'd:/Projects/SDI/services/error-taxonomy.ts', remote: '/root/SDI/services/error-taxonomy.ts', container: 'sdi:/app/services/error-taxonomy.ts' },
       { local: 'd:/Projects/SDI/services/cookie-consent-helper.ts', remote: '/root/SDI/services/cookie-consent-helper.ts', container: 'sdi:/app/services/cookie-consent-helper.ts' },
+      { local: 'd:/Projects/SDI/services/parallel-cookie-guardian.ts', remote: '/root/SDI/services/parallel-cookie-guardian.ts', container: 'sdi:/app/services/parallel-cookie-guardian.ts' },
       { local: 'd:/Projects/SDI/services/worker-pool.ts', remote: '/root/SDI/services/worker-pool.ts', container: 'sdi:/app/services/worker-pool.ts' },
       { local: 'd:/Projects/SDI/services/discovery/candidate-extractor.ts', remote: '/root/SDI/services/discovery/candidate-extractor.ts', container: 'sdi:/app/services/discovery/candidate-extractor.ts' },
       { local: 'd:/Projects/SDI/services/submission-target-discovery.ts', remote: '/root/SDI/services/submission-target-discovery.ts', container: 'sdi:/app/services/submission-target-discovery.ts' },

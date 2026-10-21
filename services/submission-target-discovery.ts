@@ -9,7 +9,7 @@ import {
   DiscoveredSubmissionTarget,
   SubmissionTargetType
 } from "@/types/automation";
-import { dismissCookieBanners } from "./cookie-consent-helper";
+import { dismissCookieBanners, startParallelCookieGuardian, installCookieGuardianInitScript, type CookieGuardianController } from "./cookie-consent-helper";
 import {
   isProxyAuthenticationFailure,
   ProxyAuthenticationError,
@@ -1817,7 +1817,7 @@ export async function discoverSubmissionTarget({
       screenshotPath: null
     };
   }
-
+  let cookieGuardian: CookieGuardianController | null = null;
   try {
     const httpCandidates = await collectHttpDiscoveryCandidates(normalizedWebsiteUrl);
     if (browserContext) {
@@ -1843,6 +1843,8 @@ export async function discoverSubmissionTarget({
     }
     page.setDefaultTimeout(timeoutMs);
     await blockHeavyAssets(page);
+    await installCookieGuardianInitScript(page).catch(() => undefined);
+    cookieGuardian = startParallelCookieGuardian(page);
 
     let proxy407Hit = false;
     const responseHandler = (res: any) => {
@@ -2016,6 +2018,7 @@ export async function discoverSubmissionTarget({
       screenshotPath: null
     };
   } finally {
+    cookieGuardian?.stop();
     if (page && browserContext) {
       await page.close().catch(() => undefined);
     } else {
@@ -2076,7 +2079,7 @@ async function discoverSubmissionTargetsInternal({
     const existing = discovered.get(key);
     if (!existing || target.confidence > existing.confidence) discovered.set(key, target);
   };
-
+  let cookieGuardianMulti: CookieGuardianController | null = null;
   try {
     const httpBudget = Math.min(HTTP_DISCOVERY_BUDGET_MS, Math.max(800, Math.floor(timeoutMs * 0.20)));
     const httpCandidates = await collectHttpDiscoveryCandidates(normalizedWebsiteUrl, httpBudget);
@@ -2107,6 +2110,8 @@ async function discoverSubmissionTargetsInternal({
     page.setDefaultTimeout(timeoutMs);
     const discoveryDeadlineAt = Date.now() + timeoutMs;
     await blockHeavyAssets(page);
+    await installCookieGuardianInitScript(page).catch(() => undefined);
+    cookieGuardianMulti = startParallelCookieGuardian(page);
 
     let proxy407Hit = false;
     const responseHandler = (res: any) => {
@@ -2580,6 +2585,7 @@ async function discoverSubmissionTargetsInternal({
       screenshotPath: errScreenshot
     };
   } finally {
+    cookieGuardianMulti?.stop();
     if (page && browserContext) await page.close().catch(() => undefined);
     else await browser?.close().catch(() => undefined);
   }

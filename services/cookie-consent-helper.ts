@@ -1,3 +1,4 @@
+export { startParallelCookieGuardian, installCookieGuardianInitScript, type CookieGuardianController } from "./parallel-cookie-guardian";
 import type { Page, Frame } from "playwright";
 
 /**
@@ -301,7 +302,7 @@ const EXPLICIT_GLOBAL_COOKIE_REGEX = new RegExp(
 
 const FAST_ACCEPT_CSS = SPECIALIZED_ACCEPT_SELECTORS.filter((s) => !s.includes(":has-text")).join(", ");
 
-const COOKIE_CONTAINER_SELECTORS = [
+const COOKIE_CONTAINER_ARRAY = [
   "[id*='cookie' i]",
   "[class*='cookie' i]",
   "[id*='consent' i]",
@@ -324,7 +325,9 @@ const COOKIE_CONTAINER_SELECTORS = [
   "[role='region'][aria-label*='cookie' i]",
   "[aria-modal='true'][class*='cookie' i]",
   "[aria-modal='true'][id*='cookie' i]"
-].join(", ");
+];
+const COOKIE_CONTAINER_SELECTORS = COOKIE_CONTAINER_ARRAY.join(", ");
+const COOKIE_INNER_BUTTONS_SELECTOR = COOKIE_CONTAINER_ARRAY.map(c => `${c} button, ${c} a, ${c} [role='button'], ${c} input[type='button'], ${c} input[type='submit']`).join(", ");
 
 async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> {
   let dismissed = false;
@@ -361,9 +364,7 @@ async function dismissScopeCookieBanners(scope: Page | Frame): Promise<boolean> 
   // 3. Multi-lingual Text Matching strictly inside recognized cookie/consent containers
   if (!dismissed) {
     try {
-      const containerButtons = scope.locator(
-        `${COOKIE_CONTAINER_SELECTORS} button, ${COOKIE_CONTAINER_SELECTORS} a, ${COOKIE_CONTAINER_SELECTORS} input[type='button'], ${COOKIE_CONTAINER_SELECTORS} input[type='submit'], ${COOKIE_CONTAINER_SELECTORS} [role='button'], ${COOKIE_CONTAINER_SELECTORS} .hs-eu-confirmation-button`
-      );
+      const containerButtons = scope.locator(COOKIE_INNER_BUTTONS_SELECTOR);
 
       const count = await containerButtons.count().catch(() => 0);
       for (let i = 0; i < Math.min(count, 12); i++) {

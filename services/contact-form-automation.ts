@@ -19,6 +19,7 @@ import {
   StageTimingMetrics
 } from "@/types/automation";
 import { dismissCookieBanners, startParallelCookieGuardian, installCookieGuardianInitScript, type CookieGuardianController } from "./cookie-consent-helper";
+import { buildAllPhoneFormats, resolveOptimalPhoneValue } from "./phone-format-helper";
 import { waitForUniversalPageReadiness } from "./page-readiness";
 import { evaluateFinalAutomationSuccess } from "./success-invariants";
 import {
@@ -333,10 +334,24 @@ async function safelyFillField(
       }, targetNorm).catch(() => -1);
     }
 
-    // 2. If no matching option, select the first valid non-placeholder option
+    // 2. If no matching option, select second option as by default (User requested: "for dropdown select second option as by default")
     if (matchedIndex < 0) {
       matchedIndex = await locator.evaluate((el: HTMLSelectElement) => {
         const placeholderPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
+        if (el.options.length > 1) {
+          const secondOpt = el.options[1];
+          if (!secondOpt.disabled && !placeholderPattern.test((secondOpt.textContent || "").trim())) {
+            return 1;
+          }
+        }
+        if (el.options.length > 2) {
+          for (let i = 2; i < el.options.length; i++) {
+            const opt = el.options[i];
+            if (!opt.disabled && !placeholderPattern.test((opt.textContent || "").trim())) {
+              return i;
+            }
+          }
+        }
         return Array.from(el.options).findIndex((opt) => {
           if (opt.disabled) return false;
           const label = (opt.textContent || "").trim();
@@ -380,23 +395,13 @@ async function safelyFillField(
     fillValue = fillValue.slice(0, maxLen);
   }
 
-  // Obey phone input patterns/masks (e.g. (123) 456-7890 or 123-456-7890)
+  // Obey phone input patterns/masks based on website requirements (all mobile formats supported)
   if (inputType === "tel" || tagName === "input") {
-    const inputPattern = await locator.getAttribute("pattern").catch(() => "") || "";
-    const placeholder = await locator.getAttribute("placeholder").catch(() => "") || "";
     const nameAttr = await locator.getAttribute("name").catch(() => "") || "";
-    const isPhoneLike = inputType === "tel" || /phone|tel|mobile/i.test(nameAttr);
-    if (isPhoneLike) {
-      const digits = fillValue.replace(/\D/g, "");
-      if (digits.length === 10) {
-        if (inputPattern.includes("(") || placeholder.includes("(")) {
-          fillValue = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-        } else if (inputPattern.includes("-") || placeholder.includes("-")) {
-          fillValue = `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
-        } else if (placeholder.includes(" ")) {
-          fillValue = `${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`;
-        }
-      }
+    const idAttr = await locator.getAttribute("id").catch(() => "") || "";
+    const isPhoneLike = inputType === "tel" || /phone|tel|mobile|whatsapp/i.test(`${nameAttr} ${idAttr}`);
+    if (isPhoneLike && /\d{4,}/.test(fillValue)) {
+      fillValue = await resolveOptimalPhoneValue(locator, fillValue);
     }
   }
 
@@ -581,11 +586,11 @@ async function safelyFillCountryField(
   return { success: didSelect, verified: didSelect, actualValue: selectVal };
 }
 
-async function selectFirstRealOption(locator: Locator): Promise<boolean> {
+async function selectDefaultDropdownOption(locator: Locator): Promise<boolean> {
   const isEn = await locator.isEnabled().catch(() => false);
   if (!isEn) return false;
 
-  // Find index of first non-disabled, non-placeholder option
+  // User requested: "for dropdown select second option as by default"
   const targetIdx = await locator.evaluate((element) => {
     const select = element as HTMLSelectElement;
     if (!select || select.tagName.toLowerCase() !== "select") return -1;
@@ -603,15 +608,39 @@ async function selectFirstRealOption(locator: Locator): Promise<boolean> {
       return !option.disabled && val !== "" && !isPlaceholder;
     };
 
+    // If already on a valid non-placeholder option beyond index 0, we can keep it
     const selected = select.options[select.selectedIndex];
-    if (selected && isRealOption(selected)) return select.selectedIndex;
+    if (selected && select.selectedIndex > 0 && isRealOption(selected)) return select.selectedIndex;
 
-    // First try finding an option with non-empty value and non-placeholder text
-    let idx = Array.from(select.options).findIndex(isRealOption);
+    // Prefer the second option (index 1) by default
+    let idx = -1;
+    if (select.options.length > 1) {
+      const opt1 = select.options[1];
+      if (!opt1.disabled && !pPattern.test((opt1.textContent || "").trim())) {
+        idx = 1;
+      }
+    }
+
+    // If option 1 is disabled or placeholder, look at subsequent options (index 2, 3...)
+    if (idx < 0 && select.options.length > 2) {
+      for (let i = 2; i < select.options.length; i++) {
+        const opt = select.options[i];
+        if (!opt.disabled && !pPattern.test((opt.textContent || "").trim())) {
+          idx = i;
+          break;
+        }
+      }
+    }
+
+    // Fallback: any non-placeholder real option
     if (idx < 0) {
-      // If all options have empty or arbitrary values, take the first non-disabled option whose label is not a placeholder
+      idx = Array.from(select.options).findIndex(isRealOption);
+    }
+    if (idx < 0) {
       idx = Array.from(select.options).findIndex((opt) => !opt.disabled && (opt.textContent ?? "").trim() && !pPattern.test((opt.textContent ?? "").trim()));
     }
+    if (idx < 0 && select.options.length > 1) idx = 1;
+    if (idx < 0 && select.options.length === 1) idx = 0;
     return idx;
   }).catch(() => -1);
 
@@ -661,6 +690,8 @@ async function selectFirstRealOption(locator: Locator): Promise<boolean> {
   return verified;
 }
 
+const selectFirstRealOption = selectDefaultDropdownOption;
+
 async function sweepAndSelectRequiredDropdowns(scope: FormScope): Promise<string[]> {
   const selects = scope.locator("select");
   const count = await selects.count().catch(() => 0);
@@ -677,7 +708,8 @@ async function sweepAndSelectRequiredDropdowns(scope: FormScope): Promise<string
       const val = (opt?.value || el.value || "").trim();
       const txt = (opt?.textContent || "").trim();
       const hasValid = Boolean(val || txt) && !pPattern.test(txt) && !(val === "" && pPattern.test(txt));
-      return isReq && !hasValid;
+      const shouldPickSecond = (el.selectedIndex === 0 || !hasValid) && el.options.length > 1;
+      return (isReq && !hasValid) || shouldPickSecond;
     }).catch(() => false);
 
     if (needsSelection) {
@@ -3237,7 +3269,36 @@ export async function validateFormBeforeSubmission(
         if (type === "email" || nameOrId.includes("email")) {
           fillVal = leadDataArg.email || "";
         } else if (type === "tel" || nameOrId.includes("phone") || nameOrId.includes("tel") || nameOrId.includes("mobile") || nameOrId.includes("whatsapp") || nameOrId.includes("contact_number") || nameOrId.includes("pn")) {
-          fillVal = leadDataArg.mobile || leadDataArg.mobileNumber || leadDataArg.phone || "";
+          const rawMobile = leadDataArg.mobile || leadDataArg.mobileNumber || leadDataArg.phone || "";
+          if (rawMobile) {
+            const digits = rawMobile.replace(/\D/g, "");
+            const area = digits.length >= 10 ? (digits.length === 11 && digits.startsWith("1") ? digits.slice(1, 4) : digits.slice(0, 3)) : "555";
+            const prefix = digits.length >= 10 ? (digits.length === 11 && digits.startsWith("1") ? digits.slice(4, 7) : digits.slice(3, 6)) : "234";
+            const line = digits.length >= 10 ? (digits.length === 11 && digits.startsWith("1") ? digits.slice(7, 11) : digits.slice(6, 10)) : "5678";
+            const phoneCandidates = [
+              `(${area}) ${prefix}-${line}`,
+              `${area}-${prefix}-${line}`,
+              `${area}${prefix}${line}`,
+              `+1${area}${prefix}${line}`,
+              `+1 (${area}) ${prefix}-${line}`,
+              `+1-${area}-${prefix}-${line}`,
+              `${area}.${prefix}.${line}`,
+              `${area} ${prefix} ${line}`
+            ];
+            let bestPhone = phoneCandidates[0];
+            const max = (el as HTMLInputElement).maxLength > 0 ? (el as HTMLInputElement).maxLength : 999;
+            for (const cand of phoneCandidates) {
+              if (cand.length > max) continue;
+              (el as HTMLInputElement).value = cand;
+              if ((el as HTMLInputElement).checkValidity()) {
+                bestPhone = cand;
+                break;
+              }
+            }
+            fillVal = bestPhone;
+          } else {
+            fillVal = "(555) 234-5678";
+          }
         } else if (nameOrId.includes("first") || nameOrId.includes("fname") || nameOrId.includes("given")) {
           fillVal = derivedFirstName;
         } else if (nameOrId.includes("last") || nameOrId.includes("lname") || nameOrId.includes("surname") || nameOrId.includes("family")) {

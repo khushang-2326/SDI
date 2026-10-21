@@ -143,7 +143,7 @@ export async function recoverStaleTargets(jobId: string, userId: string): Promis
       jobId,
       status: { in: ["Running", "Discovering"] },
       heartbeatAt: { lt: staleBefore },
-      job: { userId, status: "Running" }
+      job: { userId, status: { in: ["Running", "Paused"] } }
     },
     select: { id: true, workerId: true }
   });
@@ -195,7 +195,7 @@ async function finishParentJobIfComplete(jobId: string): Promise<void> {
   const finalStatus = successCount > 0 ? "Completed" : "Failed";
 
   await prisma.submissionJob.updateMany({
-    where: { id: jobId, status: "Running" },
+    where: { id: jobId, status: { in: ["Running", "Paused"] } },
     data: { status: finalStatus, completedAt: new Date() }
   });
 }
@@ -524,35 +524,53 @@ async function runWorkerLoop(
   console.log(`[${workerId}] Worker spawned and ready.`);
 
   while (true) {
-    // Check if parent job was cancelled
+    // Check if parent job was cancelled or paused
     const parent = await prisma.submissionJob.findUnique({
       where: { id: jobId },
       select: { status: true }
     });
 
-    if (!parent || parent.status !== "Running") {
+    if (!parent || (parent.status !== "Running" && parent.status !== "Paused")) {
       console.log(`[${workerId}] Parent job status is ${parent?.status ?? "missing"}; exiting worker loop.`);
       break;
+    }
+
+    // Handle Paused state: worker stays alive, sleeps, and checks again without claiming new targets
+    if (parent.status === "Paused") {
+      const jobWorkers = activeWorkerRegistry.get(jobId);
+      if (jobWorkers) {
+        jobWorkers.set(workerId, {
+          workerId,
+          status: "idle",
+          currentTargetId: null,
+          currentTargetUrl: null,
+          currentStep: "Paused by user",
+          startedAt: null,
+          lastHeartbeatAt: new Date().toISOString()
+        });
+      }
+      await delay(1000);
+      continue;
     }
 
     // Atomic claim attempt
     const resultId = await atomicClaimTarget(jobId, workerId, userId);
 
     if (!resultId) {
-      // MANDATORY CORRECTION 2: Check whether PENDING targets still exist before exiting
-      const pendingCount = await prisma.submissionResult.count({
-        where: { jobId, status: "Pending", job: { status: "Running" } }
+      // Check whether ANY unfinished targets remain in the entire job
+      const remainingUnfinished = await prisma.submissionResult.count({
+        where: { jobId, status: { in: ["Pending", "Discovering", "Running"] } }
       });
 
-      if (pendingCount > 0) {
-        // Race condition: another worker took the candidate; back off briefly and retry
-        await delay(150 + Math.random() * 200);
-        continue;
+      if (remainingUnfinished === 0) {
+        console.log(`[${workerId}] All targets completed for job ${jobId}; worker finished cleanly.`);
+        break;
       }
 
-      // No pending targets left
-      console.log(`[${workerId}] Zero pending targets remaining in queue; worker finished.`);
-      break;
+      // Other workers are still busy processing active targets, or stale items may be recovered.
+      // Idle briefly and check again.
+      await delay(1000 + Math.random() * 500);
+      continue;
     }
 
     // Process the claimed target
@@ -640,7 +658,7 @@ export async function runParallelWorkerPool(options: WorkerPoolOptions): Promise
   const watchdog = setInterval(() => {
     void recoverStaleTargets(jobId, userId);
     void prisma.submissionJob.updateMany({
-      where: { id: jobId, status: "Running" },
+      where: { id: jobId, status: { in: ["Running", "Paused"] } },
       data: { updatedAt: new Date() }
     }).catch(() => undefined);
   }, 10_000);

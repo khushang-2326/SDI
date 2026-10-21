@@ -69,7 +69,7 @@ export type AutomationRunnerState = {
 export type BackgroundAutomationJob = {
   id: string;
   userId: string;
-  status: "running" | "completed" | "cancelled";
+  status: "running" | "completed" | "cancelled" | "paused";
   createdAt: string;
   workers?: WorkerStatusInfo[];
   items: Array<{
@@ -89,8 +89,9 @@ const localAutomationLocks =
   globalForLocalAutomation.localAutomationLocks ?? new Map<string, Promise<void>>();
 globalForLocalAutomation.localAutomationLocks = localAutomationLocks;
 
-function mapDbStatusToBackground(status: string): "running" | "completed" | "cancelled" {
+function mapDbStatusToBackground(status: string): "running" | "completed" | "cancelled" | "paused" {
   if (status === "Pending" || status === "Running" || status === "Discovering") return "running";
+  if (status === "Paused") return "paused";
   if (status === "Cancelled") return "cancelled";
   return "completed";
 }
@@ -166,10 +167,46 @@ async function mapJobToBackgroundJob(dbJob: any): Promise<BackgroundAutomationJo
 export async function startBackgroundAutomationAction(formData: FormData) {
   const user = await requireUser();
   const requestedIds = JSON.parse(readText(formData, "websiteIds") || "[]") as string[];
-  const websites = await prisma.targetWebsite.findMany({
+  let websites = await prisma.targetWebsite.findMany({
     where: { userId: user.id, id: { in: requestedIds }, status: "active" },
     orderBy: { createdAt: "asc" }
   });
+
+  if (websites.length === 0) {
+    const singleWebsiteId = readText(formData, "websiteId");
+    if (singleWebsiteId && !singleWebsiteId.startsWith("__file__:")) {
+      const single = await prisma.targetWebsite.findFirst({
+        where: { id: singleWebsiteId, userId: user.id }
+      });
+      if (single) websites = [single];
+    }
+  }
+
+  if (websites.length === 0) {
+    const manualUrl = readText(formData, "websiteUrl");
+    if (manualUrl) {
+      const directContact = readText(formData, "directContactUrl");
+      let target = await prisma.targetWebsite.findFirst({
+        where: { userId: user.id, websiteUrl: manualUrl }
+      });
+      if (!target) {
+        let name = manualUrl;
+        try {
+          name = new URL(manualUrl).hostname;
+        } catch {}
+        target = await prisma.targetWebsite.create({
+          data: {
+            userId: user.id,
+            websiteUrl: manualUrl,
+            websiteName: name,
+            contactPageUrl: directContact || manualUrl,
+            status: "active"
+          }
+        });
+      }
+      websites = [target];
+    }
+  }
 
   if (websites.length === 0) {
     throw new Error("No active websites were selected for this automation run.");
@@ -346,6 +383,49 @@ export async function cancelBackgroundAutomationAction(jobId: string) {
   return updatedJob ? mapJobToBackgroundJob(updatedJob) : null;
 }
 
+export async function pauseBackgroundAutomationAction(jobId: string) {
+  const user = await requireUser();
+  await prisma.submissionJob.updateMany({
+    where: { id: jobId, userId: user.id, status: "Running" },
+    data: { status: "Paused" }
+  });
+  const updatedJob = await prisma.submissionJob.findFirst({
+    where: { id: jobId, userId: user.id },
+    include: { results: { include: { targetWebsite: true, attempts: { orderBy: { executionOrder: "asc" } } } } }
+  });
+  return updatedJob ? mapJobToBackgroundJob(updatedJob) : null;
+}
+
+export async function resumeBackgroundAutomationAction(jobId: string, workerCountParam?: number) {
+  const user = await requireUser();
+  await prisma.submissionJob.updateMany({
+    where: { id: jobId, userId: user.id, status: "Paused" },
+    data: { status: "Running" }
+  });
+
+  if (config.queueProvider === "local" && !localAutomationLocks.has(jobId)) {
+    const workerCount = workerCountParam ?? config.worker.maxWorkers;
+    const processing = runParallelWorkerPool({
+      jobId,
+      userId: user.id,
+      workerCount
+    }).catch((err) => {
+      console.error(`[WorkerPool Action] Error resuming job ${jobId}:`, err);
+    });
+
+    localAutomationLocks.set(jobId, processing as Promise<any>);
+    void processing.finally(() => {
+      localAutomationLocks.delete(jobId);
+    });
+  }
+
+  const updatedJob = await prisma.submissionJob.findFirst({
+    where: { id: jobId, userId: user.id },
+    include: { results: { include: { targetWebsite: true, attempts: { orderBy: { executionOrder: "asc" } } } } }
+  });
+  return updatedJob ? mapJobToBackgroundJob(updatedJob) : null;
+}
+
 export async function resetBackgroundAutomationForUser(userId: string, jobId?: string): Promise<boolean> {
   if (jobId) {
     // 1. Immediately mark job & results cancelled so any running worker loop terminates
@@ -449,11 +529,10 @@ export async function getBackgroundAutomationForUser(userId: string, jobId?: str
     return mapJobToBackgroundJob(dbJob);
   }
 
-  // When called without jobId (e.g. user reloaded page or opened new window),
-  // only reconnect if there is an active Running or Pending run!
-  // If the run has finished or was reset, return null so the page starts in a clean state.
-  const dbJob = await prisma.submissionJob.findFirst({
-    where: { userId, status: { in: ["Running", "Pending"] } },
+  // When called without jobId (e.g. user reloaded page, opened new window, or returned after closing browser/laptop):
+  // 1. First check if there is an active run (Running, Pending, or Paused)
+  let dbJob = await prisma.submissionJob.findFirst({
+    where: { userId, status: { in: ["Running", "Pending", "Paused"] } },
     orderBy: { createdAt: "desc" },
     include: {
       results: {
@@ -464,7 +543,44 @@ export async function getBackgroundAutomationForUser(userId: string, jobId?: str
       }
     }
   });
+
+  // 2. If no active run, retrieve the latest completed or cancelled run for this user so they can view results, analysis, and download PDF!
+  if (!dbJob) {
+    dbJob = await prisma.submissionJob.findFirst({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      include: {
+        results: {
+          include: {
+            targetWebsite: true,
+            attempts: { orderBy: { executionOrder: "asc" } }
+          }
+        }
+      }
+    });
+  }
+
   if (!dbJob) return null;
+
+  // If the job is in Running status and not currently processing in local memory (e.g. server restart or client reconnect),
+  // auto-resume the worker pool cleanly in the background:
+  if (config.queueProvider === "local" && dbJob.status === "Running" && !localAutomationLocks.has(dbJob.id)) {
+    const pendingOrRunning = dbJob.results.filter((r: any) => ["Pending", "Discovering", "Running"].includes(r.status)).length;
+    if (pendingOrRunning > 0) {
+      const processing = runParallelWorkerPool({
+        jobId: dbJob.id,
+        userId,
+        workerCount: config.worker.maxWorkers
+      }).catch((err) => {
+        console.error(`[WorkerPool Action] Error auto-resuming job ${dbJob.id}:`, err);
+      });
+      localAutomationLocks.set(dbJob.id, processing as Promise<any>);
+      void processing.finally(() => {
+        localAutomationLocks.delete(dbJob.id);
+      });
+    }
+  }
+
   return mapJobToBackgroundJob(dbJob);
 }
 

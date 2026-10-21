@@ -10,6 +10,8 @@ import {
   processLocalBackgroundAutomationAction,
   cancelBackgroundAutomationAction,
   resetBackgroundAutomationAction,
+  pauseBackgroundAutomationAction,
+  resumeBackgroundAutomationAction,
   type AutomationResult,
   type AutomationRunnerState
 } from "@/app/(dashboard)/automation/actions";
@@ -775,7 +777,7 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   const [isAnalysisOpen, setIsAnalysisOpen] = useState(false);
   const [liveBatchItems, setLiveBatchItems] = useState<LiveBatchItem[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
-  const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled">("idle");
+  const [batchStatus, setBatchStatus] = useState<"idle" | "running" | "completed" | "cancelled" | "paused">("idle");
   const [workerCount, setWorkerCount] = useState<number>(8);
   const [activeWorkers, setActiveWorkers] = useState<any[]>([]);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
@@ -994,17 +996,34 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     }
     setCurrentJobId(job.id);
     setJobStartedAt(new Date(job.createdAt).getTime());
-    setIsBatchRunning(job.status === "running");
+    setIsBatchRunning(job.status === "running" || job.status === "paused");
+    setIsPaused(job.status === "paused");
+    isPausedRef.current = job.status === "paused";
     setBatchStatus(job.status);
     setManualRunCleared(false);
   }, []);
 
-  function togglePauseAutomation() {
-    setIsPaused((prev) => {
-      const next = !prev;
-      isPausedRef.current = next;
-      return next;
-    });
+  async function togglePauseAutomation() {
+    if (!currentJobId) return;
+    if (isPaused) {
+      setIsPaused(false);
+      isPausedRef.current = false;
+      try {
+        const resumedJob = await resumeBackgroundAutomationAction(currentJobId, workerCount);
+        if (resumedJob) applyBackgroundJob(resumedJob);
+      } catch (err) {
+        console.error("Resume error:", err);
+      }
+    } else {
+      setIsPaused(true);
+      isPausedRef.current = true;
+      try {
+        const pausedJob = await pauseBackgroundAutomationAction(currentJobId);
+        if (pausedJob) applyBackgroundJob(pausedJob);
+      } catch (err) {
+        console.error("Pause error:", err);
+      }
+    }
   }
 
   useEffect(() => {
@@ -1100,10 +1119,10 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         const job = await getBackgroundAutomationAction(jobId).catch(() => null);
         if (stopped || sessionEpochRef.current !== epoch) return;
         if (job) applyBackgroundJob(job);
-        if (!job || job.status !== "running") return;
+        if (!job || (job.status !== "running" && job.status !== "paused")) return;
 
-        // If no workers are actively discovering/running, make sure the local worker pool is started
-        if (!job.items.some((item) => item.status === "discovering")) {
+        // If no workers are actively discovering/running and job is running, make sure the local worker pool is started
+        if (job.status === "running" && !job.items.some((item) => item.status === "discovering")) {
           void processLocalBackgroundAutomationAction(jobId, workerCount)
             .then((resumedJob) => {
               if (!stopped && sessionEpochRef.current === epoch && resumedJob) applyBackgroundJob(resumedJob);
@@ -1118,18 +1137,40 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
   }, [applyBackgroundJob, currentJobId, isBatchRunning, workerCount]);
 
   async function submitWorkflow(event: FormEvent<HTMLFormElement>) {
-    if (!processingAllUploaded) {
-      setManualRunCleared(false);
-      openMonitorTab(event.currentTarget);
-      return;
-    }
-
     event.preventDefault();
     if (isBatchRunning) return;
 
+    openMonitorTab(event.currentTarget);
+
     const epoch = ++sessionEpochRef.current;
     const baseFormData = new FormData(event.currentTarget);
-    const initialItems = batchWebsites.map((website) => ({
+
+    let targetList: Array<{ id: string; websiteName: string; websiteUrl: string }> = [];
+    if (processingAllUploaded) {
+      targetList = batchWebsites.map((w) => ({ id: w.id, websiteName: w.websiteName, websiteUrl: w.websiteUrl }));
+      baseFormData.set("websiteIds", JSON.stringify(batchWebsites.map((website) => website.id)));
+    } else if (usingUploadedWebsite) {
+      const selected = websites.find((w) => w.id === selectedWebsiteId);
+      if (selected) {
+        targetList = [{ id: selected.id, websiteName: selected.websiteName, websiteUrl: selected.websiteUrl }];
+        baseFormData.set("websiteIds", JSON.stringify([selected.id]));
+      }
+    } else {
+      const manualUrl = websiteUrl.trim();
+      targetList = [{ id: "manual-target", websiteName: manualUrl || "Manual URL", websiteUrl: manualUrl }];
+      baseFormData.set("websiteIds", "[]");
+      baseFormData.set("websiteUrl", manualUrl);
+      if (directContactUrl.trim()) {
+        baseFormData.set("directContactUrl", directContactUrl.trim());
+      }
+    }
+
+    if (targetList.length === 0 || !targetList[0].websiteUrl) {
+      alert("Please select an uploaded website or enter a valid URL.");
+      return;
+    }
+
+    const initialItems = targetList.map((website) => ({
       id: website.id,
       name: website.websiteName,
       url: website.websiteUrl,
@@ -1140,11 +1181,12 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
     setJobStartedAt(Date.now());
     setClock(Date.now());
     setIsBatchRunning(true);
+    setIsPaused(false);
+    isPausedRef.current = false;
     setBatchStatus("running");
     cancelledJobId.current = null;
     setManualRunCleared(false);
 
-    baseFormData.set("websiteIds", JSON.stringify(batchWebsites.map((website) => website.id)));
     baseFormData.set("workerCount", String(workerCount));
     try {
       const job = await startBackgroundAutomationAction(baseFormData);

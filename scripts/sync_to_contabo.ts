@@ -56,10 +56,32 @@ conn.on('ready', () => {
       conn.end();
       process.exit(code || 0);
     });
+});
+
+let attempts = 0;
+function connectWithRetry() {
+  attempts++;
+  console.log(`[SSH] Connecting to Contabo VPS (94.72.119.156) [Attempt ${attempts}/3]...`);
+  conn.connect({
+    host: '94.72.119.156',
+    port: 22,
+    username: 'root',
+    password: 'kadar786',
+    readyTimeout: 40000,
+    keepaliveInterval: 10000
   });
-}).on('error', (err) => {
+}
+
+conn.on('error', (err) => {
   console.log('VPS SSH warning:', err.message);
-  clearTimeout(timeout);
-  conn.end();
-  process.exit(1);
-}).connect({ host: '94.72.119.156', port: 22, username: 'root', password: 'kadar786', readyTimeout: 15000 });
+  if (attempts < 3) {
+    console.log('Retrying connection in 3 seconds...');
+    setTimeout(connectWithRetry, 3000);
+  } else {
+    clearTimeout(timeout);
+    conn.end();
+    process.exit(1);
+  }
+});
+
+connectWithRetry();

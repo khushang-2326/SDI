@@ -385,9 +385,7 @@ async function fillHubSpotForm(page: Page, leadData: LeadData) {
     companyFilled ? filledFields.push("companyName") : skippedFields.push("companyName");
   }
 
-  const message = [leadData.message, leadData.address ? `Address: ${leadData.address}` : null]
-    .filter(Boolean)
-    .join("\n");
+  const message = (leadData.message || "").trim();
 
   if (message) {
     const messageFilled = await fillFirstAvailable(

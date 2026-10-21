@@ -32,9 +32,11 @@ export type MultiTargetRunResult = {
   checkedUrls: string[];
   targets: DiscoveredSubmissionTarget[];
   attempts: MultiTargetAttemptResult[];
+  screenshotPath?: string | null;
 };
 
 export type MultiTargetCallbacks = {
+  onProgress?: (step: "website_load" | "form_found" | "fill_form" | "submit_form" | "take_screenshot", detail: string, screenshotPath?: string | null) => Promise<void> | void;
   onTargetsDiscovered?: (targets: DiscoveredSubmissionTarget[], reason: string) => Promise<void>;
   onAttemptStarted?: (target: DiscoveredSubmissionTarget) => Promise<void>;
   onAttemptFinished?: (attempt: MultiTargetAttemptResult) => Promise<void>;
@@ -100,7 +102,8 @@ async function executeTarget({
   liveSubmit,
   browserContext,
   userId,
-  timeoutMs
+  timeoutMs,
+  onProgress
 }: {
   target: DiscoveredSubmissionTarget;
   leadData: LeadData;
@@ -109,6 +112,7 @@ async function executeTarget({
   browserContext: BrowserContext;
   userId?: string;
   timeoutMs: number;
+  onProgress?: MultiTargetCallbacks["onProgress"];
 }) {
   if (target.targetType === "calendly") {
     return submitCalendlyBooking({
@@ -129,7 +133,8 @@ async function executeTarget({
       browserContext,
       skipPersist: true,
       userId,
-      timeoutMs
+      timeoutMs,
+      onProgress
     });
     // A URL can be labelled "contact" while rendering an inline booking
     // scheduler. Continue through the generic scheduler rather than treating
@@ -305,7 +310,8 @@ export async function runMultiTargetAutomation({
             liveSubmit,
             browserContext: activeContext,
             userId,
-            timeoutMs: attemptBudgetMs
+            timeoutMs: attemptBudgetMs,
+            onProgress: callbacks.onProgress
           }),
           attemptBudgetMs + 1000,
           `Target ${target.url}`
@@ -337,7 +343,8 @@ export async function runMultiTargetAutomation({
                 liveSubmit,
                 browserContext: activeContext,
                 userId,
-                timeoutMs: Math.min(attemptBudgetMs, remainingForRecovery - 3000)
+                timeoutMs: Math.min(attemptBudgetMs, remainingForRecovery - 3000),
+                onProgress: callbacks.onProgress
               }),
               attemptBudgetMs + 1000,
               `Recovered Target ${target.url}`
@@ -557,7 +564,8 @@ export async function runMultiTargetAutomation({
       timeoutMs: discoveryBudgetMs,
       browserContext,
       maxNavigationLinks: 6,
-      maxFallbackPaths: 3
+      maxFallbackPaths: 3,
+      onProgress: callbacks.onProgress
     });
     if (isProxyAuthenticationFailure(discovery.reason)) {
       encounteredProxyFailure = true;
@@ -670,6 +678,10 @@ export async function runMultiTargetAutomation({
     ).values()
   ).sort((a, b) => a.executionOrder - b.executionOrder || b.confidence - a.confidence);
 
+    const anySuccessfulAttempt = attempts.find((a) => isSuccessful(a.result));
+    const lastAttemptScreenshot = attempts.map((a) => a.result?.screenshotPath).filter(Boolean).at(-1);
+    const finalRunScreenshot = anySuccessfulAttempt?.result?.screenshotPath || lastAttemptScreenshot || discovery?.screenshotPath || null;
+
     return {
       discoveryReason: targetSucceeded
         ? `${discovery.reason} The first successful target was used and remaining targets were skipped.`
@@ -684,7 +696,8 @@ export async function runMultiTargetAutomation({
         ...executedFallbackTargets.map((target) => target.url)
       ])),
       targets,
-      attempts
+      attempts,
+      screenshotPath: finalRunScreenshot
     };
   } finally {
     stopDeadlineTimer();

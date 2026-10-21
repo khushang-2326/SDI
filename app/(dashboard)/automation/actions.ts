@@ -78,6 +78,7 @@ export type BackgroundAutomationJob = {
     url: string;
     status: "waiting" | "discovering" | "completed" | "failed" | "cancelled";
     detail: string;
+    screenshotPath?: string | null;
     result?: AutomationResult;
   }>;
 };
@@ -123,6 +124,7 @@ async function mapJobToBackgroundJob(dbJob: any): Promise<BackgroundAutomationJo
       url: res.targetWebsite.websiteUrl,
       status: mapResultStatusToBackground(res.status),
       detail: res.message || res.status,
+      screenshotPath: proofPath(res.screenshotPath),
       result: res.status === "Completed" || res.status === "Failed" ? {
         websiteUrl: res.targetWebsite.websiteUrl,
         resolvedUrl: res.targetWebsite.contactPageUrl || res.targetWebsite.websiteUrl,
@@ -217,18 +219,20 @@ export async function startBackgroundAutomationAction(formData: FormData) {
 
   // Find or create Lead
   const leadDataForSave = {
-    fullName: fieldsMap.get("fullName") || "Demo Lead",
-    mobileNumber: fieldsMap.get("mobile") || fieldsMap.get("mobileNumber") || "",
-    email: fieldsMap.get("email") || "demo@lead-auto-submitter.local",
-    address: fieldsMap.get("address") || "",
-    message: fieldsMap.get("message") || "",
-    companyName: fieldsMap.get("companyName") || "",
+    fullName: (fieldsMap.get("fullName") || "").trim(),
+    mobileNumber: (fieldsMap.get("mobile") || fieldsMap.get("mobileNumber") || fieldsMap.get("phone") || "").trim(),
+    email: (fieldsMap.get("email") || "").trim(),
+    address: (fieldsMap.get("address") || "").trim(),
+    message: (fieldsMap.get("message") || "").trim(),
+    companyName: (fieldsMap.get("companyName") || "").trim(),
     userId: user.id
   };
 
-  const existingLead = await prisma.lead.findFirst({
-    where: { userId: user.id, email: leadDataForSave.email }
-  });
+  const existingLead = leadDataForSave.email
+    ? await prisma.lead.findFirst({
+        where: { userId: user.id, email: leadDataForSave.email }
+      })
+    : null;
 
   const lead = existingLead
     ? await prisma.lead.update({ where: { id: existingLead.id }, data: leadDataForSave })

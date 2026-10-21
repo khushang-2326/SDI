@@ -75,6 +75,7 @@ export type SubmitContactFormInput = {
   headless?: boolean;
   submit?: boolean;
   timeoutMs?: number;
+  onProgress?: (step: "website_load" | "form_found" | "fill_form" | "submit_form" | "take_screenshot", detail: string, screenshotPath?: string | null) => Promise<void> | void;
 };
 
 export type SubmitContactFormResult = {
@@ -215,6 +216,7 @@ export type DiscoverSubmissionTargetInput = {
   timeoutMs?: number;
   maxNavigationLinks?: number;
   maxFallbackPaths?: number;
+  onProgress?: (step: "website_load" | "form_found" | "fill_form" | "submit_form" | "take_screenshot", detail: string, screenshotPath?: string | null) => Promise<void> | void;
 };
 
 export type DiscoverSubmissionTargetResult = {

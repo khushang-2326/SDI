@@ -2,6 +2,7 @@ import type { Locator, Page } from "playwright";
 
 export type SemanticFieldType =
   | "first_name"
+  | "middle_name"
   | "last_name"
   | "full_name"
   | "email"
@@ -108,9 +109,14 @@ const NEGATIVE_FIELD_PATTERN = /\b(password|passwd|pwd|passcode|site[-_]?search|
 // Compact normalized multilingual token patterns across EN, ES, FR, DE, IT, PT, NL
 const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegExp[]> = {
   first_name: [
-    /\b(first[ _-]?name|firstname|fname|f_name|given[ _-]?name|forename|your[ _-]?first[ _-]?name|your[ _-]?name|c_firstname|txtname|name_first|footer[-_]?first[-_]?name)\b/i,
+    /\b(first[ _-]?name|firstname|fname|f_name|given[ _-]?name|forename|your[ _-]?first[ _-]?name|c_firstname|txtname|name_first|footer[-_]?first[-_]?name)\b/i,
     /\b(prenom|vorname|nombre|nome|primeiro[ _-]?nome|voornaam)\b/i,
-    /(^|[ _-])(first-name|firstname|fname|f_name|given-name|forename|your-name|wpforms\[fields\]\[\d+\]\[first\])([ _-]|$)/i
+    /(^|[ _-])(first-name|firstname|fname|f_name|given-name|forename|wpforms\[fields\]\[\d+\]\[first\])([ _-]|$)/i
+  ],
+  middle_name: [
+    /\b(middle[ _-]?name|middlename|mname|m_name|middle[ _-]?initial|middle|second[ _-]?name)\b/i,
+    /\b(deuxieme[ _-]?nom|segundo[ _-]?nombre|secondo[ _-]?nome|tweede[ _-]?naam)\b/i,
+    /(^|[ _-])(middle-name|middlename|mname|m-initial)([ _-]|$)/i
   ],
   last_name: [
     /\b(last[ _-]?name|lastname|lname|l_name|surname|family[ _-]?name|your[ _-]?last[ _-]?name|your[ _-]?last|c_lastname|name_last)\b/i,
@@ -130,15 +136,15 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /(^|[ _-])(email|work-email|business-email|user-email|contact-email|lead-email|form_fields\[email.*\]|fields\[email.*\]|footer-email|newsletter_email)([ _-]|$)/i
   ],
   phone: [
-    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no|your[ _-]?phone|yourphone|mobile[ _-]?no|phonenumber|pn)\b/i,
+    /\b(phone|telephone|tel|mobile|cell|cellphone|contact[ _-]?number|phone[ _-]?number|mobile[ _-]?number|contact[ _-]?no|your[ _-]?phone|yourphone|mobile[ _-]?no|phonenumber|pn|whatsapp|whatsapp[ _-]?number|whats[ _-]?app|contact[ _-]?num)\b/i,
     /\b(telefon|telephone|telefono|numero[ _-]?telefono|celular|telefone|telefoonnummer)\b/i,
-    /(^|[ _-])(phone|mobile|telephone|tel|contact-phone|phone-number|mobile-number|form_fields\[phone.*\]|fields\[phone.*\]|your-phone|tel-\d+|phone-[0-9a-f-]+)([ _-]|$)/i
+    /(^|[ _-])(phone|mobile|telephone|tel|contact-phone|phone-number|mobile-number|form_fields\[phone.*\]|fields\[phone.*\]|your-phone|tel-\d+|phone-[0-9a-f-]+|whatsapp)([ _-]|$)/i
   ],
   company: [
-    /\b(company|business|organization|organisation|brand|firm|agency|enterprise|compañía|compania)\b/i,
-    /\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name|organization[ _-]?name|your[ _-]?company|businessname|companyname)\b/i,
+    /(?<!(name\s+of\s+|of\s+))\b(company[ _-]?name|business[ _-]?name|firm[ _-]?name|organization[ _-]?name|organisation[ _-]?name|your[ _-]?company|businessname|companyname|employer)\b/i,
+    /(?<!(address|street|addr|website|url|phone|tel|email|mail|size|employee)[ _-])\b(company|business|organization|organisation|brand|firm|agency|enterprise|compañía|compania)\b(?![ _-]?(address|street|addr|website|url|web|phone|tel|email|mail|size|employee|revenue))/i,
     /\b(societe|entreprise|unternehmen|firma|empresa|azienda|bedrijf|bedrijfsnaam)\b/i,
-    /(^|[ _-])(company|company-name|business-name|organization|firm|agency|0-1\/company)([ _-]|$)/i
+    /(^|[ _-])(company|company-name|business-name|organization|firm|agency|0-1\/company|employer|org)([ _-]|$)/i
   ],
   job_title: [
     /\b(job[ _-]?title|title|role|position|occupation|designation)\b/i,
@@ -149,9 +155,9 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /\b(site[ _-]?web|sitio[ _-]?web|webseite|siteweb)\b/i
   ],
   address: [
-    /\b(address|street|street[ _-]?address|addr|location|physical[ _-]?address|streetaddress|address1|address[ _-]?line[ _-]?1)\b/i,
+    /(?<!(email|e-mail|mail|web|site|ip)[ _-])\b(address|street|street[ _-]?address|addr|location|physical[ _-]?address|mailing[ _-]?address|business[ _-]?address|company[ _-]?address|streetaddress|address1|address[ _-]?line[ _-]?1)\b(?![ _-]?(of[ _-]?email|of[ _-]?web))/i,
     /\b(adresse|strasse|str\.|direccion|indirizzo|endereco|adres)\b/i,
-    /(^|[ _-])(address|street|street-address|address-line-1|address1|street_address)([ _-]|$)/i
+    /(^|[ _-])(address|street|street-address|address-line-1|address1|street_address|mailing-address|business-address)([ _-]|$)/i
   ],
   city: [
     /\b(city|town|municipality|suburb)\b/i,
@@ -230,15 +236,40 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
   ]
 };
 
-export function splitFullName(fullName?: string | null): { firstName: string; middleName: string; lastName: string } {
+export function splitFullName(fullName?: string | null): { firstName: string; middleName: string; lastName: string; pureLastName: string } {
   const parts = (fullName || "").trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return { firstName: "", middleName: "", lastName: "" };
-  if (parts.length === 1) return { firstName: parts[0], middleName: "", lastName: parts[0] };
-  if (parts.length === 2) return { firstName: parts[0], middleName: "", lastName: parts[1] };
+  if (parts.length === 0) return { firstName: "", middleName: "", lastName: "", pureLastName: "" };
+  if (parts.length === 1) return { firstName: parts[0], middleName: "", lastName: "", pureLastName: "" };
+  if (parts.length === 2) return { firstName: parts[0], middleName: "", lastName: parts[1], pureLastName: parts[1] };
+
+  const PREFIXES = new Set(["mr", "mr.", "mrs", "mrs.", "ms", "ms.", "miss", "dr", "dr.", "prof", "prof."]);
+  let startIdx = 0;
+  let firstName = "";
+  if (PREFIXES.has(parts[0].toLowerCase()) && parts.length > 2) {
+    firstName = `${parts[0]} ${parts[1]}`;
+    startIdx = 2;
+  } else {
+    firstName = parts[0];
+    startIdx = 1;
+  }
+
+  const remaining = parts.slice(startIdx);
+  if (remaining.length === 0) {
+    return { firstName, middleName: "", lastName: "", pureLastName: "" };
+  }
+  if (remaining.length === 1) {
+    return { firstName, middleName: "", lastName: remaining[0], pureLastName: remaining[0] };
+  }
+
+  const middleName = remaining.slice(0, -1).join(" ");
+  const pureLastName = remaining[remaining.length - 1];
+  const lastName = remaining.join(" ");
+
   return {
-    firstName: parts[0],
-    middleName: parts.slice(1, -1).join(" "),
-    lastName: parts[parts.length - 1]
+    firstName,
+    middleName,
+    lastName,
+    pureLastName
   };
 }
 
@@ -791,9 +822,17 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
       evidence.push("textarea with email label/placeholder");
       return { fieldType: "email", confidence: 0.92, evidence, isNegative: false };
     }
+    if (matchSynonyms(text, MULTILINGUAL_SYNONYMS.address) && !matchSynonyms(text, MULTILINGUAL_SYNONYMS.email) && !matchSynonyms(text, MULTILINGUAL_SYNONYMS.website)) {
+      evidence.push("textarea with address label/placeholder");
+      return { fieldType: "address", confidence: 0.95, evidence, isNegative: false };
+    }
     if (matchSynonyms(text, MULTILINGUAL_SYNONYMS.first_name)) {
       evidence.push("textarea with first name label/placeholder");
       return { fieldType: "first_name", confidence: 0.90, evidence, isNegative: false };
+    }
+    if (matchSynonyms(text, MULTILINGUAL_SYNONYMS.middle_name)) {
+      evidence.push("textarea with middle name label/placeholder");
+      return { fieldType: "middle_name", confidence: 0.90, evidence, isNegative: false };
     }
     if (matchSynonyms(text, MULTILINGUAL_SYNONYMS.last_name)) {
       evidence.push("textarea with last name label/placeholder");
@@ -834,10 +873,12 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
 
   const CANDIDATE_TYPES: Exclude<SemanticFieldType, "unknown" | "honeypot" | "consent" | "newsletter" | "attachment">[] = [
     "first_name",
+    "middle_name",
     "last_name",
     "full_name",
     "email",
     "phone",
+    "address",
     "company",
     "website",
     "subject",
@@ -846,7 +887,6 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
     "state",
     "postal_code",
     "country",
-    "address",
     "job_title",
     "budget",
     "service_interest",

@@ -2030,7 +2030,8 @@ async function discoverSubmissionTargetsInternal({
   timeoutMs = 8000,
   maxNavigationLinks = DEFAULT_MAX_NAVIGATION_LINKS,
   maxFallbackPaths = DEFAULT_MAX_FALLBACK_PATHS,
-  browserContext
+  browserContext,
+  onProgress
 }: DiscoverSubmissionTargetInput & { browserContext?: BrowserContext }): Promise<DiscoverSubmissionTargetsResult> {
   const normalizedWebsiteUrl = ensureUrl(websiteUrl);
   try {
@@ -2117,6 +2118,7 @@ async function discoverSubmissionTargetsInternal({
 
     let navResponse: any = null;
     let navError: any = null;
+    await onProgress?.("website_load", "Loading website...");
     const initialNav = await navigateForDiscovery(page, normalizedWebsiteUrl, timeoutMs, "any");
     navResponse = initialNav.navResponse;
     navError = initialNav.navError;
@@ -2126,14 +2128,19 @@ async function discoverSubmissionTargetsInternal({
     }
 
     if (initialNav.timedOut || (!initialNav.success && initialNav.readinessState === "NAVIGATION_TIMEOUT")) {
+      const timeoutScreenshot = await takeScreenshot(page, normalizedWebsiteUrl, "navigation-timeout").catch(() => null);
+      await onProgress?.("website_load", "Navigation to usable page timed out after 25 seconds (NAVIGATION_TIMEOUT)", timeoutScreenshot);
       return {
         websiteUrl: normalizedWebsiteUrl,
         targets: [],
         checkedUrls: [normalizedWebsiteUrl],
         reason: "Navigation to usable page timed out after 25 seconds (NAVIGATION_TIMEOUT).",
-        screenshotPath: await takeScreenshot(page, normalizedWebsiteUrl, "navigation-timeout").catch(() => null)
+        screenshotPath: timeoutScreenshot
       };
     }
+
+    await onProgress?.("website_load", "Website loaded successfully; searching for contact form...");
+    await onProgress?.("form_found", "Searching for contact form in Header, Footer, and Body...");
 
     const pageBodyText = await page.locator("body").innerText({ timeout: 1500 }).catch(() => "");
     if (isProxyAuthenticationFailure(null, navResponse?.status(), pageBodyText)) {
@@ -2541,6 +2548,13 @@ async function discoverSubmissionTargetsInternal({
     };
     console.log(`[CONTACT-DISCOVERY-DIAGNOSTIC] ${JSON.stringify(discoveryDiagnostic)}`);
 
+    const screenshotPath = targets[0]?.screenshotPath ?? await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null);
+    if (targets.length > 0) {
+      await onProgress?.("form_found", `Discovered ${targets.length} supported contact target${targets.length === 1 ? "" : "s"} (${targets[0].url})`, targets[0].screenshotPath);
+    } else {
+      await onProgress?.("form_found", "No supported contact form found on website", screenshotPath);
+    }
+
     return {
       websiteUrl: normalizedWebsiteUrl,
       targets,
@@ -2550,18 +2564,20 @@ async function discoverSubmissionTargetsInternal({
         : ((Date.now() - tStart >= timeoutMs - 500)
             ? `Website automation exceeded overall deadline budget of ${Math.round(timeoutMs / 1000)}s during target discovery.`
             : `No supported contact form found on the supplied page or relevant discovered pages.`),
-      screenshotPath: targets[0]?.screenshotPath ?? await takeScreenshot(page, normalizedWebsiteUrl, "target-not-found").catch(() => null)
+      screenshotPath
     };
   } catch (error) {
     if (isProxyAuthenticationFailure(error)) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
     }
+    const errScreenshot = page ? await takeScreenshot(page, normalizedWebsiteUrl, "discovery-error").catch(() => null) : null;
+    await onProgress?.("form_found", "Target discovery failed", errScreenshot);
     return {
       websiteUrl: normalizedWebsiteUrl,
       targets: Array.from(discovered.values()).sort((a, b) => a.executionOrder - b.executionOrder),
       checkedUrls,
       reason: redactProxyDetails(error instanceof Error ? error.message : "Unknown multi-target discovery error."),
-      screenshotPath: null
+      screenshotPath: errScreenshot
     };
   } finally {
     if (page && browserContext) await page.close().catch(() => undefined);

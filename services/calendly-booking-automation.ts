@@ -737,9 +737,7 @@ async function fillCalendlyForm(frame: CalendlyScope, leadData: LeadData) {
   }
 
   // 5. Message / Notes / Additional Questions
-  const message = [leadData.message, leadData.address ? `Address: ${leadData.address}` : null]
-    .filter(Boolean)
-    .join("\n");
+  const message = (leadData.message || "").trim();
 
   if (message) {
     const messageFilled = await fillFirstAvailable(

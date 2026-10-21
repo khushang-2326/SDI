@@ -82,7 +82,6 @@ type FormScope = Page | Locator;
 
 const SCREENSHOT_DIR = path.join(process.cwd(), "public", "screenshots");
 const DEMO_USER_EMAIL = "demo@lead-auto-submitter.local";
-const REQUIRED_TEXT_FALLBACK = "Seo management";
 const NAME_FIELD_PATTERN = /(?:full[ _-]?name|first[ _-]?name|firstname|fname|given[ _-]?name|middle[ _-]?name|middlename|mname|last[ _-]?name|lastname|lname|surname|family[ _-]?name)/i;
 
 const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
@@ -96,11 +95,11 @@ const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
     "contact name"
   ],
   email: ["email", "e-mail", "mail", "email address", "work email", "email_address", "emailaddress"],
-  mobile: ["phone", "mobile", "telephone", "tel", "cell", "contact number", "phone number", "mobile number", "cell phone", "work phone", "phonenumber"],
+  mobile: ["phone", "mobile", "telephone", "tel", "cell", "contact number", "phone number", "mobile number", "cell phone", "work phone", "phonenumber", "whatsapp", "whatsapp number"],
   city: ["city", "town", "municipality"],
-  address: ["address", "street", "state", "zip", "postal"],
+  address: ["address", "street", "street address", "mailing address", "physical address", "business address", "addr"],
   message: ["message", "comment", "comments", "details", "description", "note", "enquiry", "inquiry", "how can we help", "project details", "brief", "tell us about"],
-  companyName: ["company", "business", "organization", "organisation", "brand", "company name", "business name", "firm"],
+  companyName: ["company", "business", "organization", "organisation", "brand", "company name", "business name", "firm", "employer"],
   website: ["website", "web site", "url", "domain", "company website", "site url", "web page", "web address"],
   jobTitle: ["job title", "title", "role", "position", "occupation"]
 };
@@ -108,16 +107,13 @@ const FIELD_KEYWORDS: Record<FieldKey, string[]> = {
 const FIELD_VALUES: Record<FieldKey, (leadData: LeadData) => string | undefined> = {
   fullName: (leadData) => leadData.fullName,
   email: (leadData) => leadData.email,
-  mobile: (leadData) => leadData.mobile ?? leadData.mobileNumber,
-  city: () => "New York",
+  mobile: (leadData) => leadData.mobile ?? leadData.mobileNumber ?? leadData.phone,
+  city: (leadData) => leadData.city,
   address: (leadData) => leadData.address,
   message: (leadData) => leadData.message,
   companyName: (leadData) => leadData.companyName,
-  website: (leadData) => {
-    const raw = leadData.companyName?.toLowerCase().replace(/[^a-z0-9]/g, "") || "example";
-    return `https://${raw}.com`;
-  },
-  jobTitle: () => "Business Owner"
+  website: (leadData) => leadData.website,
+  jobTitle: (leadData) => leadData.jobTitle
 };
 
 function normalizeStatus(status: SubmitContactFormResult["status"]) {
@@ -578,6 +574,12 @@ async function selectFirstRealOption(locator: Locator): Promise<boolean> {
   const targetIdx = await locator.evaluate((element) => {
     const select = element as HTMLSelectElement;
     if (!select || select.tagName.toLowerCase() !== "select") return -1;
+
+    // Do not make arbitrary selections for sensitive, legal, or high-risk declarations
+    const combinedDesc = `${select.name || ""} ${select.id || ""} ${select.getAttribute("aria-label") || ""}`.toLowerCase();
+    const isSensitive = /(payment|credit[ _-]?card|pay\b|waiver|liability|legally[ _-]?binding|billing[ _-]?authori)/i.test(combinedDesc);
+    if (isSensitive) return -1;
+
     const pPattern = /^(select|choose|please\s+(select|choose)|which|pick\s+an?|--|none\b|0\b|^$)/i;
     const isRealOption = (option: HTMLOptionElement) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim();
@@ -710,7 +712,7 @@ async function reVerifyAndSelfHealFilledFields(
   return healedCount;
 }
 
-async function selectRequiredRadioDefaults(scope: FormScope) {
+export async function selectRequiredRadioDefaults(scope: FormScope) {
   const radios = scope.locator("input[type='radio']");
   const count = await radios.count().catch(() => 0);
   const groups = new Map<string, Locator>();
@@ -718,12 +720,32 @@ async function selectRequiredRadioDefaults(scope: FormScope) {
   for (let index = 0; index < count; index++) {
     const radio = radios.nth(index);
     if (!(await radio.isVisible().catch(() => false)) || !(await radio.isEnabled().catch(() => false))) continue;
-    const metadata = await radio.evaluate((element) => ({
-      name: (element as HTMLInputElement).name,
-      required: (element as HTMLInputElement).required || element.getAttribute("aria-required") === "true" || (element as HTMLInputElement).matches(":invalid")
-    })).catch(() => ({ name: "", required: false }));
+    const metadata = await radio.evaluate((element) => {
+      const input = element as HTMLInputElement;
+      const fieldset = input.closest("fieldset");
+      const container = input.closest(".form-group, .gfield, .elementor-field-group, .field, div");
+      const isReq = Boolean(
+        input.required ||
+        input.getAttribute("aria-required") === "true" ||
+        input.matches(":invalid") ||
+        fieldset?.classList.contains("required") ||
+        fieldset?.getAttribute("aria-required") === "true" ||
+        container?.classList.contains("required") ||
+        container?.getAttribute("aria-required") === "true" ||
+        (fieldset?.textContent || "").includes("*") ||
+        (container?.textContent || "").includes("*")
+      );
+      return {
+        name: input.name,
+        required: isReq,
+        checked: input.checked
+      };
+    }).catch(() => ({ name: "", required: false, checked: false }));
+
     const groupKey = metadata.name || `radio_unnamed_${index}`;
-    if (metadata.required && !groups.has(groupKey)) groups.set(groupKey, radio);
+    if (metadata.required && !groups.has(groupKey) && !metadata.checked) {
+      groups.set(groupKey, radio);
+    }
   }
 
   const filled: string[] = [];
@@ -747,51 +769,6 @@ async function selectRequiredRadioDefaults(scope: FormScope) {
     }
     if (checked) filled.push(`radio:${name}`);
   }
-  return filled;
-}
-
-async function fillRemainingRequiredTextFields(
-  fields: Locator,
-  candidates: FieldCandidate[],
-  usedIndexes: Set<number>
-) {
-  const filled: string[] = [];
-
-  for (const candidate of candidates) {
-    if (usedIndexes.has(candidate.index)) continue;
-    if (candidate.tagName !== "textarea" && candidate.tagName !== "input") continue;
-
-    // A person's name must always come from the lead name mapping below,
-    // never from the generic service-description fallback.
-    if (NAME_FIELD_PATTERN.test(candidate.descriptor)) continue;
-
-    // Do not put generic text into structured controls. Known fields are
-    // handled above, while browser validation rejects this value for these
-    // input types.
-    if (["email", "tel", "number", "date", "time", "url", "file", "password"].includes(candidate.type)) continue;
-
-    const field = fields.nth(candidate.index);
-    const isRequired = await field
-      .evaluate((element) => {
-        const control = element as HTMLInputElement | HTMLTextAreaElement;
-        return control.required || control.getAttribute("aria-required") === "true";
-      })
-      .catch(() => false);
-    if (!isRequired) continue;
-
-    const existingValue = await field.inputValue().catch(() => "");
-    if (existingValue.trim()) {
-      usedIndexes.add(candidate.index);
-      continue;
-    }
-
-    const didFill = await safelyFillField(field, REQUIRED_TEXT_FALLBACK).catch(() => false);
-    if (didFill) {
-      usedIndexes.add(candidate.index);
-      filled.push(`required:${candidate.index}`);
-    }
-  }
-
   return filled;
 }
 
@@ -861,7 +838,7 @@ async function selectCustomDropdownDefaults(scope: FormScope) {
   return filled;
 }
 
-async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise<{
+export async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise<{
   filledFields: string[];
   skippedFields: string[];
   metrics: FormFillMetrics;
@@ -938,16 +915,22 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     skippedFields.push("email");
   }
 
-  // 2. Name Handling (First Name, Last Name, Full Name)
+  // 2. Name Handling (First Name, Middle Name, Last Name, Full Name)
   const nameParts = splitFullName(leadData.fullName || "");
   const userFirstName = (leadData.firstName || nameParts.firstName || "").trim();
-  const userLastName = (leadData.lastName || nameParts.lastName || "").trim();
-  const userFullName = (leadData.fullName || (userFirstName && userLastName ? `${userFirstName} ${userLastName}` : userFirstName || userLastName || "")).trim();
+  const userMiddleName = (leadData.middleName || nameParts.middleName || "").trim();
+  const userFullName = (leadData.fullName || (userFirstName && nameParts.lastName ? `${userFirstName} ${nameParts.lastName}` : userFirstName || "")).trim();
 
   const firstNameCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "first_name")
+    .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  const middleNameCandidates = signals
+    .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
+    .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
+    .filter((item) => !item.cls.isNegative && item.cls.fieldType === "middle_name")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
   const lastNameCandidates = signals
@@ -965,15 +948,24 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
   if (firstNameCandidates.length > 0 && userFirstName) {
     await tryFillFieldCandidates(firstNameCandidates, "first_name", "firstName", userFirstName, "USER_DATA");
   }
-  if (lastNameCandidates.length > 0 && userLastName) {
-    await tryFillFieldCandidates(lastNameCandidates, "last_name", "lastName", userLastName, "USER_DATA");
+
+  let finalLastName = (leadData.lastName || nameParts.lastName || "").trim();
+  if (middleNameCandidates.length > 0 && userMiddleName) {
+    const didFillMiddle = await tryFillFieldCandidates(middleNameCandidates, "middle_name", "middleName", userMiddleName, "USER_DATA");
+    if (didFillMiddle && !leadData.lastName && nameParts.pureLastName) {
+      finalLastName = nameParts.pureLastName;
+    }
+  }
+
+  if (lastNameCandidates.length > 0 && finalLastName) {
+    await tryFillFieldCandidates(lastNameCandidates, "last_name", "lastName", finalLastName, "USER_DATA");
   }
 
   // If there are remaining full name candidates
   const unmappedFull = fullNameCandidates.filter((c) => !usedIndexes.has(c.signal.index));
-  if (unmappedFull.length >= 2 && userFirstName && userLastName) {
+  if (unmappedFull.length >= 2 && userFirstName && finalLastName) {
     await fillSignal(unmappedFull[0].signal, "first_name", "firstName", userFirstName, unmappedFull[0].cls.confidence, unmappedFull[0].cls.evidence, "USER_DATA");
-    await fillSignal(unmappedFull[1].signal, "last_name", "lastName", userLastName, unmappedFull[1].cls.confidence, unmappedFull[1].cls.evidence, "USER_DATA");
+    await fillSignal(unmappedFull[1].signal, "last_name", "lastName", finalLastName, unmappedFull[1].cls.confidence, unmappedFull[1].cls.evidence, "USER_DATA");
   } else if (unmappedFull.length > 0 && userFullName) {
     await tryFillFieldCandidates(unmappedFull, "full_name", "fullName", userFullName, "USER_DATA");
   }
@@ -1021,8 +1013,7 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
   }
 
   // 6. Website
-  const rawCo = (leadData.companyName || leadData.company || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const websiteValue = (leadData.website || (rawCo ? `https://${rawCo}.com` : "")).trim();
+  const websiteValue = (leadData.website || leadData.websiteUrl || "").trim();
   const websiteCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -1030,7 +1021,9 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
   if (websiteValue && websiteCandidates.length > 0) {
-    await tryFillFieldCandidates(websiteCandidates, "website", "website", websiteValue, leadData.website ? "USER_DATA" : "FALLBACK_DATA");
+    await tryFillFieldCandidates(websiteCandidates, "website", "website", websiteValue, "USER_DATA");
+  } else if (websiteCandidates.length > 0) {
+    skippedFields.push("website");
   }
 
   // 7. Subject
@@ -1041,9 +1034,10 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "subject")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (subjectCandidates.length > 0) {
-    const sValue = subjectVal || "General Inquiry";
-    await tryFillFieldCandidates(subjectCandidates, "subject", "subject", sValue, subjectVal ? "USER_DATA" : "FALLBACK_DATA");
+  if (subjectVal && subjectCandidates.length > 0) {
+    await tryFillFieldCandidates(subjectCandidates, "subject", "subject", subjectVal, "USER_DATA");
+  } else if (subjectCandidates.length > 0) {
+    skippedFields.push("subject");
   }
 
   // 8. City
@@ -1170,10 +1164,11 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "postal_code")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
 
-  if (zipCandidates.length > 0) {
+  if (zipCandidates.length > 0 && userPostal) {
     const best = zipCandidates[0];
-    const zipVal = userPostal || "10001";
-    await fillSignal(best.signal, "postal_code", "postalCode", zipVal, best.cls.confidence, best.cls.evidence, userPostal ? "USER_DATA" : "FALLBACK_DATA");
+    await fillSignal(best.signal, "postal_code", "postalCode", userPostal, best.cls.confidence, best.cls.evidence, "USER_DATA");
+  } else if (zipCandidates.length > 0) {
+    skippedFields.push("postal_code");
   }
 
   // 8f. Job Title / Role
@@ -1191,9 +1186,10 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       await selectFirstRealOption(loc).catch(() => undefined);
       usedIndexes.add(best.signal.index);
       filledFields.push("job_title");
+    } else if (userJob) {
+      await fillSignal(best.signal, "job_title", "jobTitle", userJob, best.cls.confidence, best.cls.evidence, "USER_DATA");
     } else {
-      const jobVal = userJob || "Manager";
-      await fillSignal(best.signal, "job_title", "jobTitle", jobVal, best.cls.confidence, best.cls.evidence, userJob ? "USER_DATA" : "FALLBACK_DATA");
+      skippedFields.push("job_title");
     }
   }
 
@@ -1404,11 +1400,13 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
       continue;
     }
     if (signal.type === "tel" || /phone|mobile|tel/i.test(signal.name || signal.id || "")) {
-      const pVal = leadData.mobile || leadData.mobileNumber || leadData.phone || "2125550199";
-      const fillRes = await safelyFillField(loc, pVal).catch(() => ({ success: false, verified: false, actualValue: undefined }));
-      if (fillRes.success) {
-        usedIndexes.add(signal.index);
-        filledFields.push(`required_phone:${signal.index}`);
+      const pVal = (leadData.mobile || leadData.mobileNumber || leadData.phone || "").trim();
+      if (pVal) {
+        const fillRes = await safelyFillField(loc, pVal).catch(() => ({ success: false, verified: false, actualValue: undefined }));
+        if (fillRes.success) {
+          usedIndexes.add(signal.index);
+          filledFields.push(`required_phone:${signal.index}`);
+        }
       }
       continue;
     }
@@ -1458,21 +1456,25 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
 
     // Semantic check: check if the unmapped required text field can be safely mapped to a known semantic category
-    const fieldDescriptor = [
+    const localDescriptor = [
       signal.name,
       signal.id,
       signal.placeholder,
       signal.explicitLabel,
       signal.ariaLabel,
       signal.surroundingLabel,
+      ...(signal.associatedLabels || [])
+    ].filter(Boolean).join(" ").toLowerCase();
+
+    const fullContainerDescriptor = [
+      localDescriptor,
       signal.precedingSiblingText,
       signal.followingSiblingText,
-      signal.parentContainerText,
-      ...(signal.associatedLabels || [])
+      signal.parentContainerText
     ].filter(Boolean).join(" ").toLowerCase();
     
     // 10a. Math & Anti-spam text challenges (e.g. 3+4=?, "enter: seo", "What color is the sky?")
-    const challengeAnswer = solveMathOrSpamChallenge(fieldDescriptor);
+    const challengeAnswer = solveMathOrSpamChallenge(fullContainerDescriptor);
     if (challengeAnswer !== null) {
       const fillRes = await safelyFillField(loc, challengeAnswer).catch(() => ({ success: false, verified: false, actualValue: undefined }));
       if (fillRes.success) {
@@ -1493,78 +1495,40 @@ async function fillDetectedFields(scope: FormScope, leadData: LeadData): Promise
     }
 
     let safeValue: string | null = null;
-    let telemetrySource: "USER_DATA" | "FALLBACK_DATA" = "FALLBACK_DATA";
+    let telemetrySource: "USER_DATA" | "FALLBACK_DATA" = "USER_DATA";
 
-    if (/\b(name|first|last|fname|lname|your-name|surname)\b/i.test(fieldDescriptor)) {
-      safeValue = nameParts.firstName || leadData.firstName || leadData.fullName || "John";
-      telemetrySource = (nameParts.firstName || leadData.firstName || leadData.fullName) ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(email|e-mail)\b/i.test(fieldDescriptor) || signal.type === "email") {
-      safeValue = leadData.email;
-      telemetrySource = "USER_DATA";
-    } else if (/\b(phone|mobile|tel|contact[ _-]?number|enter[ _-]?number|phone[ _-]?number)\b/i.test(fieldDescriptor) || signal.name === "number" || signal.type === "tel") {
-      safeValue = leadData.mobile || leadData.mobileNumber || leadData.phone || "2125550199";
-      telemetrySource = (leadData.mobile || leadData.mobileNumber || leadData.phone) ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(city|town)\b/i.test(fieldDescriptor)) {
-      safeValue = userCity || "New York";
-      telemetrySource = userCity ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(zip|postal|zip-code)\b/i.test(fieldDescriptor) || signal.type === "number") {
-      safeValue = userPostal || "10001";
-      telemetrySource = userPostal ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(state|province|region)\b/i.test(fieldDescriptor)) {
-      safeValue = userState || "New York";
-      telemetrySource = userState ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(country|nation)\b/i.test(fieldDescriptor)) {
-      safeValue = userCountry || "United States";
-      telemetrySource = userCountry ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(company|business|organization|organisation|firm|agency|enterprise)\b/i.test(fieldDescriptor)) {
-      safeValue = leadData.companyName || (leadData as any).company || "Test Company";
-      telemetrySource = (leadData.companyName || (leadData as any).company) ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(budget|monthly[ _-]?budget|project[ _-]?budget|price|investment)\b/i.test(fieldDescriptor)) {
-      safeValue = userBudget || "5000";
-      telemetrySource = userBudget ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(dollar|client[ _-]?value|revenue|deal[ _-]?size|order[ _-]?value|amount)\b/i.test(fieldDescriptor)) {
-      safeValue = "$5,000";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(specialty|practice|category|department)\b/i.test(fieldDescriptor)) {
-      safeValue = "General";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(service|services|interest|interested|services?[ _-]?of[ _-]?interest|preferred[ _-]?service)\b/i.test(fieldDescriptor)) {
-      safeValue = userService || "Web Design & Digital Marketing";
-      telemetrySource = userService ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(hear|find|source|referral|how[ _-]?did[ _-]?you)\b/i.test(fieldDescriptor)) {
-      safeValue = userSource || "Google Search";
-      telemetrySource = userSource ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(industry|sector|vertical)\b/i.test(fieldDescriptor)) {
-      safeValue = userIndustry || "Technology";
-      telemetrySource = userIndustry ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(title|role|position|occupation)\b/i.test(fieldDescriptor)) {
-      safeValue = userJob || "Manager";
-      telemetrySource = userJob ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (/\b(how\s+many\s+products|products|items|sku|inventory)\b/i.test(fieldDescriptor)) {
-      safeValue = "1-100";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(how\s+many|quantity|count)\b/i.test(fieldDescriptor)) {
-      safeValue = "1-10";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(years\s+in\s+business|how\s+long\s+in\s+business|experience|business[ _-]?years)\b/i.test(fieldDescriptor)) {
-      safeValue = "5+";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(friend|colleague|partner|referrer)\b/i.test(fieldDescriptor)) {
-      safeValue = nameParts.firstName || "Alex";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(deadline|timeframe|timeline|when\s+to\s+start)\b/i.test(fieldDescriptor)) {
-      safeValue = "As soon as possible";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(hour|preferred[ _-]?time|time|best\s+time)\b/i.test(fieldDescriptor) || signal.type === "time") {
-      safeValue = "10:00 AM";
-      telemetrySource = "FALLBACK_DATA";
-    } else if (/\b(message|comment|note|details|inquiry|subject|feedback|description|question|brief|help|needs|goals|solutions|project\s+goals|objective|tell\s+us\s+how|why\s+are\s+you\s+reaching|about\s+project|project\s+description|requirement)\b/i.test(fieldDescriptor) || signal.tagName === "textarea") {
-      safeValue = leadData.message || leadData.subject || "General Inquiry";
-      telemetrySource = (leadData.message || leadData.subject) ? "USER_DATA" : "FALLBACK_DATA";
-    } else if (signal.isRequired && (signal.type === "text" || !signal.type)) {
-      // Universal safe fallback for unmapped required text fields without domain semantics
-      safeValue = leadData.subject || "Partnership Inquiry";
-      telemetrySource = "FALLBACK_DATA";
+    if (/\b(first[ _-]?name|firstname|fname|given)\b/i.test(localDescriptor)) {
+      safeValue = userFirstName || null;
+    } else if (/\b(middle[ _-]?name|middlename|mname)\b/i.test(localDescriptor)) {
+      safeValue = userMiddleName || null;
+    } else if (/\b(last[ _-]?name|lastname|lname|surname|family)\b/i.test(localDescriptor)) {
+      safeValue = finalLastName || null;
+    } else if (/\b(name|your-name|full[ _-]?name)\b/i.test(localDescriptor)) {
+      safeValue = userFullName || userFirstName || null;
+    } else if (/\b(email|e-mail)\b/i.test(localDescriptor) || signal.type === "email") {
+      safeValue = leadData.email ? leadData.email.trim() : null;
+    } else if (/\b(phone|mobile|tel|contact[ _-]?number|enter[ _-]?number|phone[ _-]?number|whatsapp)\b/i.test(localDescriptor) || signal.name === "number" || signal.type === "tel") {
+      safeValue = phoneVal || null;
+    } else if (/\b(address|street|addr|physical[ _-]?address|mailing[ _-]?address)\b/i.test(localDescriptor)) {
+      safeValue = userAddress || null;
+    } else if (/\b(city|town)\b/i.test(localDescriptor)) {
+      safeValue = userCity || null;
+    } else if (/\b(zip|postal|zip-code)\b/i.test(localDescriptor)) {
+      safeValue = userPostal || null;
+    } else if (/\b(state|province|region)\b/i.test(localDescriptor)) {
+      safeValue = userState || null;
+    } else if (/\b(country|nation)\b/i.test(localDescriptor)) {
+      safeValue = userCountry || null;
+    } else if (/\b(company|business|organization|organisation|firm|agency|enterprise|employer)\b/i.test(localDescriptor)) {
+      safeValue = companyVal || null;
+    } else if (/\b(website|url|web[ _-]?address)\b/i.test(localDescriptor) || signal.type === "url") {
+      safeValue = (leadData.website || leadData.websiteUrl || "").trim() || null;
+    } else if (/\b(subject|topic|title)\b/i.test(localDescriptor)) {
+      safeValue = subjectVal || null;
+    } else if (/\b(title|role|position|occupation)\b/i.test(localDescriptor)) {
+      safeValue = userJob || null;
+    } else if (/\b(message|comment|note|details|inquiry|feedback|description|question|brief|help|needs|goals|solutions|project\s+goals|objective|tell\s+us\s+how|why\s+are\s+you\s+reaching|about\s+project|project\s+description|requirement)\b/i.test(localDescriptor) || signal.tagName === "textarea") {
+      safeValue = messageVal || null;
     }
 
     // If safeValue could not be safely derived from generic text, location, or contact info:
@@ -2042,6 +2006,11 @@ export async function sweepAndCheckPreSubmitCheckboxes(
 
         if (!info || info.isChecked || seenHandles.has(info.fingerprint)) continue;
         seenHandles.add(info.fingerprint);
+
+        const isMarketingOrNewsletter = /\b(newsletter|marketing|promo|promotions|promotional|discount|offers|subscribe|subscription|third[ _-]?party)\b/i.test(info.fullText);
+        if (!info.isRequired && isMarketingOrNewsletter) {
+          continue; // Never check optional marketing or newsletter checkboxes
+        }
 
         const isPolicyOrConsent = CONSENT_PATTERN.test(info.fullText);
         if (info.isRequired || isPolicyOrConsent) {
@@ -3023,31 +2992,38 @@ export async function validateFormBeforeSubmission(
 
         // 4. Input / Textarea
         let fillVal = "";
+        const nameParts = (leadDataArg.fullName || "").trim().split(/\s+/).filter(Boolean);
+        const derivedFirstName = leadDataArg.firstName || (nameParts.length > 0 ? nameParts[0] : "");
+        const derivedLastName = leadDataArg.lastName || (nameParts.length > 1 ? nameParts.slice(1).join(" ") : "");
+
         if (type === "email" || nameOrId.includes("email")) {
-          fillVal = leadDataArg.email || "hello@example.com";
-        } else if (type === "tel" || nameOrId.includes("phone") || nameOrId.includes("tel") || nameOrId.includes("mobile") || nameOrId.includes("pn")) {
-          fillVal = leadDataArg.mobile || leadDataArg.phone || "2125550199";
-        } else if (nameOrId.includes("first") || nameOrId.includes("fname")) {
-          fillVal = leadDataArg.firstName || (leadDataArg.fullName ? leadDataArg.fullName.split(" ")[0] : "John");
-        } else if (nameOrId.includes("last") || nameOrId.includes("lname")) {
-          const parts = (leadDataArg.fullName || "").split(" ").filter(Boolean);
-          fillVal = leadDataArg.lastName || (parts.length > 1 ? parts.slice(1).join(" ") : parts[0]) || "Doe";
-        } else if (nameOrId.includes("name")) {
-          fillVal = leadDataArg.fullName || "John Doe";
-        } else if (nameOrId.includes("company") || nameOrId.includes("organization") || nameOrId.includes("business")) {
-          fillVal = leadDataArg.companyName || leadDataArg.company || "Acme Corp";
+          fillVal = leadDataArg.email || "";
+        } else if (type === "tel" || nameOrId.includes("phone") || nameOrId.includes("tel") || nameOrId.includes("mobile") || nameOrId.includes("whatsapp") || nameOrId.includes("contact_number") || nameOrId.includes("pn")) {
+          fillVal = leadDataArg.mobile || leadDataArg.mobileNumber || leadDataArg.phone || "";
+        } else if (nameOrId.includes("first") || nameOrId.includes("fname") || nameOrId.includes("given")) {
+          fillVal = derivedFirstName;
+        } else if (nameOrId.includes("last") || nameOrId.includes("lname") || nameOrId.includes("surname") || nameOrId.includes("family")) {
+          fillVal = derivedLastName;
+        } else if (nameOrId.includes("name") && !nameOrId.includes("company") && !nameOrId.includes("business") && !nameOrId.includes("user")) {
+          fillVal = leadDataArg.fullName || "";
+        } else if (nameOrId.includes("company") || nameOrId.includes("organization") || nameOrId.includes("business") || nameOrId.includes("employer") || nameOrId.includes("org")) {
+          fillVal = leadDataArg.companyName || leadDataArg.company || "";
         } else if (nameOrId.includes("website") || nameOrId.includes("url") || nameOrId.includes("site")) {
-          fillVal = leadDataArg.website || "https://example.com";
-        } else if (nameOrId.includes("address") || nameOrId.includes("street")) {
-          fillVal = leadDataArg.address || "123 Market Street";
-        } else if (nameOrId.includes("city")) {
-          fillVal = leadDataArg.city || "New York";
+          fillVal = leadDataArg.website || "";
+        } else if (nameOrId.includes("address") || nameOrId.includes("street") || nameOrId.includes("addr")) {
+          fillVal = leadDataArg.address || "";
+        } else if (nameOrId.includes("city") || nameOrId.includes("town")) {
+          fillVal = leadDataArg.city || "";
+        } else if (nameOrId.includes("state") || nameOrId.includes("province") || nameOrId.includes("region")) {
+          fillVal = leadDataArg.state || "";
+        } else if (nameOrId.includes("country") || nameOrId.includes("nation")) {
+          fillVal = leadDataArg.country || "";
         } else if (nameOrId.includes("zip") || nameOrId.includes("postal")) {
-          fillVal = leadDataArg.zip || leadDataArg.postalCode || "10001";
+          fillVal = leadDataArg.zip || leadDataArg.postalCode || "";
         } else if (nameOrId.includes("subject") || nameOrId.includes("topic") || nameOrId.includes("title") || nameOrId.includes("contacttype")) {
-          fillVal = leadDataArg.subject || "General Inquiry";
-        } else {
-          fillVal = leadDataArg.message || "Hello, I am interested in your services. Please contact me with more details.";
+          fillVal = leadDataArg.subject || "";
+        } else if (el.tagName.toLowerCase() === "textarea" || nameOrId.includes("message") || nameOrId.includes("comment") || nameOrId.includes("inquiry") || nameOrId.includes("question") || nameOrId.includes("detail")) {
+          fillVal = leadDataArg.message || "";
         }
 
         if (fillVal) {
@@ -3154,7 +3130,8 @@ export async function submitContactForm({
   skipPersist,
   userId,
   skipActionButtons = false,
-  activePage: customPage
+  activePage: customPage,
+  onProgress
 }: SubmitContactFormInput & { browserContext?: BrowserContext; skipPersist?: boolean; userId?: string; liveSubmit?: boolean; skipActionButtons?: boolean; activePage?: Page }): Promise<SubmitContactFormResult> {
   const shouldSubmit = liveSubmit !== undefined ? liveSubmit : submit;
   let browser: Browser | null = null;
@@ -3363,6 +3340,7 @@ export async function submitContactForm({
     };
 
     // Fill the selected primary form only once.
+    await onProgress?.("fill_form", "Filling form fields with lead data...");
     const tFillStart = Date.now();
     const fillResult = await fillAllVisibleForms(page, effectiveLeadData);
     tFieldFilling = Date.now() - tFillStart;
@@ -3640,6 +3618,7 @@ export async function submitContactForm({
     };
 
     if (shouldSubmit) {
+      await onProgress?.("submit_form", "Submitting contact form...");
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => undefined);
 
@@ -3760,7 +3739,11 @@ export async function submitContactForm({
     if (shouldSubmit) {
       activePage.off("response", ajaxResponseListener);
     }
+    await onProgress?.("take_screenshot", "Capturing proof screenshot...");
     screenshotPath = await takeScreenshot(page, websiteUrl, shouldSubmit ? "after-submit" : "dry-run");
+    if (screenshotPath) {
+      await onProgress?.("take_screenshot", "Proof screenshot captured", screenshotPath);
+    }
 
     if (shouldSubmit) {
       // 1. Check for server-level spam, mail delivery errors, or access blocks
@@ -3939,6 +3922,9 @@ export async function submitContactForm({
       screenshotPath = await takeScreenshot(page, websiteUrl, isProxyErr ? "proxy-407-failure" : "failure").catch(
         () => screenshotPath
       );
+    }
+    if (screenshotPath) {
+      await onProgress?.("take_screenshot", "Captured failure screenshot", screenshotPath);
     }
 
     const totalMs = Date.now() - tStart;

@@ -1,3 +1,5 @@
+import path from "node:path";
+import type { BrowserContext } from "playwright";
 import { prisma } from "@/lib/prisma";
 import { config } from "@/lib/config";
 import { acquireContext, releaseContext } from "@/lib/browserPool";
@@ -8,8 +10,13 @@ import {
   redactProxyDetails
 } from "@/services/proxy-helper";
 import { classifyErrorTaxonomy } from "@/services/error-taxonomy";
+import { splitFullName } from "@/services/field-classifier";
 import type { AutomationResult } from "@/app/(dashboard)/automation/actions";
 import type { SubmitContactFormResult } from "@/types/automation";
+
+function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
 
 export type StoredPayload = {
   fields: Array<[string, string]>;
@@ -227,6 +234,10 @@ async function processSingleTarget(
     }
   };
 
+  let finalScreenshot: string | null = null;
+  let context: BrowserContext | null = null;
+  let targetUrlForScreenshot = "";
+
   try {
     const record = await prisma.submissionResult.findUnique({
       where: { id: resultId },
@@ -243,10 +254,17 @@ async function processSingleTarget(
     }
 
     const website = record.targetWebsite;
+    targetUrlForScreenshot = website.websiteUrl;
     const payloadFields = new Map(payload.fields);
     const showBrowser = payloadFields.get("showBrowser") === "on";
 
-    updateWorkerStatus("Navigating & discovering target", website.websiteUrl);
+    updateWorkerStatus("Step 1/5: Loading website...", website.websiteUrl);
+    await prisma.submissionResult.updateMany({
+      where: { id: resultId, job: { userId, status: "Running" } },
+      data: {
+        message: `[${workerId}] [website_load] Loading website...`
+      }
+    }).catch(() => undefined);
     console.log(`[${workerId}] Processing target: ${website.websiteUrl} (Result: ${resultId})`);
 
     // Check parent cancellation
@@ -262,35 +280,38 @@ async function processSingleTarget(
       return;
     }
 
-    const context = await acquireContext({
+    context = await acquireContext({
       headless: !showBrowser,
       userId,
       startupTimeoutMs: Math.min(20_000, config.worker.totalTargetTimeoutMs)
     });
-
-    try {
       const targetIds = new Map<string, string>();
       const attemptIds = new Map<string, string>();
       const key = (target: { targetType: string; url: string }) => `${target.targetType}:${target.url}`;
 
+      const rawFullName = (payloadFields.get("fullName") || payloadFields.get("name") || "").trim();
+      const nameParts = splitFullName(rawFullName);
+      const firstName = (payloadFields.get("firstName") || nameParts.firstName || "").trim();
+      const lastName = (payloadFields.get("lastName") || nameParts.lastName || "").trim();
+
       const multiTargetRun = runMultiTargetAutomation({
         websiteUrl: website.websiteUrl,
         leadData: {
-          fullName: payloadFields.get("fullName") || payloadFields.get("name") || "",
-          firstName: payloadFields.get("firstName") || "",
-          lastName: payloadFields.get("lastName") || "",
-          email: payloadFields.get("email") || "",
-          mobile: payloadFields.get("mobile") || payloadFields.get("mobileNumber") || payloadFields.get("phone") || "",
-          phone: payloadFields.get("phone") || payloadFields.get("mobile") || "",
-          city: payloadFields.get("city") || "",
-          state: payloadFields.get("state") || "",
-          country: payloadFields.get("country") || "",
-          address: payloadFields.get("address") || "",
-          message: payloadFields.get("message") || payloadFields.get("inquiry") || "",
-          companyName: payloadFields.get("companyName") || payloadFields.get("company") || "",
-          website: payloadFields.get("website") || payloadFields.get("websiteUrl") || "",
-          jobTitle: payloadFields.get("jobTitle") || payloadFields.get("role") || "",
-          subject: payloadFields.get("subject") || ""
+          fullName: rawFullName,
+          firstName,
+          lastName,
+          email: (payloadFields.get("email") || "").trim(),
+          mobile: (payloadFields.get("mobile") || payloadFields.get("mobileNumber") || payloadFields.get("phone") || "").trim(),
+          phone: (payloadFields.get("phone") || payloadFields.get("mobile") || payloadFields.get("mobileNumber") || "").trim(),
+          city: (payloadFields.get("city") || "").trim(),
+          state: (payloadFields.get("state") || "").trim(),
+          country: (payloadFields.get("country") || "").trim(),
+          address: (payloadFields.get("address") || "").trim(),
+          message: (payloadFields.get("message") || payloadFields.get("inquiry") || "").trim(),
+          companyName: (payloadFields.get("companyName") || payloadFields.get("company") || "").trim(),
+          website: (payloadFields.get("website") || payloadFields.get("websiteUrl") || "").trim(),
+          jobTitle: (payloadFields.get("jobTitle") || payloadFields.get("role") || "").trim(),
+          subject: (payloadFields.get("subject") || "").trim()
         },
         bookingPreferences: {
           preferredDate: payloadFields.get("preferredDate"),
@@ -319,14 +340,27 @@ async function processSingleTarget(
           screenshotPath: null
         })),
         callbacks: {
-          onTargetsDiscovered: async (targets, reason) => {
-            updateWorkerStatus("Form target discovered", targets[0]?.url);
+          onProgress: async (step, detail, ssPath) => {
+            if (ssPath) finalScreenshot = ssPath;
+            updateWorkerStatus(`[${step}] ${detail}`, website.websiteUrl);
             await prisma.submissionResult.updateMany({
               where: { id: resultId, status: "Running", job: { userId, status: "Running" } },
               data: {
-                message: `[${workerId}] ${redactProxyDetails(reason)}`,
+                message: `[${workerId}] [${step}] ${redactProxyDetails(detail)}`,
+                ...(ssPath ? { screenshotPath: ssPath } : {})
+              }
+            }).catch(() => undefined);
+          },
+          onTargetsDiscovered: async (targets, reason) => {
+            updateWorkerStatus("[form_found] Form target discovered", targets[0]?.url);
+            if (targets[0]?.screenshotPath) finalScreenshot = targets[0].screenshotPath;
+            await prisma.submissionResult.updateMany({
+              where: { id: resultId, status: "Running", job: { userId, status: "Running" } },
+              data: {
+                message: `[${workerId}] [form_found] ${redactProxyDetails(reason)}`,
                 targetType: targets[0]?.targetType ?? null,
-                resolvedUrl: targets[0]?.url ?? null
+                resolvedUrl: targets[0]?.url ?? null,
+                ...(targets[0]?.screenshotPath ? { screenshotPath: targets[0].screenshotPath } : {})
               }
             });
             for (const target of targets) {
@@ -356,7 +390,13 @@ async function processSingleTarget(
             }
           },
           onAttemptStarted: async (target) => {
-            updateWorkerStatus(`Filling ${target.targetType}`, target.url);
+            updateWorkerStatus(`[fill_form] Filling ${target.targetType}`, target.url);
+            await prisma.submissionResult.updateMany({
+              where: { id: resultId, status: "Running", job: { userId, status: "Running" } },
+              data: {
+                message: `[${workerId}] [fill_form] Filling ${target.targetType}...`
+              }
+            }).catch(() => undefined);
             const attempt = await prisma.submissionAttempt.create({
               data: {
                 submissionResultId: resultId,
@@ -375,7 +415,15 @@ async function processSingleTarget(
             });
           },
           onAttemptFinished: async (attempt) => {
-            updateWorkerStatus(`Submitting & verifying ${attempt.target.targetType}`, attempt.target.url);
+            updateWorkerStatus(`[submit_form] Submitting & verifying ${attempt.target.targetType}`, attempt.target.url);
+            if (attempt.result.screenshotPath) finalScreenshot = attempt.result.screenshotPath;
+            await prisma.submissionResult.updateMany({
+              where: { id: resultId, status: "Running", job: { userId, status: "Running" } },
+              data: {
+                message: `[${workerId}] [submit_form] Finished ${attempt.target.targetType} with status ${attempt.result.status}`,
+                ...(attempt.result.screenshotPath ? { screenshotPath: attempt.result.screenshotPath } : {})
+              }
+            }).catch(() => undefined);
             const attemptId = attemptIds.get(key(attempt.target));
             if (!attemptId) return;
             const successful = resultCompleted(attempt.result);
@@ -421,18 +469,14 @@ async function processSingleTarget(
         `Target ${website.websiteUrl}`
       );
 
-      if (run.targets.length === 0 && run.attempts.length === 0) {
-        throw new Error(run.discoveryReason || "No valid submission target discovered");
-      }
-
       const successes = run.attempts.filter((a) =>
         resultCompleted(a.result)
       );
       const anySuccessful = successes.length > 0;
       // Requirement: Show ONLY the screenshot representing the successful submission for successes
       const successScreenshot = successes.find((a) => a.result.screenshotPath)?.result.screenshotPath ?? null;
-      const failureScreenshot = run.attempts.map((a) => a.result.screenshotPath).filter(Boolean).at(-1) ?? null;
-      const finalScreenshot = anySuccessful ? successScreenshot : failureScreenshot;
+      const failureScreenshot = run.attempts.map((a) => a.result.screenshotPath).filter(Boolean).at(-1) ?? run.screenshotPath ?? finalScreenshot ?? null;
+      finalScreenshot = anySuccessful ? successScreenshot : failureScreenshot;
       const lastAttempt = run.attempts.at(-1);
 
       // Determine explicit status classification and true message
@@ -471,9 +515,6 @@ async function processSingleTarget(
       });
 
       console.log(`[${workerId}] Finished target ${website.websiteUrl} with status: ${finalStatus}`);
-    } finally {
-      await releaseContext(context);
-    }
   } catch (error) {
     const isProxy = isProxyAuthenticationFailure(error);
     const rawError = isProxy
@@ -485,15 +526,33 @@ async function processSingleTarget(
     const failureStatus = classifyErrorTaxonomy(rawError, null);
     console.warn(`[${workerId}] Error on target ${resultId}: ${rawError} (Status: ${failureStatus})`);
 
+    if (!finalScreenshot && context) {
+      try {
+        const openPages = context.pages();
+        const activePage = openPages.at(-1);
+        if (activePage && !activePage.isClosed()) {
+          const slug = targetUrlForScreenshot ? slugify(targetUrlForScreenshot) : "target";
+          const fileName = `${Date.now()}-${slug}-failure.png`;
+          const absolutePath = path.join(process.cwd(), "public", "screenshots", fileName);
+          await activePage.screenshot({ path: absolutePath, fullPage: false, timeout: 3000 }).catch(() => null);
+          finalScreenshot = `/screenshots/${fileName}`;
+        }
+      } catch {}
+    }
+
     await prisma.submissionResult.updateMany({
       where: { id: resultId },
       data: {
         status: failureStatus,
         message: `[${workerId}] ${redactProxyDetails(rawError)}`,
+        ...(finalScreenshot ? { screenshotPath: finalScreenshot } : {}),
         submittedAt: new Date()
       }
     });
   } finally {
+    if (context) {
+      await releaseContext(context).catch(() => undefined);
+    }
     stopHeartbeat();
     const jobWorkers = activeWorkerRegistry.get(jobId);
     if (jobWorkers) {

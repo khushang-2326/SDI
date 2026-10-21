@@ -41,8 +41,213 @@ type LiveBatchItem = {
   url: string;
   status: "waiting" | "discovering" | "completed" | "failed" | "cancelled";
   detail: string;
+  screenshotPath?: string | null;
   result?: AutomationResult;
 };
+
+type StepState = "waiting" | "in_progress" | "completed" | "failed";
+
+interface PipelineStep {
+  id: string;
+  label: string;
+  state: StepState;
+}
+
+interface PipelineState {
+  steps: PipelineStep[];
+  failedStepName: string | null;
+  activeStepName: string | null;
+}
+
+function deriveAutomationPipeline(
+  status: string,
+  detail: string,
+  isSuccess: boolean,
+  hasScreenshot: boolean
+): PipelineState {
+  const steps: PipelineStep[] = [
+    { id: "website_load", label: "Website Load", state: "waiting" },
+    { id: "form_found", label: "Form Found", state: "waiting" },
+    { id: "fill_form", label: "Fill Form", state: "waiting" },
+    { id: "submit_form", label: "Submit Form", state: "waiting" },
+    { id: "take_screenshot", label: "Proof Screenshot", state: "waiting" }
+  ];
+
+  if (status === "waiting") {
+    return { steps, failedStepName: null, activeStepName: null };
+  }
+
+  if (isSuccess) {
+    steps.forEach((s) => (s.state = "completed"));
+    return { steps, failedStepName: null, activeStepName: "Completed" };
+  }
+
+  const rawText = (detail || "").toLowerCase();
+
+  if (status === "failed") {
+    const isLoadFailure =
+      rawText.includes("website_load") ||
+      rawText.includes("navigation_timeout") ||
+      rawText.includes("navigation to usable page timed out") ||
+      rawText.includes("website could not be loaded") ||
+      rawText.includes("403 forbidden") ||
+      rawText.includes("http 403") ||
+      rawText.includes("err_name_not_resolved") ||
+      rawText.includes("err_connection") ||
+      rawText.includes("timeout limit of");
+
+    const isFormFoundFailure =
+      !isLoadFailure && (
+        rawText.includes("form_found") ||
+        rawText.includes("no supported contact form") ||
+        rawText.includes("no contact form") ||
+        rawText.includes("target not found") ||
+        rawText.includes("form_not_found") ||
+        rawText.includes("no valid submission target") ||
+        rawText.includes("unsupported widget") ||
+        rawText.includes("ineligible_genuine_no_public_form") ||
+        rawText.includes("failure_contact_destination_not_found")
+      );
+
+    const isFillFailure =
+      !isLoadFailure && !isFormFoundFailure && (
+        rawText.includes("fill_form") ||
+        rawText.includes("validation_before_submission_failed") ||
+        rawText.includes("unmapped required") ||
+        rawText.includes("field mapping") ||
+        rawText.includes("failure_form_field_mapping") ||
+        rawText.includes("failure_required_field")
+      );
+
+    if (isLoadFailure) {
+      steps[0].state = "failed";
+      steps[1].state = "waiting";
+      steps[2].state = "waiting";
+      steps[3].state = "waiting";
+      steps[4].state = hasScreenshot ? "completed" : "waiting";
+      return { steps, failedStepName: "Website Load", activeStepName: null };
+    } else if (isFormFoundFailure) {
+      steps[0].state = "completed";
+      steps[1].state = "failed";
+      steps[2].state = "waiting";
+      steps[3].state = "waiting";
+      steps[4].state = hasScreenshot ? "completed" : "waiting";
+      return { steps, failedStepName: "Form Found", activeStepName: null };
+    } else if (isFillFailure) {
+      steps[0].state = "completed";
+      steps[1].state = "completed";
+      steps[2].state = "failed";
+      steps[3].state = "waiting";
+      steps[4].state = hasScreenshot ? "completed" : "waiting";
+      return { steps, failedStepName: "Fill Form", activeStepName: null };
+    } else {
+      steps[0].state = "completed";
+      steps[1].state = "completed";
+      steps[2].state = "completed";
+      steps[3].state = "failed";
+      steps[4].state = hasScreenshot ? "completed" : "waiting";
+      return { steps, failedStepName: "Submit Form", activeStepName: null };
+    }
+  }
+
+  // If in progress ("discovering" or "running"):
+  if (status === "discovering" || status === "running") {
+    if (rawText.includes("take_screenshot") || rawText.includes("verifying")) {
+      steps[0].state = "completed";
+      steps[1].state = "completed";
+      steps[2].state = "completed";
+      steps[3].state = "completed";
+      steps[4].state = "in_progress";
+      return { steps, failedStepName: null, activeStepName: "Capturing Screenshot" };
+    } else if (rawText.includes("submit_form") || rawText.includes("submitting")) {
+      steps[0].state = "completed";
+      steps[1].state = "completed";
+      steps[2].state = "completed";
+      steps[3].state = "in_progress";
+      steps[4].state = "waiting";
+      return { steps, failedStepName: null, activeStepName: "Submitting Form" };
+    } else if (rawText.includes("fill_form") || rawText.includes("filling")) {
+      steps[0].state = "completed";
+      steps[1].state = "completed";
+      steps[2].state = "in_progress";
+      steps[3].state = "waiting";
+      steps[4].state = "waiting";
+      return { steps, failedStepName: null, activeStepName: "Filling Form" };
+    } else if (rawText.includes("form_found") || rawText.includes("searching") || rawText.includes("discovering")) {
+      steps[0].state = "completed";
+      steps[1].state = "in_progress";
+      steps[2].state = "waiting";
+      steps[3].state = "waiting";
+      steps[4].state = "waiting";
+      return { steps, failedStepName: null, activeStepName: "Searching Form" };
+    } else {
+      steps[0].state = "in_progress";
+      steps[1].state = "waiting";
+      steps[2].state = "waiting";
+      steps[3].state = "waiting";
+      steps[4].state = "waiting";
+      return { steps, failedStepName: null, activeStepName: "Loading Website" };
+    }
+  }
+
+  return { steps, failedStepName: null, activeStepName: null };
+}
+
+function cleanProgressDetail(text: string): string {
+  if (!text) return "";
+  return text.replace(/^(\[[^\]]+\]\s*)+/g, "").trim();
+}
+
+function AutomationPipelineView({
+  status,
+  detail,
+  isSuccess,
+  hasScreenshot
+}: {
+  status: string;
+  detail: string;
+  isSuccess: boolean;
+  hasScreenshot: boolean;
+}) {
+  const pipeline = deriveAutomationPipeline(status, detail, isSuccess, hasScreenshot);
+
+  return (
+    <div className="mt-2.5 rounded-xl border border-slate-200/90 bg-slate-50/80 p-2 dark:border-slate-800 dark:bg-slate-900/50">
+      <div className="flex items-center gap-1.5 overflow-x-auto text-[11px] pb-0.5">
+        {pipeline.steps.map((step, idx) => {
+          const isLast = idx === pipeline.steps.length - 1;
+          return (
+            <div key={step.id} className="flex items-center gap-1.5 shrink-0">
+              <span
+                className={`flex items-center gap-1 rounded-md px-2 py-0.5 font-medium transition ${
+                  step.state === "completed"
+                    ? "border border-emerald-300 bg-emerald-50 text-emerald-800 font-semibold shadow-2xs"
+                    : step.state === "in_progress"
+                    ? "border border-indigo-400 bg-indigo-50 text-indigo-700 font-bold animate-pulse shadow-xs"
+                    : step.state === "failed"
+                    ? "border border-red-300 bg-red-50 text-red-800 font-bold shadow-2xs"
+                    : "border border-slate-200 bg-white/70 text-slate-400"
+                }`}
+              >
+                {step.state === "completed" ? (
+                  <span className="text-emerald-600 font-bold text-xs">✓</span>
+                ) : step.state === "in_progress" ? (
+                  <span className="inline-block animate-spin text-indigo-600 text-xs">⟳</span>
+                ) : step.state === "failed" ? (
+                  <span className="text-red-600 font-bold text-xs">✕</span>
+                ) : (
+                  <span className="text-slate-300 text-[9px]">○</span>
+                )}
+                {step.label}
+              </span>
+              {!isLast ? <span className="text-slate-300 select-none text-[10px]">➔</span> : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 type AnalysisItem = {
   id: string;
@@ -625,31 +830,59 @@ ${items
                         </span>
                       </div>
 
-                      <div
-                        className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
-                          item.isSuccess
-                            ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
-                            : item.status === "failed"
-                            ? "bg-red-900/40 text-red-200 border border-red-800/50"
-                            : "bg-slate-800/60 text-slate-300"
-                        }`}
-                      >
-                        <span className="mr-1 font-bold">
-                          {item.isSuccess ? "Outcome:" : "Failure Reason:"}
-                        </span>
-                        {item.detail}
-                        {item.trialsCount > 0 ? (
-                          <span className="ml-2 font-bold opacity-80">
-                            ({item.successfulTrialsCount}/{item.trialsCount} trials succeeded)
-                          </span>
-                        ) : null}
-                      </div>
+                      {(() => {
+                        const pipeline = deriveAutomationPipeline(item.status, item.detail, item.isSuccess, Boolean(item.screenshotPath));
+                        return (
+                          <>
+                            <AutomationPipelineView
+                              status={item.status}
+                              detail={item.detail}
+                              isSuccess={item.isSuccess}
+                              hasScreenshot={Boolean(item.screenshotPath)}
+                            />
 
-                      {item.screenshotPath ? (
-                        <div className="mt-3">
-                          <ScreenshotViewer src={item.screenshotPath} alt={item.name} />
-                        </div>
-                      ) : null}
+                            <div
+                              className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
+                                item.isSuccess
+                                  ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
+                                  : item.status === "failed"
+                                  ? "bg-red-900/40 text-red-200 border border-red-800/50"
+                                  : "bg-slate-800/60 text-slate-300"
+                              }`}
+                            >
+                              <span className="mr-1 font-bold">
+                                {item.isSuccess ? "Outcome:" : `Failure (${pipeline.failedStepName || "Execution"}):`}
+                              </span>
+                              {cleanProgressDetail(item.detail)}
+                              {item.trialsCount > 0 ? (
+                                <span className="ml-2 font-bold opacity-80">
+                                  ({item.successfulTrialsCount}/{item.trialsCount} trials succeeded)
+                                </span>
+                              ) : null}
+                            </div>
+
+                            {item.screenshotPath ? (
+                              <div className="mt-3">
+                                <div className="mb-1.5 flex items-center justify-between text-xs font-semibold">
+                                  <span className={item.isSuccess ? "text-emerald-400 flex items-center gap-1" : "text-red-400 flex items-center gap-1"}>
+                                    {item.isSuccess ? (
+                                      <>
+                                        <span className="font-bold">✓</span> Submission Proof Screenshot
+                                      </>
+                                    ) : (
+                                      <>
+                                        <span className="font-bold">✕</span> Failure Screenshot (captured at {pipeline.failedStepName || "failure"} stage)
+                                      </>
+                                    )}
+                                  </span>
+                                  <span className="text-[11px] text-slate-400 font-normal">Click image to enlarge</span>
+                                </div>
+                                <ScreenshotViewer src={item.screenshotPath} alt={item.name} />
+                              </div>
+                            ) : null}
+                          </>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -1772,19 +2005,46 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
                       {isSuccess ? (attemptsCount > 1 ? `Completed (${successfulAttemptsCount}/${attemptsCount} trials)` : "Completed") : isFailedZeroSuccess ? "Failed (0 trials succeeded)" : item.status}
                     </span>
                   </div>
-                  <div className={`mt-3 rounded-xl px-3.5 py-2.5 text-xs ${isSuccess ? "border border-emerald-200 bg-emerald-100/70 font-semibold text-emerald-900" : isFailedZeroSuccess ? "border border-red-200 bg-red-100/70 font-semibold text-red-900" : "text-muted"}`}>
+                  <AutomationPipelineView
+                    status={item.status}
+                    detail={item.detail}
+                    isSuccess={isSuccess}
+                    hasScreenshot={Boolean(
+                      isSuccess
+                        ? (item.result?.attempts?.find(isAttemptSuccessful)?.screenshotPath || item.result?.screenshotPath || item.screenshotPath)
+                        : (item.result?.attempts?.find((a) => a.screenshotPath)?.screenshotPath || item.result?.screenshotPath || item.screenshotPath)
+                    )}
+                  />
+
+                  <div className={`mt-2.5 rounded-xl px-3.5 py-2 text-xs ${isSuccess ? "border border-emerald-200 bg-emerald-100/70 font-semibold text-emerald-900" : isFailedZeroSuccess ? "border border-red-200 bg-red-100/70 font-semibold text-red-900" : "text-muted"}`}>
                     <span className="mr-1.5 font-bold">
-                      {isSuccess ? "Success:" : isFailedZeroSuccess ? "Failure (0 successful trials):" : "Progress:"}
+                      {isSuccess ? "Success:" : isFailedZeroSuccess ? "Failure:" : "Current Progress:"}
                     </span>
-                    {item.detail}
+                    {cleanProgressDetail(item.detail)}
                   </div>
                   {(() => {
                     const singleScreenshot = isSuccess
-                      ? (item.result?.attempts?.find(isAttemptSuccessful)?.screenshotPath || item.result?.screenshotPath)
-                      : (item.result?.attempts?.find((a) => a.screenshotPath)?.screenshotPath || item.result?.screenshotPath);
+                      ? (item.result?.attempts?.find(isAttemptSuccessful)?.screenshotPath || item.result?.screenshotPath || item.screenshotPath)
+                      : (item.result?.attempts?.find((a) => a.screenshotPath)?.screenshotPath || item.result?.screenshotPath || item.screenshotPath);
+
+                    const pipeline = deriveAutomationPipeline(item.status, item.detail, isSuccess, Boolean(singleScreenshot));
 
                     return singleScreenshot ? (
                       <div className="mt-3">
+                        <div className="mb-1.5 flex items-center justify-between text-xs font-semibold">
+                          <span className={isSuccess ? "text-emerald-700 flex items-center gap-1" : "text-red-600 flex items-center gap-1"}>
+                            {isSuccess ? (
+                              <>
+                                <span className="font-bold">✓</span> Submission Proof Screenshot
+                              </>
+                            ) : (
+                              <>
+                                <span className="font-bold">✕</span> Failure Screenshot (captured at {pipeline.failedStepName || "failure"} stage)
+                              </>
+                            )}
+                          </span>
+                          <span className="text-[11px] text-muted font-normal">Click image to enlarge</span>
+                        </div>
                         <ScreenshotViewer
                           src={singleScreenshot}
                           alt={isSuccess ? `Success Proof - ${item.name}` : `Failure Screenshot - ${item.name}`}

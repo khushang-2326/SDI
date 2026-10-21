@@ -485,9 +485,7 @@ async function fillBookingForm(scope: BookingScope, leadData: LeadData) {
     skippedFields.push("mobile");
   }
 
-  const message = [leadData.companyName, leadData.message, leadData.address ? `Address: ${leadData.address}` : null]
-    .filter(Boolean)
-    .join("\n");
+  const message = (leadData.message || "").trim();
 
   if (message) {
     const messageFilled = await fillFirstAvailable(

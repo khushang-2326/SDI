@@ -476,9 +476,14 @@ async function safelyFillCityField(
   const matchingOptionIndex = await locator.evaluate((element, val) => {
     const select = element as HTMLSelectElement;
     const targetNorm = val.toLowerCase();
+    const isNY = targetNorm === "new york" || targetNorm === "nyc" || targetNorm === "ny";
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
       const value = (option.value || "").trim().toLowerCase();
+      if (isNY) {
+        if (value === "ny" || value === "nyc" || value === "new york" || value === "new_york") return true;
+        if (label === "new york" || label === "new york city" || label === "nyc") return true;
+      }
       return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
   }, targetVal).catch(() => -1);
@@ -512,9 +517,14 @@ async function safelyFillStateField(
   const matchingOptionIndex = await locator.evaluate((element, val) => {
     const select = element as HTMLSelectElement;
     const targetNorm = val.toLowerCase();
+    const isNY = targetNorm === "new york" || targetNorm === "ny";
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
       const value = (option.value || "").trim().toLowerCase();
+      if (isNY) {
+        if (value === "ny" || value === "new york" || value === "new_york") return true;
+        if (label === "new york" || label === "ny") return true;
+      }
       return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
   }, targetVal).catch(() => -1);
@@ -548,9 +558,14 @@ async function safelyFillCountryField(
   const matchingOptionIndex = await locator.evaluate((element, val) => {
     const select = element as HTMLSelectElement;
     const targetNorm = val.toLowerCase();
+    const isUS = targetNorm === "united states" || targetNorm === "us" || targetNorm === "usa" || targetNorm === "u.s.";
     return Array.from(select.options).findIndex((option) => {
       const label = (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
       const value = (option.value || "").trim().toLowerCase();
+      if (isUS) {
+        if (value === "us" || value === "usa" || value === "united states" || value === "840" || value === "united_states") return true;
+        if (label === "united states" || label === "united states of america" || label === "usa" || label === "u.s.a." || label === "us" || label === "u.s.") return true;
+      }
       return label === targetNorm || value === targetNorm || label.includes(targetNorm);
     });
   }, targetVal).catch(() => -1);
@@ -712,64 +727,279 @@ async function reVerifyAndSelfHealFilledFields(
   return healedCount;
 }
 
-export async function selectRequiredRadioDefaults(scope: FormScope) {
-  const radios = scope.locator("input[type='radio']");
-  const count = await radios.count().catch(() => 0);
-  const groups = new Map<string, Locator>();
-
-  for (let index = 0; index < count; index++) {
-    const radio = radios.nth(index);
-    if (!(await radio.isVisible().catch(() => false)) || !(await radio.isEnabled().catch(() => false))) continue;
-    const metadata = await radio.evaluate((element) => {
-      const input = element as HTMLInputElement;
-      const fieldset = input.closest("fieldset");
-      const container = input.closest(".form-group, .gfield, .elementor-field-group, .field, div");
-      const isReq = Boolean(
-        input.required ||
-        input.getAttribute("aria-required") === "true" ||
-        input.matches(":invalid") ||
-        fieldset?.classList.contains("required") ||
-        fieldset?.getAttribute("aria-required") === "true" ||
-        container?.classList.contains("required") ||
-        container?.getAttribute("aria-required") === "true" ||
-        (fieldset?.textContent || "").includes("*") ||
-        (container?.textContent || "").includes("*")
-      );
-      return {
-        name: input.name,
-        required: isReq,
-        checked: input.checked
-      };
-    }).catch(() => ({ name: "", required: false, checked: false }));
-
-    const groupKey = metadata.name || `radio_unnamed_${index}`;
-    if (metadata.required && !groups.has(groupKey) && !metadata.checked) {
-      groups.set(groupKey, radio);
-    }
-  }
-
+export async function selectRequiredRadioDefaults(scope: FormScope): Promise<string[]> {
   const filled: string[] = [];
-  for (const [name, radio] of groups) {
-    if (await radio.isChecked().catch(() => false)) continue;
-    let checked = false;
-    try {
-      await radio.check({ force: true });
-      checked = await radio.isChecked().catch(() => false);
-    } catch {}
-    if (!checked) {
-      await radio.evaluate((el: HTMLInputElement) => {
-        el.checked = true;
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-        if ((window as any).jQuery) {
-          try { (window as any).jQuery(el).trigger("change"); } catch {}
-        }
-      }).catch(() => undefined);
-      checked = await radio.isChecked().catch(() => false);
-    }
-    if (checked) filled.push(`radio:${name}`);
+  try {
+    const isLoc = Boolean((scope as any).count && typeof (scope as any).count === "function");
+    const radioResults = isLoc
+      ? await (scope as Locator).evaluate((el: HTMLElement) => {
+          const results: string[] = [];
+          const allRadios = Array.from(el.querySelectorAll("input[type='radio']")) as HTMLInputElement[];
+          const groups = new Map<string, HTMLInputElement[]>();
+
+          for (const r of allRadios) {
+            if (r.disabled) continue;
+            const groupName = r.name || `unnamed_radio_${r.id || Math.random()}`;
+            if (!groups.has(groupName)) groups.set(groupName, []);
+            groups.get(groupName)!.push(r);
+          }
+
+          for (const [name, radios] of groups) {
+            const anyChecked = radios.some((r) => r.checked);
+            if (!anyChecked && radios.length > 0) {
+              const first = radios[0];
+              first.checked = true;
+              first.dispatchEvent(new Event("input", { bubbles: true }));
+              first.dispatchEvent(new Event("change", { bubbles: true }));
+              if ((window as any).jQuery) {
+                try { (window as any).jQuery(first).trigger("change"); } catch {}
+              }
+
+              const label = first.id ? el.querySelector(`label[for='${first.id}']`) : first.closest("label");
+              if (label && (label as HTMLElement).offsetParent !== null) {
+                try { (label as HTMLElement).click(); } catch {}
+              } else {
+                try { first.click(); } catch {}
+              }
+
+              results.push(`radio:${name}`);
+            }
+          }
+          return results;
+        })
+      : await (scope as Page).evaluate(() => {
+          const results: string[] = [];
+          const allRadios = Array.from(document.querySelectorAll("input[type='radio']")) as HTMLInputElement[];
+          const groups = new Map<string, HTMLInputElement[]>();
+
+          for (const r of allRadios) {
+            if (r.disabled) continue;
+            const groupName = r.name || `unnamed_radio_${r.id || Math.random()}`;
+            if (!groups.has(groupName)) groups.set(groupName, []);
+            groups.get(groupName)!.push(r);
+          }
+
+          for (const [name, radios] of groups) {
+            const anyChecked = radios.some((r) => r.checked);
+            if (!anyChecked && radios.length > 0) {
+              const first = radios[0];
+              first.checked = true;
+              first.dispatchEvent(new Event("input", { bubbles: true }));
+              first.dispatchEvent(new Event("change", { bubbles: true }));
+              if ((window as any).jQuery) {
+                try { (window as any).jQuery(first).trigger("change"); } catch {}
+              }
+
+              const label = first.id ? document.querySelector(`label[for='${first.id}']`) : first.closest("label");
+              if (label && (label as HTMLElement).offsetParent !== null) {
+                try { (label as HTMLElement).click(); } catch {}
+              } else {
+                try { first.click(); } catch {}
+              }
+
+              results.push(`radio:${name}`);
+            }
+          }
+          return results;
+        });
+
+    filled.push(...radioResults);
+  } catch (err) {
+    console.warn("[contact-form-automation] Error selecting radio defaults:", err);
   }
   return filled;
+}
+
+/**
+ * Universal Button & Pill Selection Group Auto-Selector.
+ * When a form contains selection button groups (e.g. Project Budget pills, Project Type pills,
+ * Service chips, Timeline tags, etc.) where options are represented by clickable buttons or pills,
+ * automatically selects the first valid button in each unselected group.
+ */
+export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise<string[]> {
+  const selected: string[] = [];
+  try {
+    const isLoc = Boolean((scope as any).count && typeof (scope as any).count === "function");
+    const groupResults = isLoc
+      ? await (scope as Locator).evaluate((el: HTMLElement) => {
+          const root = el;
+          const results: { groupName: string; clickedText: string }[] = [];
+          const NON_OPTION_TEXT = /^(submit|send|send message|contact us|get in touch|request quote|request a quote|submit inquiry|book now|schedule|next|continue|attach|upload|browse|add file|\+ attach file|cancel|close|back|previous|search|login|sign in)$/i;
+
+          const candidateContainers = Array.from(
+            root.querySelectorAll(
+              "[role='radiogroup'], [role='group'], [class*='budget' i], [class*='project-type' i], [class*='project_type' i], [class*='service' i], [class*='pills' i], [class*='chips' i], [class*='tags' i], [class*='options' i], [class*='choices' i], [class*='segmented' i], [class*='selection' i], fieldset, div"
+            )
+          ) as HTMLElement[];
+
+          const buttonParents = new Set<HTMLElement>();
+          const allTypeButtons = Array.from(root.querySelectorAll("button:not([type='submit']), div[role='button'], a[role='button']")) as HTMLElement[];
+          for (const b of allTypeButtons) {
+            const p = b.parentElement;
+            if (p && !p.closest("nav") && !p.closest("header") && !p.closest("footer") && p.children.length >= 2) {
+              buttonParents.add(p);
+            }
+          }
+
+          const allCandidateContainers = Array.from(new Set([...candidateContainers, ...Array.from(buttonParents)]));
+
+          for (const container of allCandidateContainers) {
+            if (container.closest("nav") || container.closest("header") || container.closest("footer")) continue;
+
+            const items = Array.from(
+              container.querySelectorAll(
+                "button:not([type='submit']), [role='radio'], [role='button'], label:has(input[type='radio']), .pill, .chip, .tag, [class*='choice' i], [class*='pill' i], [class*='btn-option' i]"
+              )
+            ) as HTMLElement[];
+
+            const validOptions = items.filter((itemEl) => {
+              const txt = (itemEl.textContent || "").trim();
+              if (!txt || txt.length > 50) return false;
+              if (NON_OPTION_TEXT.test(txt)) return false;
+              if (itemEl.getAttribute("type") === "submit") return false;
+              const rect = itemEl.getBoundingClientRect();
+              const style = window.getComputedStyle(itemEl);
+              return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0;
+            });
+
+            if (validOptions.length < 2 || validOptions.length > 15) continue;
+
+            const firstParent = validOptions[0].parentElement;
+            const sameParent = validOptions.every((v) => v.parentElement === firstParent || v.closest("fieldset") === container);
+            if (!sameParent) continue;
+
+            const anySelected = validOptions.some((itemEl) => {
+              const className = typeof itemEl.className === "string" ? itemEl.className.toLowerCase() : "";
+              const isAriaSelected =
+                itemEl.getAttribute("aria-checked") === "true" ||
+                itemEl.getAttribute("aria-pressed") === "true" ||
+                itemEl.getAttribute("aria-selected") === "true" ||
+                itemEl.getAttribute("data-state") === "active" ||
+                itemEl.getAttribute("data-state") === "checked" ||
+                itemEl.getAttribute("data-state") === "on";
+              const hasSelectedClass = /\b(active|selected|checked|current|is-active|is-selected|btn-primary)\b/.test(className);
+              const hasInnerChecked = Boolean(itemEl.querySelector("input:checked"));
+              return isAriaSelected || hasSelectedClass || hasInnerChecked;
+            });
+
+            if (!anySelected && validOptions.length > 0) {
+              const firstOpt = validOptions[0];
+              const firstText = (firstOpt.textContent || "").trim();
+
+              firstOpt.click();
+              firstOpt.dispatchEvent(new Event("click", { bubbles: true }));
+              firstOpt.dispatchEvent(new Event("change", { bubbles: true }));
+
+              const innerInput = firstOpt.querySelector("input[type='radio'], input[type='checkbox']") as HTMLInputElement | null;
+              if (innerInput) {
+                innerInput.checked = true;
+                innerInput.dispatchEvent(new Event("input", { bubbles: true }));
+                innerInput.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+
+              results.push({
+                groupName: container.getAttribute("aria-label") || container.className.slice(0, 30) || "button_group",
+                clickedText: firstText
+              });
+            }
+          }
+
+          return results;
+        })
+      : await (scope as Page).evaluate(() => {
+          const root = document;
+          const results: { groupName: string; clickedText: string }[] = [];
+          const NON_OPTION_TEXT = /^(submit|send|send message|contact us|get in touch|request quote|request a quote|submit inquiry|book now|schedule|next|continue|attach|upload|browse|add file|\+ attach file|cancel|close|back|previous|search|login|sign in)$/i;
+
+          const candidateContainers = Array.from(
+            root.querySelectorAll(
+              "[role='radiogroup'], [role='group'], [class*='budget' i], [class*='project-type' i], [class*='project_type' i], [class*='service' i], [class*='pills' i], [class*='chips' i], [class*='tags' i], [class*='options' i], [class*='choices' i], [class*='segmented' i], [class*='selection' i], fieldset, div"
+            )
+          ) as HTMLElement[];
+
+          const buttonParents = new Set<HTMLElement>();
+          const allTypeButtons = Array.from(root.querySelectorAll("button:not([type='submit']), div[role='button'], a[role='button']")) as HTMLElement[];
+          for (const b of allTypeButtons) {
+            const p = b.parentElement;
+            if (p && !p.closest("nav") && !p.closest("header") && !p.closest("footer") && p.children.length >= 2) {
+              buttonParents.add(p);
+            }
+          }
+
+          const allCandidateContainers = Array.from(new Set([...candidateContainers, ...Array.from(buttonParents)]));
+
+          for (const container of allCandidateContainers) {
+            if (container.closest("nav") || container.closest("header") || container.closest("footer")) continue;
+
+            const items = Array.from(
+              container.querySelectorAll(
+                "button:not([type='submit']), [role='radio'], [role='button'], label:has(input[type='radio']), .pill, .chip, .tag, [class*='choice' i], [class*='pill' i], [class*='btn-option' i]"
+              )
+            ) as HTMLElement[];
+
+            const validOptions = items.filter((itemEl) => {
+              const txt = (itemEl.textContent || "").trim();
+              if (!txt || txt.length > 50) return false;
+              if (NON_OPTION_TEXT.test(txt)) return false;
+              if (itemEl.getAttribute("type") === "submit") return false;
+              const rect = itemEl.getBoundingClientRect();
+              const style = window.getComputedStyle(itemEl);
+              return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0;
+            });
+
+            if (validOptions.length < 2 || validOptions.length > 15) continue;
+
+            const firstParent = validOptions[0].parentElement;
+            const sameParent = validOptions.every((v) => v.parentElement === firstParent || v.closest("fieldset") === container);
+            if (!sameParent) continue;
+
+            const anySelected = validOptions.some((itemEl) => {
+              const className = typeof itemEl.className === "string" ? itemEl.className.toLowerCase() : "";
+              const isAriaSelected =
+                itemEl.getAttribute("aria-checked") === "true" ||
+                itemEl.getAttribute("aria-pressed") === "true" ||
+                itemEl.getAttribute("aria-selected") === "true" ||
+                itemEl.getAttribute("data-state") === "active" ||
+                itemEl.getAttribute("data-state") === "checked" ||
+                itemEl.getAttribute("data-state") === "on";
+              const hasSelectedClass = /\b(active|selected|checked|current|is-active|is-selected|btn-primary)\b/.test(className);
+              const hasInnerChecked = Boolean(itemEl.querySelector("input:checked"));
+              return isAriaSelected || hasSelectedClass || hasInnerChecked;
+            });
+
+            if (!anySelected && validOptions.length > 0) {
+              const firstOpt = validOptions[0];
+              const firstText = (firstOpt.textContent || "").trim();
+
+              firstOpt.click();
+              firstOpt.dispatchEvent(new Event("click", { bubbles: true }));
+              firstOpt.dispatchEvent(new Event("change", { bubbles: true }));
+
+              const innerInput = firstOpt.querySelector("input[type='radio'], input[type='checkbox']") as HTMLInputElement | null;
+              if (innerInput) {
+                innerInput.checked = true;
+                innerInput.dispatchEvent(new Event("input", { bubbles: true }));
+                innerInput.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+
+              results.push({
+                groupName: container.getAttribute("aria-label") || container.className.slice(0, 30) || "button_group",
+                clickedText: firstText
+              });
+            }
+          }
+
+          return results;
+        });
+
+    for (const r of groupResults) {
+      console.log(`[contact-form-automation] [BUTTON-GROUP] Auto-selected first option: ${r.groupName} -> "${r.clickedText}"`);
+      selected.push(`selectionButton:${r.clickedText}`);
+    }
+  } catch (err) {
+    console.warn("[contact-form-automation] Error selecting button group defaults:", err);
+  }
+  return selected;
 }
 
 async function selectCustomDropdownDefaults(scope: FormScope) {
@@ -1040,8 +1270,9 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
     skippedFields.push("subject");
   }
 
-  // 8. City
+  // 8. City (Defaults to "New York" if not provided)
   const userCity = (leadData.city || leadData.town || "").trim();
+  const effectiveCity = userCity || "New York";
   const cityCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -1052,30 +1283,31 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
     if (usedIndexes.has(c.signal.index)) continue;
     const loc = fields.nth(c.signal.index);
     if (c.signal.tagName === "select") {
-      const fillRes = await safelyFillCityField(loc, userCity);
+      const fillRes = await safelyFillCityField(loc, effectiveCity);
       if (fillRes.success) {
         usedIndexes.add(c.signal.index);
         filledFields.push("city");
         verificationItems.push({
           fieldIndex: c.signal.index,
           fieldType: "city",
-          mappedSource: `city [${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          mappedSource: `city [${userCity ? "USER_DATA" : "DEFAULT_NEW_YORK"}]`,
           confidence: c.cls.confidence,
-          evidence: [...c.cls.evidence, `source:${userCity ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          evidence: [...c.cls.evidence, `source:${userCity ? "USER_DATA" : "DEFAULT_NEW_YORK"}`],
           filled: true,
           verified: fillRes.verified,
           finalValue: fillRes.actualValue
         });
         break;
       }
-    } else if (userCity) {
-      const ok = await fillSignal(c.signal, "city", "city", userCity, c.cls.confidence, c.cls.evidence, "USER_DATA");
+    } else {
+      const ok = await fillSignal(c.signal, "city", "city", effectiveCity, c.cls.confidence, c.cls.evidence, userCity ? "USER_DATA" : "FALLBACK_DATA");
       if (ok) break;
     }
   }
 
   // 8b. State / Region
   const userState = (leadData.state || leadData.province || leadData.region || "").trim();
+  const effectiveState = userState || "New York";
   const stateCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -1086,30 +1318,31 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
     if (usedIndexes.has(c.signal.index)) continue;
     const loc = fields.nth(c.signal.index);
     if (c.signal.tagName === "select") {
-      const fillRes = await safelyFillStateField(loc, userState);
+      const fillRes = await safelyFillStateField(loc, effectiveState);
       if (fillRes.success) {
         usedIndexes.add(c.signal.index);
         filledFields.push("state");
         verificationItems.push({
           fieldIndex: c.signal.index,
           fieldType: "state",
-          mappedSource: `state [${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          mappedSource: `state [${userState ? "USER_DATA" : "DEFAULT_NEW_YORK"}]`,
           confidence: c.cls.confidence,
-          evidence: [...c.cls.evidence, `source:${userState ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          evidence: [...c.cls.evidence, `source:${userState ? "USER_DATA" : "DEFAULT_NEW_YORK"}`],
           filled: true,
           verified: fillRes.verified,
           finalValue: fillRes.actualValue
         });
         break;
       }
-    } else if (userState) {
-      const ok = await fillSignal(c.signal, "state", "state", userState, c.cls.confidence, c.cls.evidence, "USER_DATA");
+    } else {
+      const ok = await fillSignal(c.signal, "state", "state", effectiveState, c.cls.confidence, c.cls.evidence, userState ? "USER_DATA" : "FALLBACK_DATA");
       if (ok) break;
     }
   }
 
-  // 8c. Country
+  // 8c. Country (Defaults to "United States" if not provided)
   const userCountry = (leadData.country || leadData.nation || "").trim();
+  const effectiveCountry = userCountry || "United States";
   const countryCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
@@ -1120,24 +1353,24 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
     if (usedIndexes.has(c.signal.index)) continue;
     const loc = fields.nth(c.signal.index);
     if (c.signal.tagName === "select") {
-      const fillRes = await safelyFillCountryField(loc, userCountry);
+      const fillRes = await safelyFillCountryField(loc, effectiveCountry);
       if (fillRes.success) {
         usedIndexes.add(c.signal.index);
         filledFields.push("country");
         verificationItems.push({
           fieldIndex: c.signal.index,
           fieldType: "country",
-          mappedSource: `country [${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}]`,
+          mappedSource: `country [${userCountry ? "USER_DATA" : "DEFAULT_UNITED_STATES"}]`,
           confidence: c.cls.confidence,
-          evidence: [...c.cls.evidence, `source:${userCountry ? "USER_DATA" : "SELECT_FIRST_VALID_OPTION"}`],
+          evidence: [...c.cls.evidence, `source:${userCountry ? "USER_DATA" : "DEFAULT_UNITED_STATES"}`],
           filled: true,
           verified: fillRes.verified,
           finalValue: fillRes.actualValue
         });
         break;
       }
-    } else if (userCountry) {
-      const ok = await fillSignal(c.signal, "country", "country", userCountry, c.cls.confidence, c.cls.evidence, "USER_DATA");
+    } else {
+      const ok = await fillSignal(c.signal, "country", "country", effectiveCountry, c.cls.confidence, c.cls.evidence, userCountry ? "USER_DATA" : "FALLBACK_DATA");
       if (ok) break;
     }
   }
@@ -1552,11 +1785,13 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
     }
   }
 
-  // 11. Custom dropdowns & radios
+  // 11. Custom dropdowns, radios & button selection groups
   const customFilled = await selectCustomDropdownDefaults(scope);
   filledFields.push(...customFilled);
   const radioFilled = await selectRequiredRadioDefaults(scope);
   filledFields.push(...radioFilled);
+  const buttonFilled = await selectFirstOptionInButtonGroups(scope);
+  filledFields.push(...buttonFilled);
 
   // 12. Required Checkboxes (Consent / Terms / GDPR)
   try {
@@ -2873,6 +3108,9 @@ export async function validateFormBeforeSubmission(
   // 2. Pre-validation sweep: ensure required checkboxes are checked
   await sweepAndCheckPreSubmitCheckboxes(page, formScope).catch(() => undefined);
 
+  // 2b. Pre-validation sweep: ensure unselected button selection groups select first option
+  await selectFirstOptionInButtonGroups(rootScope).catch(() => undefined);
+
   // 3. HTML5 constraint validation check on all visible form controls with active self-healing
   const getValidationError = async () => {
     return hasFormScope && formScope
@@ -3013,11 +3251,11 @@ export async function validateFormBeforeSubmission(
         } else if (nameOrId.includes("address") || nameOrId.includes("street") || nameOrId.includes("addr")) {
           fillVal = leadDataArg.address || "";
         } else if (nameOrId.includes("city") || nameOrId.includes("town")) {
-          fillVal = leadDataArg.city || "";
+          fillVal = leadDataArg.city || "New York";
         } else if (nameOrId.includes("state") || nameOrId.includes("province") || nameOrId.includes("region")) {
-          fillVal = leadDataArg.state || "";
+          fillVal = leadDataArg.state || "New York";
         } else if (nameOrId.includes("country") || nameOrId.includes("nation")) {
-          fillVal = leadDataArg.country || "";
+          fillVal = leadDataArg.country || "United States";
         } else if (nameOrId.includes("zip") || nameOrId.includes("postal")) {
           fillVal = leadDataArg.zip || leadDataArg.postalCode || "";
         } else if (nameOrId.includes("subject") || nameOrId.includes("topic") || nameOrId.includes("title") || nameOrId.includes("contacttype")) {
@@ -3657,9 +3895,10 @@ export async function submitContactForm({
       const activityTracker = () => { networkActivityFired = true; };
       activePage.on("request", activityTracker);
 
-      // Pre-Submit Checkbox & Cookie Sweep: sweep immediately prior to click to ensure any dynamically mounted
-      // policy, terms, consent or required checkboxes are checked, and late cookie banners are dismissed.
+      // Pre-Submit Checkbox, Button Group & Cookie Sweep: sweep immediately prior to click to ensure any dynamically mounted
+      // policy, terms, consent or required checkboxes are checked, button options selected, and late cookie banners dismissed.
       await dismissCookieBanners(activePage).catch(() => undefined);
+      await selectFirstOptionInButtonGroups(fillResult.primaryForm || activePage).catch(() => undefined);
       const preSubmitCheckboxes = await sweepAndCheckPreSubmitCheckboxes(activePage, fillResult.primaryForm, submitButton);
       if (preSubmitCheckboxes.length > 0) {
         filledFields.push(...preSubmitCheckboxes);

@@ -446,8 +446,18 @@ export function classifyErrorTaxonomy(
   return "UNKNOWN_ERROR";
 }
 
+const FALLBACK_TAXONOMY_DETAIL: TaxonomyDetail = {
+  category: "UNKNOWN_ERROR",
+  displayName: "Unclassified Error",
+  stage: "SYSTEM",
+  isRetryable: false,
+  isExternalBlocker: false,
+  recommendedAction: "Inspect attempt execution logs and screenshot proof for diagnostic context.",
+  legacyCategory: "OTHER"
+};
+
 export function getTaxonomyDetail(cat: ErrorTaxonomyCategory): TaxonomyDetail {
-  return ERROR_TAXONOMY_MAP[cat] || ERROR_TAXONOMY_MAP.UNKNOWN_ERROR;
+  return (ERROR_TAXONOMY_MAP && ERROR_TAXONOMY_MAP[cat]) || ERROR_TAXONOMY_MAP.UNKNOWN_ERROR || FALLBACK_TAXONOMY_DETAIL;
 }
 
 export function classifyLegacyCategory(
@@ -459,7 +469,7 @@ export function classifyLegacyCategory(
 }
 
 export function computeTaxonomyCounts(
-  items: Array<{ detail?: string | null; status?: string | null }>
+  items?: Array<{ detail?: string | null; status?: string | null }> | null
 ): Record<ErrorTaxonomyCategory, number> {
   const counts: Record<ErrorTaxonomyCategory, number> = {
     NAVIGATION_TIMEOUT: 0,
@@ -484,9 +494,16 @@ export function computeTaxonomyCounts(
     UNKNOWN_ERROR: 0
   };
 
+  if (!Array.isArray(items)) return counts;
+
   for (const item of items) {
+    if (!item) continue;
     const cat = classifyErrorTaxonomy(item.detail, item.status);
-    counts[cat]++;
+    if (cat in counts) {
+      counts[cat]++;
+    } else {
+      counts.UNKNOWN_ERROR++;
+    }
   }
 
   return counts;

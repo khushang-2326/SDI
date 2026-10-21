@@ -1564,7 +1564,7 @@ async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
           control.getAttribute("data-drawer"),
           control.getAttribute("data-drawer-trigger"),
           control.getAttribute("id"),
-          control.className
+          String((control as any).className?.baseVal || (control as any).className || "")
         ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
 
         // Critical Safety: Exclude non-lead utility triggers (cart, search, cookie dialogs, etc.)
@@ -1601,7 +1601,7 @@ async function revealInteractiveDiscoveryTargets(page: Page): Promise<number> {
         let score = 0;
         if (hasContactIntent) score += 50;
         if (/\b(contact|talk|touch|quote|book|devis|kontakt|contacto)\b/i.test(text)) score += 30;
-        if (/\b(menu|navigation|hamburger)\b/i.test(text) || control.className.includes("menu") || control.className.includes("nav")) score += 20;
+        if (/\b(menu|navigation|hamburger)\b/i.test(text) || (String((control as any).className?.baseVal || (control as any).className || "").includes("menu") || String((control as any).className?.baseVal || (control as any).className || "").includes("nav"))) score += 20;
         if (isModalOrDrawer) score += 10;
 
         candidates.push({ index: i, score });

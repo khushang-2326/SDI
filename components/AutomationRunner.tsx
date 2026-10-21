@@ -60,10 +60,10 @@ interface PipelineState {
 }
 
 function deriveAutomationPipeline(
-  status: string,
-  detail: string,
-  isSuccess: boolean,
-  hasScreenshot: boolean
+  status?: string | null,
+  detail?: string | null,
+  isSuccess?: boolean | null,
+  hasScreenshot?: boolean | null
 ): PipelineState {
   const steps: PipelineStep[] = [
     { id: "website_load", label: "Website Load", state: "waiting" },
@@ -73,11 +73,11 @@ function deriveAutomationPipeline(
     { id: "take_screenshot", label: "Proof Screenshot", state: "waiting" }
   ];
 
-  if (status === "waiting") {
+  if (!status || status === "waiting") {
     return { steps, failedStepName: null, activeStepName: null };
   }
 
-  if (isSuccess) {
+  if (Boolean(isSuccess)) {
     steps.forEach((s) => (s.state = "completed"));
     return { steps, failedStepName: null, activeStepName: "Completed" };
   }
@@ -204,10 +204,10 @@ function AutomationPipelineView({
   isSuccess,
   hasScreenshot
 }: {
-  status: string;
-  detail: string;
-  isSuccess: boolean;
-  hasScreenshot: boolean;
+  status?: string | null;
+  detail?: string | null;
+  isSuccess?: boolean | null;
+  hasScreenshot?: boolean | null;
 }) {
   const pipeline = deriveAutomationPipeline(status, detail, isSuccess, hasScreenshot);
 
@@ -343,10 +343,11 @@ function AutomationAnalysisModal({
 
   if (!isOpen || !mounted) return null;
 
-  const totalWebsites = items.length;
-  const successWebsites = items.filter((i) => i.isSuccess);
-  const failedWebsites = items.filter((i) => i.status === "failed" && !i.isSuccess);
-  const pendingWebsites = items.filter((i) => i.status === "waiting" || i.status === "discovering" || i.status === "cancelled");
+  const safeItems = Array.isArray(items) ? items : [];
+  const totalWebsites = safeItems.length;
+  const successWebsites = safeItems.filter((i) => i && i.isSuccess);
+  const failedWebsites = safeItems.filter((i) => i && i.status === "failed" && !i.isSuccess);
+  const pendingWebsites = safeItems.filter((i) => i && (i.status === "waiting" || i.status === "discovering" || i.status === "cancelled"));
 
   const successRate = totalWebsites > 0 ? ((successWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
   const failureRate = totalWebsites > 0 ? ((failedWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
@@ -357,7 +358,7 @@ function AutomationAnalysisModal({
   }, [failedWebsites]);
 
   const activeTaxonomyList = useMemo(() => {
-    return (Object.entries(taxonomyCounts) as [ErrorTaxonomyCategory, number][])
+    return (Object.entries(taxonomyCounts || {}) as [ErrorTaxonomyCategory, number][])
       .filter(([_, count]) => count > 0)
       .map(([cat, count]) => ({
         category: cat,
@@ -371,12 +372,16 @@ function AutomationAnalysisModal({
   const categoryCounts: Record<string, number> = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const item of activeTaxonomyList) {
-      counts[item.detail.displayName] = item.count;
+      if (item && item.detail) {
+        const name = item.detail.displayName || "Unclassified Error";
+        counts[name] = item.count;
+      }
     }
     return counts;
   }, [activeTaxonomyList]);
 
-  const filteredItems = items.filter((item) => {
+  const filteredItems = safeItems.filter((item) => {
+    if (!item) return false;
     if (filter === "success" && !item.isSuccess) return false;
     if (filter === "failed" && (item.isSuccess || item.status !== "failed")) return false;
     if (filter === "pending" && (item.isSuccess || item.status === "failed")) return false;
@@ -384,13 +389,19 @@ function AutomationAnalysisModal({
       const q = searchQuery.toLowerCase();
       const itemCat = classifyErrorTaxonomy(item.detail, item.status);
       const itemDetail = getTaxonomyDetail(itemCat);
+      const name = (item.name || "").toLowerCase();
+      const url = (item.url || "").toLowerCase();
+      const status = (item.status || "").toLowerCase();
+      const detail = (item.detail || "").toLowerCase();
+      const catName = (itemDetail?.displayName || "").toLowerCase();
+      const cat = (itemCat || "").toLowerCase();
       return (
-        item.name.toLowerCase().includes(q) ||
-        item.url.toLowerCase().includes(q) ||
-        item.status.toLowerCase().includes(q) ||
-        item.detail.toLowerCase().includes(q) ||
-        itemDetail.displayName.toLowerCase().includes(q) ||
-        itemCat.toLowerCase().includes(q)
+        name.includes(q) ||
+        url.includes(q) ||
+        status.includes(q) ||
+        detail.includes(q) ||
+        catName.includes(q) ||
+        cat.includes(q)
       );
     }
     return true;
@@ -415,12 +426,12 @@ ${Object.entries(categoryCounts)
   .join("\n") || "- None"}
 
 TARGET DETAILS:
-${items
+${safeItems
   .map(
     (i, idx) =>
-      `${idx + 1}. [${i.isSuccess ? "SUCCESS" : "FAILED"}] ${i.name} (${i.url}) - Trials: ${
-        i.successfulTrialsCount
-      }/${i.trialsCount} - Detail: ${i.detail}`
+      `${idx + 1}. [${i.isSuccess ? "SUCCESS" : "FAILED"}] ${i.name || "Target"} (${i.url || ""}) - Trials: ${
+        i.successfulTrialsCount || 0
+      }/${i.trialsCount || 0} - Detail: ${i.detail || ""}`
   )
   .join("\n")}`;
 
@@ -451,16 +462,16 @@ ${items
         totalTrialsSuccessful,
         runtime,
         categoryCounts,
-        items: items.map((item, idx) => ({
+        items: safeItems.map((item, idx) => ({
           index: idx + 1,
-          name: item.name,
-          url: item.url,
-          status: item.status,
-          isSuccess: item.isSuccess,
-          targetType: item.attempts?.[0]?.targetType,
-          trialsCount: item.trialsCount,
-          successfulTrialsCount: item.successfulTrialsCount,
-          detail: item.detail,
+          name: item?.name || "Target",
+          url: item?.url || "",
+          status: item?.status || "unknown",
+          isSuccess: Boolean(item?.isSuccess),
+          targetType: item?.attempts?.[0]?.targetType,
+          trialsCount: item?.trialsCount ?? 0,
+          successfulTrialsCount: item?.successfulTrialsCount ?? 0,
+          detail: item?.detail || "",
           durationSec: undefined
         }))
       });
@@ -1324,18 +1335,26 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
 
   useEffect(() => {
     const epoch = sessionEpochRef.current;
-    void getBackgroundAutomationAction().then((job) => {
-      if (sessionEpochRef.current !== epoch) return;
-      applyBackgroundJob(job);
-      if (job && job.status === "running") {
-        void processLocalBackgroundAutomationAction(job.id, workerCount)
-          .then((resumedJob) => {
-            if (sessionEpochRef.current !== epoch) return;
-            if (resumedJob) applyBackgroundJob(resumedJob);
-          })
-          .catch(() => undefined);
-      }
-    });
+    void getBackgroundAutomationAction()
+      .then((job) => {
+        if (sessionEpochRef.current !== epoch) return;
+        applyBackgroundJob(job);
+        if (job && job.status === "running") {
+          void processLocalBackgroundAutomationAction(job.id, workerCount)
+            .then((resumedJob) => {
+              if (sessionEpochRef.current !== epoch) return;
+              if (resumedJob) applyBackgroundJob(resumedJob);
+            })
+            .catch(() => undefined);
+        }
+      })
+      .catch((err) => {
+        const msg = String(err?.message || err || "");
+        if (msg.includes("Failed to find Server Action") || msg.includes("older or newer deployment")) {
+          console.warn("[AutomationRunner] Action hash mismatch detected on init. Reloading page...", err);
+          window.location.reload();
+        }
+      });
   }, [applyBackgroundJob, workerCount]);
 
   useEffect(() => {
@@ -1349,7 +1368,14 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
         if (stopped || sessionEpochRef.current !== epoch) return;
 
-        const job = await getBackgroundAutomationAction(jobId).catch(() => null);
+        const job = await getBackgroundAutomationAction(jobId).catch((err) => {
+          const msg = String(err?.message || err || "");
+          if (msg.includes("Failed to find Server Action") || msg.includes("older or newer deployment")) {
+            console.warn("[AutomationRunner] Action hash mismatch in loop. Reloading page...", err);
+            window.location.reload();
+          }
+          return null;
+        });
         if (stopped || sessionEpochRef.current !== epoch) return;
         if (job) applyBackgroundJob(job);
         if (!job || (job.status !== "running" && job.status !== "paused")) return;

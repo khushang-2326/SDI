@@ -179,7 +179,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
             dataToggle.includes("modal") ||
             Boolean(dataTarget) ||
             ariaHasPopup === "dialog" ||
-            anchor.className.toLowerCase().includes("modal-trigger") ||
+            String((anchor as any).className?.baseVal || (anchor as any).className || "").toLowerCase().includes("modal-trigger") ||
             (rawHref.startsWith("#") && /modal|contact|quote|popup|drawer/i.test(rawHref));
 
           const candidateType: CandidateType = isModal
@@ -189,8 +189,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
               : "anchor";
 
           const isProminent =
-            anchor.className.toLowerCase().includes("btn") ||
-            anchor.className.toLowerCase().includes("button") ||
+            String((anchor as any).className?.baseVal || (anchor as any).className || "").toLowerCase().includes("btn") || String((anchor as any).className?.baseVal || (anchor as any).className || "").toLowerCase().includes("button") ||
             anchor.getAttribute("role") === "button";
 
           results.push({
@@ -246,8 +245,8 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           const isModal =
             dataToggle.includes("modal") ||
             ariaHasPopup === "dialog" ||
-            el.className.toLowerCase().includes("modal-trigger") ||
-            el.className.toLowerCase().includes("drawer-trigger") ||
+            String((el as any).className?.baseVal || (el as any).className || "").toLowerCase().includes("modal-trigger") ||
+            String((el as any).className?.baseVal || (el as any).className || "").toLowerCase().includes("drawer-trigger") ||
             /modal|drawer|popup/i.test(el.getAttribute("aria-controls") || "");
 
           if (!extractedUrl && !isModal && !hasContactIntent) continue;

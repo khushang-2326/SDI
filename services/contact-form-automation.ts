@@ -3363,7 +3363,7 @@ export async function submitContactForm({
   headless = true,
   submit = true,
   liveSubmit,
-  timeoutMs = 30000,
+  timeoutMs = 300000,
   browserContext,
   skipPersist,
   userId,
@@ -3412,7 +3412,8 @@ export async function submitContactForm({
     if (!page) {
       throw new Error("Failed to initialize browser page.");
     }
-    page.setDefaultTimeout(timeoutMs);
+    page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(25000);
 
     // A contact form can be usable even when a legacy script, tracker, or other
     // resource prevents DOMContentLoaded/networkidle from completing. Continue
@@ -3862,6 +3863,9 @@ export async function submitContactForm({
 
     if (shouldSubmit) {
       await onProgress?.("submit_form", "Submitting contact form...");
+      // Dismiss any open dropdown menus, hover overlays, mega-menus or popups
+      await activePage.keyboard.press("Escape").catch(() => undefined);
+      await activePage.mouse.move(0, 0).catch(() => undefined);
       await dismissCookieBanners(activePage).catch(() => undefined);
       await submitButton.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => undefined);
 
@@ -3898,6 +3902,7 @@ export async function submitContactForm({
       // Pre-Submit Checkbox, Button Group & Cookie Sweep: sweep immediately prior to click to ensure any dynamically mounted
       // policy, terms, consent or required checkboxes are checked, button options selected, and late cookie banners dismissed.
       await dismissCookieBanners(activePage).catch(() => undefined);
+      await activePage.keyboard.press("Escape").catch(() => undefined);
       await selectFirstOptionInButtonGroups(fillResult.primaryForm || activePage).catch(() => undefined);
       const preSubmitCheckboxes = await sweepAndCheckPreSubmitCheckboxes(activePage, fillResult.primaryForm, submitButton);
       if (preSubmitCheckboxes.length > 0) {
@@ -3910,8 +3915,9 @@ export async function submitContactForm({
         await submitButton.click({ timeout: 4000 });
         clickSucceeded = true;
       } catch {
-        // If click was intercepted by a newly appeared cookie banner or overlay, dismiss it and retry with force
+        // If click was intercepted by a newly appeared cookie banner, mega-menu, or overlay, dismiss it and retry with force
         await dismissCookieBanners(activePage).catch(() => undefined);
+        await activePage.keyboard.press("Escape").catch(() => undefined);
         try {
           await submitButton.click({ timeout: 2000, force: true });
           clickSucceeded = true;

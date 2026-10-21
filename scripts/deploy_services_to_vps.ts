@@ -8,13 +8,12 @@ conn.on('ready', () => {
     if (err) { console.error('SFTP error:', err); process.exit(1); }
 
     const filesToSync = [
-      { local: 'd:/Projects/SDI/services/field-classifier.ts', remote: '/root/SDI/services/field-classifier.ts', container: 'sdi:/app/services/field-classifier.ts' },
-      { local: 'd:/Projects/SDI/services/action-button-fallback.ts', remote: '/root/SDI/services/action-button-fallback.ts', container: 'sdi:/app/services/action-button-fallback.ts' },
-      { local: 'd:/Projects/SDI/services/submission-target-discovery.ts', remote: '/root/SDI/services/submission-target-discovery.ts', container: 'sdi:/app/services/submission-target-discovery.ts' },
+      { local: 'd:/Projects/SDI/lib/config.ts', remote: '/root/SDI/lib/config.ts', container: 'sdi:/app/lib/config.ts' },
       { local: 'd:/Projects/SDI/services/multi-target-automation.ts', remote: '/root/SDI/services/multi-target-automation.ts', container: 'sdi:/app/services/multi-target-automation.ts' },
       { local: 'd:/Projects/SDI/services/contact-form-automation.ts', remote: '/root/SDI/services/contact-form-automation.ts', container: 'sdi:/app/services/contact-form-automation.ts' },
-      { local: 'd:/Projects/SDI/services/success-invariants.ts', remote: '/root/SDI/services/success-invariants.ts', container: 'sdi:/app/services/success-invariants.ts' },
-      { local: 'd:/Projects/SDI/tsconfig.json', remote: '/root/SDI/tsconfig.json', container: 'sdi:/app/tsconfig.json' }
+      { local: 'd:/Projects/SDI/services/error-taxonomy.ts', remote: '/root/SDI/services/error-taxonomy.ts', container: 'sdi:/app/services/error-taxonomy.ts' },
+      { local: 'd:/Projects/SDI/services/cookie-consent-helper.ts', remote: '/root/SDI/services/cookie-consent-helper.ts', container: 'sdi:/app/services/cookie-consent-helper.ts' },
+      { local: 'd:/Projects/SDI/services/worker-pool.ts', remote: '/root/SDI/services/worker-pool.ts', container: 'sdi:/app/services/worker-pool.ts' }
     ];
 
     let completed = 0;
@@ -26,7 +25,12 @@ conn.on('ready', () => {
 
         if (completed === filesToSync.length) {
           console.log('[DOCKER] Copying updated files into sdi container...');
-          const copyCmd = filesToSync.map(f => `docker cp "${f.remote}" "${f.container}"`).join('\n') + `
+          const copyCmd = `
+            cd /root/SDI
+            git fetch origin main
+            git reset --hard origin/main
+            echo "Host commit: $(git rev-parse HEAD)"
+            ${filesToSync.map(f => `docker cp "${f.remote}" "${f.container}"`).join('\n')}
             echo "=== 1. Verifying TypeScript types inside container ==="
             docker exec sdi npm run typecheck
             echo "=== 2. Rebuilding Next.js production bundle inside container ==="

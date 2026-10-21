@@ -399,7 +399,9 @@ export function classifyErrorTaxonomy(
     combined.includes("overall deadline budget") ||
     combined.includes("attempt budget limit") ||
     combined.includes("budget exceeded") ||
+    combined.includes("maximum automation time limit") ||
     combined.includes("exceeded 120s limit") ||
+    combined.includes("exceeded 300s limit") ||
     (combined.includes("exceeded") && combined.includes("budget")) ||
     (combined.includes("budget") && combined.includes("limit"))
   ) {

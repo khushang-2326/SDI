@@ -44,7 +44,7 @@ export type MultiTargetCallbacks = {
 
 const MAX_TARGET_ATTEMPTS_PER_WEBSITE = 5;
 const MAX_CONSECUTIVE_FAILURES = 3;
-const MAX_ATTEMPT_TIMEOUT_MS = 120_000;
+const MAX_ATTEMPT_TIMEOUT_MS = 300_000;
 
 function isCalendlyEventTarget(target: DiscoveredSubmissionTarget) {
   if (target.targetType !== "calendly") return true;
@@ -70,7 +70,7 @@ function withAttemptTimeout<T>(
       } catch {
         // ignore
       }
-      reject(new Error(`${label} exceeded attempt budget limit of ${Math.round(timeoutMs / 1000)}s.`));
+      reject(new Error(`${label} exceeded maximum automation time limit of ${Math.round(timeoutMs / 1000)}s.`));
     }, timeoutMs);
   });
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));

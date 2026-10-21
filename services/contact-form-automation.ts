@@ -3341,6 +3341,8 @@ export async function submitContactForm({
 
     // Fill the selected primary form only once.
     await onProgress?.("fill_form", "Filling form fields with lead data...");
+    // Proactively dismiss/accept any cookie consent banners before filling form fields
+    await dismissCookieBanners(activePage).catch(() => undefined);
     const tFillStart = Date.now();
     const fillResult = await fillAllVisibleForms(page, effectiveLeadData);
     tFieldFilling = Date.now() - tFillStart;
@@ -3393,6 +3395,9 @@ export async function submitContactForm({
         });
       }
     }
+
+    // Ensure any late-mounting cookie banners or popups are dismissed before pre-submission validation
+    await dismissCookieBanners(activePage).catch(() => undefined);
 
     screenshotPath = await takeScreenshot(page, websiteUrl, "before-submit");
 
@@ -3652,8 +3657,9 @@ export async function submitContactForm({
       const activityTracker = () => { networkActivityFired = true; };
       activePage.on("request", activityTracker);
 
-      // Pre-Submit Checkbox Sweep: sweep immediately prior to click to ensure any dynamically mounted
-      // policy, terms, consent or required checkboxes are checked before firing submission.
+      // Pre-Submit Checkbox & Cookie Sweep: sweep immediately prior to click to ensure any dynamically mounted
+      // policy, terms, consent or required checkboxes are checked, and late cookie banners are dismissed.
+      await dismissCookieBanners(activePage).catch(() => undefined);
       const preSubmitCheckboxes = await sweepAndCheckPreSubmitCheckboxes(activePage, fillResult.primaryForm, submitButton);
       if (preSubmitCheckboxes.length > 0) {
         filledFields.push(...preSubmitCheckboxes);
@@ -3665,7 +3671,14 @@ export async function submitContactForm({
         await submitButton.click({ timeout: 4000 });
         clickSucceeded = true;
       } catch {
-        clickSucceeded = false;
+        // If click was intercepted by a newly appeared cookie banner or overlay, dismiss it and retry with force
+        await dismissCookieBanners(activePage).catch(() => undefined);
+        try {
+          await submitButton.click({ timeout: 2000, force: true });
+          clickSucceeded = true;
+        } catch {
+          clickSucceeded = false;
+        }
       }
 
       // Phase 2: HTML5 :invalid Self-Healing Recovery

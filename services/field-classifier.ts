@@ -278,7 +278,7 @@ export function solveMathOrSpamChallenge(descriptor: string): string | null {
   const text = descriptor.toLowerCase().replace(/\s+/g, " ").trim();
 
   // 1. Text extraction instructions: e.g. "Spam check please enter: seo", "Spam Check Enter: seolosangeles", "enter: XYZ", "type 'XYZ'"
-  const enterMatch = text.match(/(?:please\s+)?(?:enter|type|input|write|code)[:\s]+['"]?([a-zA-Z0-9_-]+)['"]?/i);
+  const enterMatch = text.match(/(?:please\s+)?(?:enter|type|input|write|code)\s*(?:the\s+)?(?:word|code|text|letters|following)?[:\s]+['"]?([a-zA-Z0-9_-]+)['"]?/i);
   if (enterMatch && enterMatch[1]) {
     const word = enterMatch[1].trim();
     if (!["the", "your", "a", "an", "this", "number", "text", "answer", "code", "message", "name", "email", "phone"].includes(word.toLowerCase())) {

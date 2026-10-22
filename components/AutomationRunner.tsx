@@ -1691,6 +1691,14 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
             <Field label="Mobile" name="mobile" defaultValue="5551234567" />
             <Field label="Company Name" name="companyName" defaultValue="Demo Company" />
           </div>
+          <Field
+            label="Website URL"
+            name="websiteUrl"
+            type="url"
+            placeholder="https://example.com"
+            defaultValue="https://example.com"
+            required={false}
+          />
           <TextArea label="Address" name="address" defaultValue="123 Demo Street, New York, NY" />
           <TextArea
             label="Message"
@@ -2344,7 +2352,7 @@ function Field({
   placeholder?: string;
   readOnly?: boolean;
   required?: boolean;
-  type?: "text" | "email" | "url";
+  type?: "text" | "email" | "url" | "tel" | string;
 }) {
   return (
     <label className="block">

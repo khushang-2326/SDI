@@ -35,6 +35,7 @@ export default async function LeadsPage() {
             <Field label="Mobile Number" name="mobileNumber" type="tel" />
             <Field label="Email" name="email" type="email" />
             <Field label="Company Name" name="companyName" />
+            <Field label="Website URL" name="websiteUrl" type="url" placeholder="https://example.com" required={false} />
             <TextAreaField label="Address" name="address" />
             <TextAreaField label="Message" name="message" />
             <SubmitButton>Save Lead</SubmitButton>

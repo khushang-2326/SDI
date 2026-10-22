@@ -310,6 +310,7 @@ async function processSingleTarget(
           message: (payloadFields.get("message") || payloadFields.get("inquiry") || "").trim(),
           companyName: (payloadFields.get("companyName") || payloadFields.get("company") || "").trim(),
           website: (payloadFields.get("website") || payloadFields.get("websiteUrl") || "").trim(),
+          websiteUrl: (payloadFields.get("websiteUrl") || payloadFields.get("website") || "").trim(),
           jobTitle: (payloadFields.get("jobTitle") || payloadFields.get("role") || "").trim(),
           subject: (payloadFields.get("subject") || "").trim()
         },

@@ -15,6 +15,7 @@ export async function createLeadAction(formData: FormData) {
       address: String(formData.get("address") ?? "").trim(),
       message: String(formData.get("message") ?? "").trim(),
       companyName: String(formData.get("companyName") ?? "").trim(),
+      websiteUrl: String(formData.get("websiteUrl") ?? formData.get("website") ?? "").trim(),
       userId: user.id
     }
   });

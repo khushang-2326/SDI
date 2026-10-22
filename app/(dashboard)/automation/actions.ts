@@ -225,6 +225,7 @@ export async function startBackgroundAutomationAction(formData: FormData) {
     address: (fieldsMap.get("address") || "").trim(),
     message: (fieldsMap.get("message") || "").trim(),
     companyName: (fieldsMap.get("companyName") || "").trim(),
+    websiteUrl: (fieldsMap.get("websiteUrl") || fieldsMap.get("website") || "").trim(),
     userId: user.id
   };
 
@@ -687,7 +688,9 @@ async function processLocalQueueResult(userId: string, resultId: string) {
             mobile: payloadFields.get("mobile") || payloadFields.get("mobileNumber") || "",
             address: payloadFields.get("address") || "",
             message: payloadFields.get("message") || "",
-            companyName: payloadFields.get("companyName") || ""
+            companyName: payloadFields.get("companyName") || "",
+            website: (payloadFields.get("websiteUrl") || payloadFields.get("website") || "").trim(),
+            websiteUrl: (payloadFields.get("websiteUrl") || payloadFields.get("website") || "").trim()
           },
           bookingPreferences: {
             preferredDate: payloadFields.get("preferredDate"),
@@ -1085,7 +1088,9 @@ export async function runSingleAutomationAction(
     mobile: readText(formData, "mobile"),
     address: readText(formData, "address"),
     message: readText(formData, "message"),
-    companyName: readText(formData, "companyName")
+    companyName: readText(formData, "companyName"),
+    website: readText(formData, "websiteUrl") || readText(formData, "website"),
+    websiteUrl: readText(formData, "websiteUrl") || readText(formData, "website")
   };
 
   const selectedWebsite = selectedWebsiteId

@@ -1319,12 +1319,19 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
   }
 
   // 6. Website
-  const websiteValue = (leadData.website || leadData.websiteUrl || "").trim();
+  let websiteValue = (leadData.website || leadData.websiteUrl || "").trim();
+  if (websiteValue && !/^https?:\/\//i.test(websiteValue)) {
+    websiteValue = `https://${websiteValue}`;
+  }
   const websiteCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "website")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (!websiteValue && websiteCandidates.some((c) => c.signal.isRequired)) {
+    websiteValue = "https://example.com";
+  }
 
   if (websiteValue && websiteCandidates.length > 0) {
     await tryFillFieldCandidates(websiteCandidates, "website", "website", websiteValue, "USER_DATA");
@@ -2019,6 +2026,35 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
       if (fillRes.success) {
         usedIndexes.add(signal.index);
         filledFields.push(`mathHoneypot:${signal.index}`);
+        continue;
+      }
+    }
+
+    // Fallback: If an unmapped required field is type="url" or asks for a URL/website/domain:
+    const fieldDescriptor = `${signal.name || ""} ${signal.id || ""} ${signal.placeholder || ""} ${signal.explicitLabel || ""} ${signal.ariaLabel || ""}`.toLowerCase();
+    if (
+      signal.isRequired &&
+      signal.isVisible &&
+      !signal.isDisabled &&
+      (signal.type === "url" || /\b(website|web[ _-]?site|url|domain|site[ _-]?url|web[ _-]?address|your[ _-]?website|current[ _-]?site|wcag_url|theme-url)\b/i.test(fieldDescriptor))
+    ) {
+      let webVal = (leadData.website || leadData.websiteUrl || "").trim();
+      if (!webVal) webVal = "https://example.com";
+      else if (!/^https?:\/\//i.test(webVal)) webVal = `https://${webVal}`;
+      const fillRes = await safelyFillField(loc, webVal);
+      if (fillRes.success) {
+        usedIndexes.add(signal.index);
+        filledFields.push(`website:${signal.name || signal.id || signal.index}`);
+        verificationItems.push({
+          fieldIndex: signal.index,
+          fieldType: "website" as SemanticFieldType,
+          mappedSource: "USER_DATA",
+          confidence: 0.95,
+          evidence: ["fallback_fill_required_website_url"],
+          filled: true,
+          verified: fillRes.verified,
+          finalValue: webVal
+        });
         continue;
       }
     }

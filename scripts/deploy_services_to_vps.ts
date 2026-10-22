@@ -27,6 +27,10 @@ conn.on('ready', () => {
       { local: 'd:/Projects/SDI/services/calendly-booking-automation.ts', remote: '/root/SDI/services/calendly-booking-automation.ts', container: 'sdi:/app/services/calendly-booking-automation.ts' },
       { local: 'd:/Projects/SDI/services/hubspot-booking-automation.ts', remote: '/root/SDI/services/hubspot-booking-automation.ts', container: 'sdi:/app/services/hubspot-booking-automation.ts' },
       { local: 'd:/Projects/SDI/app/(dashboard)/analytics/page.tsx', remote: '/root/SDI/app/(dashboard)/analytics/page.tsx', container: 'sdi:/app/app/(dashboard)/analytics/page.tsx' },
+      { local: 'd:/Projects/SDI/app/(dashboard)/automation/actions.ts', remote: '/root/SDI/app/(dashboard)/automation/actions.ts', container: 'sdi:/app/app/(dashboard)/automation/actions.ts' },
+      { local: 'd:/Projects/SDI/app/(dashboard)/leads/actions.ts', remote: '/root/SDI/app/(dashboard)/leads/actions.ts', container: 'sdi:/app/app/(dashboard)/leads/actions.ts' },
+      { local: 'd:/Projects/SDI/app/(dashboard)/leads/page.tsx', remote: '/root/SDI/app/(dashboard)/leads/page.tsx', container: 'sdi:/app/app/(dashboard)/leads/page.tsx' },
+      { local: 'd:/Projects/SDI/prisma/schema.prisma', remote: '/root/SDI/prisma/schema.prisma', container: 'sdi:/app/prisma/schema.prisma' },
       { local: 'd:/Projects/SDI/next.config.mjs', remote: '/root/SDI/next.config.mjs', container: 'sdi:/app/next.config.mjs' }
     ];
 
@@ -45,14 +49,17 @@ conn.on('ready', () => {
             git reset --hard origin/main
             echo "Host commit: $(git rev-parse HEAD)"
             ${filesToSync.map(f => `docker cp "${f.remote}" "${f.container}"`).join('\n')}
-            echo "=== 1. Verifying TypeScript types inside container ==="
+            echo "=== 1. Syncing Prisma DB schema ==="
+            docker exec sdi npx prisma db push --skip-generate
+            docker exec sdi npx prisma generate
+            echo "=== 2. Verifying TypeScript types inside container ==="
             docker exec sdi npm run typecheck
-            echo "=== 2. Rebuilding Next.js production bundle inside container ==="
+            echo "=== 3. Rebuilding Next.js production bundle inside container ==="
             docker exec sdi npm run build
-            echo "=== 3. Restarting sdi container ==="
+            echo "=== 4. Restarting sdi container ==="
             docker restart sdi
             sleep 8
-            echo "=== 4. Checking container health and build timestamp ==="
+            echo "=== 5. Checking container health and build timestamp ==="
             docker exec sdi ls -l /app/.next/BUILD_ID || true
             curl -I http://127.0.0.1:80 || true
             echo "=== DEPLOYMENT AND CONTAINER UPDATE COMPLETE ==="

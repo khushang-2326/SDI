@@ -403,6 +403,89 @@ async function fillHubSpotForm(page: Page, leadData: LeadData) {
     skippedFields.push("message");
   }
 
+  // 6. Custom qualification dropdowns (Budget, Service, Team Size, Country, etc.)
+  try {
+    const selects = await page.locator("select:visible").all().catch(() => []);
+    for (const select of selects) {
+      try {
+        const options = await select.locator("option").all().catch(() => []);
+        if (options.length > 2) {
+          const val = await options[2].getAttribute("value").catch(() => null);
+          if (val) await select.selectOption(val).catch(() => {});
+          else await select.selectOption({ index: 2 }).catch(() => {});
+          filledFields.push("custom_dropdown");
+        } else if (options.length > 1) {
+          const val = await options[1].getAttribute("value").catch(() => null);
+          if (val) await select.selectOption(val).catch(() => {});
+          else await select.selectOption({ index: 1 }).catch(() => {});
+          filledFields.push("custom_dropdown");
+        }
+      } catch {}
+    }
+  } catch {}
+
+  // 7. Custom qualification radio buttons
+  try {
+    const radios = await page.locator('input[type="radio"]:visible').all().catch(() => []);
+    const radioGroups = new Map<string, any[]>();
+    for (const radio of radios) {
+      const name = (await radio.getAttribute("name").catch(() => null)) || "default_group";
+      if (!radioGroups.has(name)) radioGroups.set(name, []);
+      radioGroups.get(name)!.push(radio);
+    }
+    for (const [_, group] of radioGroups) {
+      let anyChecked = false;
+      for (const r of group) {
+        if (await r.isChecked().catch(() => false)) {
+          anyChecked = true;
+          break;
+        }
+      }
+      if (!anyChecked && group.length > 0) {
+        const targetRadio = group.length > 1 ? group[1] : group[0];
+        await targetRadio.click({ force: true }).catch(() => targetRadio.check({ force: true })).catch(() => {});
+        filledFields.push("custom_radio");
+      }
+    }
+  } catch {}
+
+  // 8. Required checkboxes (Consent / Terms)
+  try {
+    const checkboxes = await page.locator('input[type="checkbox"]:visible').all().catch(() => []);
+    for (const cb of checkboxes) {
+      const isReq = (await cb.getAttribute("required").catch(() => null)) !== null ||
+                    (await cb.getAttribute("aria-required").catch(() => null)) === "true";
+      if (isReq && !(await cb.isChecked().catch(() => false))) {
+        await cb.check({ force: true }).catch(() => cb.click({ force: true })).catch(() => {});
+        filledFields.push("required_checkbox");
+      }
+    }
+  } catch {}
+
+  // 9. Remaining unfilled required text / url inputs
+  try {
+    const textInputs = await page.locator('input[type="text"]:visible, input:not([type]):visible, input[type="url"]:visible, input[type="number"]:visible').all().catch(() => []);
+    for (const input of textInputs) {
+      const val = await input.inputValue().catch(() => "");
+      if (!val) {
+        const isReq = (await input.getAttribute("required").catch(() => null)) !== null ||
+                      (await input.getAttribute("aria-required").catch(() => null)) === "true";
+        const meta = ((await input.getAttribute("name").catch(() => "")) + " " +
+                      (await input.getAttribute("placeholder").catch(() => "")) + " " +
+                      (await input.getAttribute("aria-label").catch(() => ""))).toLowerCase();
+        if (meta.includes("website") || meta.includes("url") || meta.includes("domain") || meta.includes("site")) {
+          const web = leadData.websiteUrl || leadData.website || "https://google.com";
+          await input.fill(web).catch(() => {});
+          filledFields.push("custom_website_url");
+        } else if (isReq) {
+          const fallbackText = leadData.message || leadData.fullName || "Business Consultation";
+          await input.fill(fallbackText).catch(() => {});
+          filledFields.push("custom_required_text");
+        }
+      }
+    }
+  } catch {}
+
   return { filledFields, skippedFields };
 }
 

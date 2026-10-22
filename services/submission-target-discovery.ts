@@ -2279,9 +2279,24 @@ async function discoverSubmissionTargetsInternal({
       }
     };
 
+    const seenCandidateUrls = new Set<string>();
+    const filteredNav = navigationCandidates.filter((c) => {
+      const clean = c.url.toLowerCase().replace(/\/+$/, "");
+      if (isNegativeInfoPath(c.url) || seenCandidateUrls.has(clean)) return false;
+      seenCandidateUrls.add(clean);
+      return true;
+    });
+
+    const filteredFallbacks = fallbackCandidates.filter((c) => {
+      const clean = c.url.toLowerCase().replace(/\/+$/, "");
+      if (seenCandidateUrls.has(clean)) return false;
+      seenCandidateUrls.add(clean);
+      return true;
+    });
+
     const rawQueue = [
-      ...navigationCandidates.filter((c) => !isNegativeInfoPath(c.url)),
-      ...(navigationCandidates.length === 0 ? fallbackCandidates : [])
+      ...filteredNav,
+      ...filteredFallbacks
     ].sort((a, b) => {
       const tierA = getStructuralTier(a);
       const tierB = getStructuralTier(b);
@@ -2509,6 +2524,32 @@ async function discoverSubmissionTargetsInternal({
       }
       return b.confidence - a.confidence || a.url.localeCompare(b.url);
     });
+
+    const hasContactFormTarget = targets.some((t) => t.targetType === "contact_form");
+    if (!hasContactFormTarget && targets.length > 0 && normalizedWebsiteUrl) {
+      try {
+        const u = new URL(normalizedWebsiteUrl);
+        if (!/calendly\.com|hubspot\.com/i.test(u.hostname)) {
+          const fallbackContactUrls = [`${u.origin}/contact`, `${u.origin}/contact-us`];
+          for (const fb of fallbackContactUrls) {
+            if (!targets.some((t) => t.url.toLowerCase() === fb.toLowerCase())) {
+              targets.push({
+                targetType: "contact_form",
+                url: fb,
+                executionOrder: 1, // Contact form always takes first priority!
+                confidence: 70,
+                reason: "Prioritized standard website contact form fallback for booking target",
+                screenshotPath: null
+              });
+            }
+          }
+          targets.sort((a, b) => {
+            if (a.executionOrder !== b.executionOrder) return a.executionOrder - b.executionOrder;
+            return b.confidence - a.confidence || a.url.localeCompare(b.url);
+          });
+        }
+      } catch {}
+    }
 
     // Automatic Relaxed Resource-Filter Fallback:
     // If conservative mode blocked raster images and yielded 0 targets, relax filters and re-check page if budget permits

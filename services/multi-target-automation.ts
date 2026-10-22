@@ -103,7 +103,8 @@ async function executeTarget({
   browserContext,
   userId,
   timeoutMs,
-  onProgress
+  onProgress,
+  websiteUrl
 }: {
   target: DiscoveredSubmissionTarget;
   leadData: LeadData;
@@ -113,18 +114,8 @@ async function executeTarget({
   userId?: string;
   timeoutMs: number;
   onProgress?: MultiTargetCallbacks["onProgress"];
+  websiteUrl?: string;
 }) {
-  if (target.targetType === "calendly") {
-    return submitCalendlyBooking({
-      websiteUrl: target.url,
-      leadData,
-      bookingPreferences,
-      liveSubmit,
-      browserContext,
-      skipPersist: true,
-      timeoutMs
-    });
-  }
   if (target.targetType === "contact_form") {
     const contactResult = await submitContactForm({
       websiteUrl: target.url,
@@ -152,8 +143,30 @@ async function executeTarget({
     }
     return contactResult;
   }
-  if (target.targetType === "hubspot_booking") {
-    return submitHubSpotBooking({
+
+  let bookingResult: SubmitContactFormResult;
+  if (target.targetType === "calendly") {
+    bookingResult = await submitCalendlyBooking({
+      websiteUrl: target.url,
+      leadData,
+      bookingPreferences,
+      liveSubmit,
+      browserContext,
+      skipPersist: true,
+      timeoutMs
+    });
+  } else if (target.targetType === "hubspot_booking") {
+    bookingResult = await submitHubSpotBooking({
+      websiteUrl: target.url,
+      leadData,
+      bookingPreferences,
+      liveSubmit,
+      browserContext,
+      skipPersist: true,
+      timeoutMs
+    });
+  } else {
+    bookingResult = await submitGenericBookingWidget({
       websiteUrl: target.url,
       leadData,
       bookingPreferences,
@@ -163,37 +176,53 @@ async function executeTarget({
       timeoutMs
     });
   }
-  const bookingResult = await submitGenericBookingWidget({
-    websiteUrl: target.url,
-    leadData,
-    bookingPreferences,
-    liveSubmit,
-    browserContext,
-    skipPersist: true,
-    timeoutMs
-  });
 
+  // Universal Booking Fallback:
+  // If ANY booking target did not succeed (no open slots, question validation failed, or unmounted),
+  // immediately attempt a standard contact form fallback on the business's website domain!
   if (
     bookingResult.status !== "success" &&
-    bookingResult.status !== "dry_run_ready_to_book" &&
-    (bookingResult.errorMessage?.includes("did not render") || bookingResult.status === "booking_widget_found")
+    bookingResult.status !== "dry_run_ready_to_book"
   ) {
     try {
-      const fallbackUrl = (typeof target.metadata?.discoveredFrom === "string" ? target.metadata.discoveredFrom : null) || target.url;
-      const contactFallback = await submitContactForm({
-        websiteUrl: fallbackUrl,
-        leadData,
-        submit: liveSubmit,
-        browserContext,
-        skipPersist: true,
-        userId,
-        timeoutMs
-      });
-      if (contactFallback.status === "success" || contactFallback.status === "dry_run_ready_to_book") {
-        return contactFallback;
+      let fallbackOrigin: string | null = null;
+      // Extract from embed_domain query param if present
+      const embedMatch = target.url.match(/embed_domain=([^&]+)/i);
+      if (embedMatch && embedMatch[1]) {
+        fallbackOrigin = decodeURIComponent(embedMatch[1]);
+        if (!/^https?:\/\//i.test(fallbackOrigin)) fallbackOrigin = `https://${fallbackOrigin}`;
       }
-    } catch {
-      // Fallback failed, return original booking result
+      if (!fallbackOrigin && target.metadata?.discoveredFrom) {
+        fallbackOrigin = String(target.metadata.discoveredFrom);
+      }
+      if (!fallbackOrigin && websiteUrl && !/calendly\.com|hubspot\.com/i.test(websiteUrl)) {
+        fallbackOrigin = websiteUrl;
+      }
+
+      if (fallbackOrigin) {
+        let cleanOrigin = fallbackOrigin;
+        try { cleanOrigin = new URL(fallbackOrigin).origin; } catch {}
+        const contactCandidates = [`${cleanOrigin}/contact`, `${cleanOrigin}/contact-us`, cleanOrigin];
+        for (const fbUrl of contactCandidates) {
+          console.log(`[BOOKING-FALLBACK] Booking target (${target.targetType}) on ${target.url} did not succeed (${bookingResult.errorMessage || bookingResult.status}). Trying contact form fallback on ${fbUrl}...`);
+          const contactFallback = await submitContactForm({
+            websiteUrl: fbUrl,
+            leadData,
+            submit: liveSubmit,
+            browserContext,
+            skipPersist: true,
+            userId,
+            timeoutMs: Math.min(timeoutMs, 25_000),
+            onProgress
+          });
+          if (contactFallback.status === "success" || contactFallback.status === "dry_run_ready_to_book") {
+            console.log(`[BOOKING-FALLBACK] Successfully recovered target via contact form on ${fbUrl}!`);
+            return contactFallback;
+          }
+        }
+      }
+    } catch (fbErr) {
+      console.warn(`[BOOKING-FALLBACK] Fallback attempt encountered error:`, fbErr);
     }
   }
 
@@ -311,7 +340,8 @@ export async function runMultiTargetAutomation({
             browserContext: activeContext,
             userId,
             timeoutMs: attemptBudgetMs,
-            onProgress: callbacks.onProgress
+            onProgress: callbacks.onProgress,
+            websiteUrl
           }),
           attemptBudgetMs + 1000,
           `Target ${target.url}`
@@ -344,7 +374,8 @@ export async function runMultiTargetAutomation({
                 browserContext: activeContext,
                 userId,
                 timeoutMs: Math.min(attemptBudgetMs, remainingForRecovery - 3000),
-                onProgress: callbacks.onProgress
+                onProgress: callbacks.onProgress,
+                websiteUrl
               }),
               attemptBudgetMs + 1000,
               `Recovered Target ${target.url}`

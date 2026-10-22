@@ -23,7 +23,9 @@ conn.on('ready', () => {
       { local: 'd:/Projects/SDI/app/(dashboard)/error.tsx', remote: '/root/SDI/app/(dashboard)/error.tsx', container: 'sdi:/app/app/(dashboard)/error.tsx' },
       { local: 'd:/Projects/SDI/app/error.tsx', remote: '/root/SDI/app/error.tsx', container: 'sdi:/app/app/error.tsx' },
       { local: 'd:/Projects/SDI/lib/proxy/tester.ts', remote: '/root/SDI/lib/proxy/tester.ts', container: 'sdi:/app/lib/proxy/tester.ts' },
-      { local: 'd:/Projects/SDI/app/(dashboard)/settings/actions.ts', remote: '/root/SDI/app/(dashboard)/settings/actions.ts', container: 'sdi:/app/app/(dashboard)/settings/actions.ts' }
+      { local: 'd:/Projects/SDI/app/(dashboard)/settings/actions.ts', remote: '/root/SDI/app/(dashboard)/settings/actions.ts', container: 'sdi:/app/app/(dashboard)/settings/actions.ts' },
+      { local: 'd:/Projects/SDI/services/calendly-booking-automation.ts', remote: '/root/SDI/services/calendly-booking-automation.ts', container: 'sdi:/app/services/calendly-booking-automation.ts' },
+      { local: 'd:/Projects/SDI/services/hubspot-booking-automation.ts', remote: '/root/SDI/services/hubspot-booking-automation.ts', container: 'sdi:/app/services/hubspot-booking-automation.ts' }
     ];
 
     let completed = 0;

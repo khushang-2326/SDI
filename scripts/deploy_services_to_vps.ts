@@ -25,7 +25,9 @@ conn.on('ready', () => {
       { local: 'd:/Projects/SDI/lib/proxy/tester.ts', remote: '/root/SDI/lib/proxy/tester.ts', container: 'sdi:/app/lib/proxy/tester.ts' },
       { local: 'd:/Projects/SDI/app/(dashboard)/settings/actions.ts', remote: '/root/SDI/app/(dashboard)/settings/actions.ts', container: 'sdi:/app/app/(dashboard)/settings/actions.ts' },
       { local: 'd:/Projects/SDI/services/calendly-booking-automation.ts', remote: '/root/SDI/services/calendly-booking-automation.ts', container: 'sdi:/app/services/calendly-booking-automation.ts' },
-      { local: 'd:/Projects/SDI/services/hubspot-booking-automation.ts', remote: '/root/SDI/services/hubspot-booking-automation.ts', container: 'sdi:/app/services/hubspot-booking-automation.ts' }
+      { local: 'd:/Projects/SDI/services/hubspot-booking-automation.ts', remote: '/root/SDI/services/hubspot-booking-automation.ts', container: 'sdi:/app/services/hubspot-booking-automation.ts' },
+      { local: 'd:/Projects/SDI/app/(dashboard)/analytics/page.tsx', remote: '/root/SDI/app/(dashboard)/analytics/page.tsx', container: 'sdi:/app/app/(dashboard)/analytics/page.tsx' },
+      { local: 'd:/Projects/SDI/next.config.mjs', remote: '/root/SDI/next.config.mjs', container: 'sdi:/app/next.config.mjs' }
     ];
 
     let completed = 0;

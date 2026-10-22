@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import type { ParsedProxy, ProxyTestResult } from "./types";
 import { getChromiumExecutablePath } from "@/services/browser-executable";
+import { decrypt } from "@/lib/crypto";
 
 /**
  * Tests a proxy through an actual Chromium page. This deliberately mirrors
@@ -11,6 +12,15 @@ export async function testProxyConnection(proxy: ParsedProxy, timeoutMs = 15000)
   const startTime = Date.now();
   const server = `${proxy.protocol}://${proxy.host}:${proxy.port}`;
   
+  let proxyPassword = proxy.password;
+  if (proxyPassword && proxyPassword.startsWith("enc:")) {
+    try {
+      proxyPassword = decrypt(proxyPassword.slice(4));
+    } catch {
+      // fallback if not encrypted or decryption fails
+    }
+  }
+
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   try {
     const executablePath = await getChromiumExecutablePath();
@@ -23,7 +33,7 @@ export async function testProxyConnection(proxy: ParsedProxy, timeoutMs = 15000)
       proxy: {
         server,
         username: proxy.username,
-        password: proxy.password
+        password: proxyPassword
       },
       ignoreHTTPSErrors: true
     });

@@ -21,7 +21,9 @@ conn.on('ready', () => {
       { local: 'd:/Projects/SDI/services/submission-target-discovery.ts', remote: '/root/SDI/services/submission-target-discovery.ts', container: 'sdi:/app/services/submission-target-discovery.ts' },
       { local: 'd:/Projects/SDI/components/AutomationRunner.tsx', remote: '/root/SDI/components/AutomationRunner.tsx', container: 'sdi:/app/components/AutomationRunner.tsx' },
       { local: 'd:/Projects/SDI/app/(dashboard)/error.tsx', remote: '/root/SDI/app/(dashboard)/error.tsx', container: 'sdi:/app/app/(dashboard)/error.tsx' },
-      { local: 'd:/Projects/SDI/app/error.tsx', remote: '/root/SDI/app/error.tsx', container: 'sdi:/app/app/error.tsx' }
+      { local: 'd:/Projects/SDI/app/error.tsx', remote: '/root/SDI/app/error.tsx', container: 'sdi:/app/app/error.tsx' },
+      { local: 'd:/Projects/SDI/lib/proxy/tester.ts', remote: '/root/SDI/lib/proxy/tester.ts', container: 'sdi:/app/lib/proxy/tester.ts' },
+      { local: 'd:/Projects/SDI/app/(dashboard)/settings/actions.ts', remote: '/root/SDI/app/(dashboard)/settings/actions.ts', container: 'sdi:/app/app/(dashboard)/settings/actions.ts' }
     ];
 
     let completed = 0;

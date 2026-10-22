@@ -139,6 +139,20 @@ export async function updateProxySettingsAction(
       ? rawStrategy
       : "fallback_only";
 
+    const existingUser = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { proxyPassword: true, proxyPool: true }
+    });
+
+    let existingPoolList: any[] = [];
+    if (existingUser?.proxyPool) {
+      try {
+        existingPoolList = JSON.parse(existingUser.proxyPool);
+      } catch {
+        // ignore
+      }
+    }
+
     const rawProxyPool = String(formData.get("proxyPoolText") || "").trim();
     let parsedPoolJson: string | null = null;
     let poolCount = 0;
@@ -149,9 +163,22 @@ export async function updateProxySettingsAction(
       for (const line of lines) {
         const parsed = parseProxyString(line);
         if (parsed && parsed.host && parsed.port) {
-          const pass = parsed.password && !parsed.password.startsWith("•••")
-            ? `enc:${encrypt(parsed.password)}`
-            : null;
+          let pass: string | null = null;
+          if (parsed.password && !parsed.password.startsWith("•••")) {
+            pass = parsed.password.startsWith("enc:")
+              ? parsed.password
+              : `enc:${encrypt(parsed.password)}`;
+          } else {
+            // Password was masked (••••••••) or omitted; retain existing encrypted password
+            const match = existingPoolList.find(
+              (p) => p.host === parsed.host && Number(p.port) === Number(parsed.port)
+            );
+            if (match && match.password) {
+              pass = match.password.startsWith("enc:")
+                ? match.password
+                : `enc:${encrypt(match.password)}`;
+            }
+          }
           parsedList.push({
             protocol: parsed.protocol || "http",
             host: parsed.host,
@@ -171,11 +198,6 @@ export async function updateProxySettingsAction(
     if (enabled && !parsedPoolJson && (!host || port === null)) {
       throw new Error("An enabled proxy requires either a proxy pool or a host and port.");
     }
-
-    const existingUser = await prisma.user.findUnique({
-      where: { id: user.id },
-      select: { proxyPassword: true, proxyPool: true }
-    });
 
     let effectiveHost = host;
     let effectivePort = port;
@@ -247,6 +269,20 @@ export async function validateProxyAction(formData: FormData): Promise<ProxyTest
     };
     let proxy: ParsedProxy | null = null;
 
+    const existingUser = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { proxyPassword: true, proxyPool: true }
+    });
+
+    let existingPoolList: any[] = [];
+    if (existingUser?.proxyPool) {
+      try {
+        existingPoolList = JSON.parse(existingUser.proxyPool);
+      } catch {
+        // ignore
+      }
+    }
+
     if (data.rawString && data.rawString.trim()) {
       proxy = parseProxyString(data.rawString);
     }
@@ -258,6 +294,16 @@ export async function validateProxyAction(formData: FormData): Promise<ProxyTest
         const candidate = parseProxyString(line);
         if (candidate && candidate.host && candidate.port) {
           proxy = candidate;
+          if (!proxy.password || proxy.password.startsWith("•••")) {
+            const match = existingPoolList.find(
+              (p) => p.host === proxy!.host && Number(p.port) === Number(proxy!.port)
+            );
+            if (match && match.password) {
+              proxy.password = match.password.startsWith("enc:")
+                ? decrypt(match.password.slice(4))
+                : match.password;
+            }
+          }
           break;
         }
       }
@@ -273,10 +319,6 @@ export async function validateProxyAction(formData: FormData): Promise<ProxyTest
 
       // If password is masked, fetch decrypted password from DB
       if (pass?.startsWith("•••") || !pass) {
-        const existingUser = await prisma.user.findUnique({
-          where: { id: user.id },
-          select: { proxyPassword: true }
-        });
         if (existingUser?.proxyPassword) {
           pass = decrypt(existingUser.proxyPassword);
         }
@@ -293,6 +335,14 @@ export async function validateProxyAction(formData: FormData): Promise<ProxyTest
 
     if (!proxy) {
       return { success: false, message: "Invalid proxy configuration. Host and valid Port are required." };
+    }
+
+    if (proxy.password && proxy.password.startsWith("enc:")) {
+      try {
+        proxy.password = decrypt(proxy.password.slice(4));
+      } catch {
+        // ignore
+      }
     }
 
     return await testProxyConnection(proxy);

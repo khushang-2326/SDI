@@ -214,11 +214,11 @@ export const ERROR_TAXONOMY_MAP: Record<ErrorTaxonomyCategory, TaxonomyDetail> =
 };
 
 export function classifyErrorTaxonomy(
-  detail: string | null | undefined,
-  status?: string | null
+  detail: any,
+  status?: any
 ): ErrorTaxonomyCategory {
-  const d = (detail || "").toLowerCase();
-  const s = (status || "").toLowerCase();
+  const d = typeof detail === "string" ? detail.toLowerCase() : String(detail || "").toLowerCase();
+  const s = typeof status === "string" ? status.toLowerCase() : String(status || "").toLowerCase();
   const combined = `${d} ${s}`.trim();
 
   // 1. DNS Resolution Failures (Permanent dead domains)

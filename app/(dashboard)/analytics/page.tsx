@@ -20,6 +20,18 @@ export default async function AnalyticsPage({ searchParams }: { searchParams: Pr
   const dayCounts = countBy(rows.map((row) => row.createdAt.toISOString().slice(0, 10)));
   const maxDay = Math.max(1, ...Object.values(dayCounts));
   return <><PageHeader title="Analytics" description="Filter and analyze every automation transaction, target type, success outcome and website." />
+    <div className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50 via-white to-cyan-50 p-4 shadow-soft">
+      <div>
+        <h3 className="text-sm font-bold text-indigo-950">Automation Run Performance Breakdown</h3>
+        <p className="mt-0.5 text-xs text-muted">View root-cause failure taxonomy, per-target trials, and screenshot proof from the latest automation run.</p>
+      </div>
+      <a
+        href="/automation"
+        className="rounded-xl bg-brand px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-brand/90 active:scale-95"
+      >
+        Open Run Analysis →
+      </a>
+    </div>
     <form className="mb-6 grid gap-3 rounded-2xl border border-line bg-white p-4 shadow-soft md:grid-cols-6"><select className="rounded-xl border border-line p-2.5" defaultValue={filters.range || "30"} name="range"><option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="all">All time</option></select><select className="rounded-xl border border-line p-2.5" defaultValue={filters.status || ""} name="status"><option value="">All statuses</option>{Object.keys(statusCounts).map((x) => <option key={x}>{x}</option>)}</select><select className="rounded-xl border border-line p-2.5" defaultValue={filters.targetType || ""} name="targetType"><option value="">All target types</option>{Object.keys(typeCounts).map((x) => <option key={x}>{x}</option>)}</select><input className="rounded-xl border border-line p-2.5" defaultValue={filters.website} name="website" placeholder="Filter website" /><button className="rounded-xl bg-brand px-4 py-2 font-semibold text-white">Apply filters</button><a className="rounded-xl border border-line bg-white px-4 py-2 text-center font-semibold text-brand" href="/analytics">Reset filters</a></form>
     <div className="grid gap-4 md:grid-cols-4">{[["Transactions",total],["Successful",success],["Failed",failed],["Live submissions",live]].map(([label,value]) => <div className="rounded-2xl border border-line bg-white p-5 shadow-soft" key={label}><p className="text-xs font-semibold uppercase tracking-wide text-muted">{label}</p><p className="mt-2 text-3xl font-bold text-ink">{value}</p></div>)}</div>
     <div className="mt-6 grid gap-6 xl:grid-cols-2"><Chart title="Transactions by day">{Object.entries(dayCounts).sort().map(([label,value]) => <div className="flex items-end gap-3" key={label}><span className="w-24 text-xs text-muted">{label.slice(5)}</span><div className="h-7 rounded-r-lg bg-gradient-to-r from-brand to-cyan-400" style={{width:`${Math.max(4,value/maxDay*75)}%`}} /><b className="text-sm">{value}</b></div>)}</Chart><Chart title="Status distribution"><Bars data={statusCounts} /></Chart><Chart title="Target type breakdown"><Bars data={typeCounts} /></Chart><Chart title="Success rate"><div className="flex min-h-48 items-center justify-center"><div className="flex h-40 w-40 items-center justify-center rounded-full" style={{background:`conic-gradient(#10b981 ${total ? success/total*360 : 0}deg,#e2e8f0 0)`}}><div className="flex h-28 w-28 flex-col items-center justify-center rounded-full bg-white"><b className="text-3xl">{total ? Math.round(success/total*100) : 0}%</b><span className="text-xs text-muted">successful</span></div></div></div></Chart></div>

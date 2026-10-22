@@ -1,7 +1,6 @@
 "use client";
 
-import type { ChangeEvent, FormEvent } from "react";
-import { useActionState, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useActionState, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   runAutomationAction,
@@ -82,7 +81,7 @@ function deriveAutomationPipeline(
     return { steps, failedStepName: null, activeStepName: "Completed" };
   }
 
-  const rawText = (detail || "").toLowerCase();
+  const rawText = (typeof detail === "string" ? detail : String(detail || "")).toLowerCase();
 
   if (status === "failed") {
     const isLoadFailure =
@@ -193,9 +192,10 @@ function deriveAutomationPipeline(
   return { steps, failedStepName: null, activeStepName: null };
 }
 
-function cleanProgressDetail(text: string): string {
+function cleanProgressDetail(text: any): string {
   if (!text) return "";
-  return text.replace(/^(\[[^\]]+\]\s*)+/g, "").trim();
+  const str = typeof text === "string" ? text : String(text || "");
+  return str.replace(/^(\[[^\]]+\]\s*)+/g, "").trim();
 }
 
 function AutomationPipelineView({
@@ -297,6 +297,55 @@ function fallbackCopyText(text: string): boolean {
   }
 }
 
+class ModalErrorBoundary extends React.Component<
+  { children: React.ReactNode; onClose: () => void },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode; onClose: () => void }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("[ModalErrorBoundary] Error in analysis modal:", error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-md">
+          <div className="max-w-md rounded-2xl border border-red-800 bg-slate-900 p-6 text-slate-100 shadow-2xl">
+            <h3 className="text-base font-bold text-red-400">Analysis Display Notice</h3>
+            <p className="mt-2 text-xs text-slate-300">
+              The analysis component caught an unexpected display issue while rendering the items:
+            </p>
+            <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-black/50 p-2 text-[11px] text-red-300">
+              {this.state.error?.message || "Unknown error"}
+            </pre>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  this.setState({ hasError: false, error: null });
+                  this.props.onClose();
+                }}
+                className="rounded-xl bg-slate-800 px-4 py-2 text-xs font-bold text-white hover:bg-slate-700"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function AutomationAnalysisModal({
   isOpen,
   onClose,
@@ -341,13 +390,12 @@ function AutomationAnalysisModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  if (!isOpen || !mounted) return null;
-
-  const safeItems = Array.isArray(items) ? items : [];
+  // ALL HOOKS MUST RUN UNCONDITIONALLY BEFORE ANY EARLY RETURN:
+  const safeItems = useMemo(() => (Array.isArray(items) ? items.filter(Boolean) : []), [items]);
   const totalWebsites = safeItems.length;
-  const successWebsites = safeItems.filter((i) => i && i.isSuccess);
-  const failedWebsites = safeItems.filter((i) => i && i.status === "failed" && !i.isSuccess);
-  const pendingWebsites = safeItems.filter((i) => i && (i.status === "waiting" || i.status === "discovering" || i.status === "cancelled"));
+  const successWebsites = useMemo(() => safeItems.filter((i) => Boolean(i?.isSuccess)), [safeItems]);
+  const failedWebsites = useMemo(() => safeItems.filter((i) => Boolean(i && i.status === "failed" && !i.isSuccess)), [safeItems]);
+  const pendingWebsites = useMemo(() => safeItems.filter((i) => Boolean(i && (i.status === "waiting" || i.status === "discovering" || i.status === "cancelled"))), [safeItems]);
 
   const successRate = totalWebsites > 0 ? ((successWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
   const failureRate = totalWebsites > 0 ? ((failedWebsites.length / totalWebsites) * 100).toFixed(1) : "0.0";
@@ -360,12 +408,23 @@ function AutomationAnalysisModal({
   const activeTaxonomyList = useMemo(() => {
     return (Object.entries(taxonomyCounts || {}) as [ErrorTaxonomyCategory, number][])
       .filter(([_, count]) => count > 0)
-      .map(([cat, count]) => ({
-        category: cat,
-        count,
-        detail: getTaxonomyDetail(cat),
-        percentage: failedWebsites.length > 0 ? ((count / failedWebsites.length) * 100).toFixed(1) : "0.0"
-      }))
+      .map(([cat, count]) => {
+        const detail = getTaxonomyDetail(cat) || {
+          category: cat,
+          displayName: String(cat || "Unknown Error"),
+          stage: "SYSTEM" as const,
+          isRetryable: false,
+          isExternalBlocker: false,
+          recommendedAction: "Inspect logs for diagnostic context.",
+          legacyCategory: "OTHER" as const
+        };
+        return {
+          category: cat,
+          count,
+          detail,
+          percentage: failedWebsites.length > 0 ? ((count / failedWebsites.length) * 100).toFixed(1) : "0.0"
+        };
+      })
       .sort((a, b) => b.count - a.count);
   }, [taxonomyCounts, failedWebsites.length]);
 
@@ -380,32 +439,37 @@ function AutomationAnalysisModal({
     return counts;
   }, [activeTaxonomyList]);
 
-  const filteredItems = safeItems.filter((item) => {
-    if (!item) return false;
-    if (filter === "success" && !item.isSuccess) return false;
-    if (filter === "failed" && (item.isSuccess || item.status !== "failed")) return false;
-    if (filter === "pending" && (item.isSuccess || item.status === "failed")) return false;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const itemCat = classifyErrorTaxonomy(item.detail, item.status);
-      const itemDetail = getTaxonomyDetail(itemCat);
-      const name = (item.name || "").toLowerCase();
-      const url = (item.url || "").toLowerCase();
-      const status = (item.status || "").toLowerCase();
-      const detail = (item.detail || "").toLowerCase();
-      const catName = (itemDetail?.displayName || "").toLowerCase();
-      const cat = (itemCat || "").toLowerCase();
-      return (
-        name.includes(q) ||
-        url.includes(q) ||
-        status.includes(q) ||
-        detail.includes(q) ||
-        catName.includes(q) ||
-        cat.includes(q)
-      );
-    }
-    return true;
-  });
+  const filteredItems = useMemo(() => {
+    return safeItems.filter((item) => {
+      if (!item) return false;
+      if (filter === "success" && !item.isSuccess) return false;
+      if (filter === "failed" && (item.isSuccess || item.status !== "failed")) return false;
+      if (filter === "pending" && (item.isSuccess || item.status === "failed")) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const itemCat = classifyErrorTaxonomy(item.detail, item.status);
+        const itemDetail = getTaxonomyDetail(itemCat);
+        const name = String(item.name || "").toLowerCase();
+        const url = String(item.url || "").toLowerCase();
+        const status = String(item.status || "").toLowerCase();
+        const detail = String(item.detail || "").toLowerCase();
+        const catName = String(itemDetail?.displayName || "").toLowerCase();
+        const cat = String(itemCat || "").toLowerCase();
+        return (
+          name.includes(q) ||
+          url.includes(q) ||
+          status.includes(q) ||
+          detail.includes(q) ||
+          catName.includes(q) ||
+          cat.includes(q)
+        );
+      }
+      return true;
+    });
+  }, [safeItems, filter, searchQuery]);
+
+  // Early return ONLY after ALL hooks have been invoked:
+  if (!isOpen || !mounted || typeof document === "undefined" || !document.body) return null;
 
   const copySummary = () => {
     const text = `AUTOMATION RUN ANALYSIS REPORT
@@ -680,16 +744,16 @@ ${safeItems
                     type="button"
                     onClick={() => {
                       setFilter("failed");
-                      setSearchQuery(item.detail.displayName);
+                      setSearchQuery(item.detail?.displayName || "");
                     }}
                     className="flex items-center justify-between gap-2 rounded-xl border border-red-800/40 bg-slate-900/70 p-2.5 text-left transition hover:border-red-500 hover:bg-slate-800/80 group"
                   >
                     <div className="min-w-0">
                       <p className="truncate text-xs font-bold text-slate-200 group-hover:text-white">
-                        {item.detail.displayName}
+                        {item.detail?.displayName || "Unclassified Error"}
                       </p>
                       <p className="text-[10px] text-slate-400">
-                        Stage: <span className="text-slate-300 font-semibold">{item.detail.stage}</span>
+                        Stage: <span className="text-slate-300 font-semibold">{item.detail?.stage || "SYSTEM"}</span>
                       </p>
                     </div>
                     <div className="text-right shrink-0">
@@ -803,7 +867,14 @@ ${safeItems
                 ) : null}
 
                 {paginatedModalItems.map((item, idx) => {
+                  if (!item) return null;
                   const actualIdx = startIdx + idx;
+                  const pipeline = deriveAutomationPipeline(
+                    item.status,
+                    item.detail,
+                    Boolean(item.isSuccess),
+                    Boolean(item.screenshotPath)
+                  );
                   return (
                     <div
                       key={item.id || actualIdx}
@@ -819,9 +890,9 @@ ${safeItems
                         <div>
                           <div className="flex items-center gap-2">
                             <span className="text-xs font-bold text-slate-400">#{actualIdx + 1}</span>
-                            <h4 className="text-sm font-bold text-white">{item.name}</h4>
+                            <h4 className="text-sm font-bold text-white">{item.name || "Target"}</h4>
                           </div>
-                          <p className="break-all text-xs opacity-75">{item.url}</p>
+                          <p className="break-all text-xs opacity-75">{item.url || ""}</p>
                         </div>
 
                         <span
@@ -841,59 +912,52 @@ ${safeItems
                         </span>
                       </div>
 
-                      {(() => {
-                        const pipeline = deriveAutomationPipeline(item.status, item.detail, item.isSuccess, Boolean(item.screenshotPath));
-                        return (
-                          <>
-                            <AutomationPipelineView
-                              status={item.status}
-                              detail={item.detail}
-                              isSuccess={item.isSuccess}
-                              hasScreenshot={Boolean(item.screenshotPath)}
-                            />
+                      <AutomationPipelineView
+                        status={item.status}
+                        detail={item.detail}
+                        isSuccess={Boolean(item.isSuccess)}
+                        hasScreenshot={Boolean(item.screenshotPath)}
+                      />
 
-                            <div
-                              className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
-                                item.isSuccess
-                                  ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
-                                  : item.status === "failed"
-                                  ? "bg-red-900/40 text-red-200 border border-red-800/50"
-                                  : "bg-slate-800/60 text-slate-300"
-                              }`}
-                            >
-                              <span className="mr-1 font-bold">
-                                {item.isSuccess ? "Outcome:" : `Failure (${pipeline.failedStepName || "Execution"}):`}
-                              </span>
-                              {cleanProgressDetail(item.detail)}
-                              {item.trialsCount > 0 ? (
-                                <span className="ml-2 font-bold opacity-80">
-                                  ({item.successfulTrialsCount}/{item.trialsCount} trials succeeded)
-                                </span>
-                              ) : null}
-                            </div>
+                      <div
+                        className={`mt-2.5 rounded-xl px-3 py-2 text-xs ${
+                          item.isSuccess
+                            ? "bg-emerald-900/40 text-emerald-200 border border-emerald-800/50"
+                            : item.status === "failed"
+                            ? "bg-red-900/40 text-red-200 border border-red-800/50"
+                            : "bg-slate-800/60 text-slate-300"
+                        }`}
+                      >
+                        <span className="mr-1 font-bold">
+                          {item.isSuccess ? "Outcome:" : `Failure (${pipeline.failedStepName || "Execution"}):`}
+                        </span>
+                        {cleanProgressDetail(item.detail)}
+                        {(item.trialsCount ?? 0) > 0 ? (
+                          <span className="ml-2 font-bold opacity-80">
+                            ({item.successfulTrialsCount ?? 0}/{item.trialsCount ?? 0} trials succeeded)
+                          </span>
+                        ) : null}
+                      </div>
 
-                            {item.screenshotPath ? (
-                              <div className="mt-3">
-                                <div className="mb-1.5 flex items-center justify-between text-xs font-semibold">
-                                  <span className={item.isSuccess ? "text-emerald-400 flex items-center gap-1" : "text-red-400 flex items-center gap-1"}>
-                                    {item.isSuccess ? (
-                                      <>
-                                        <span className="font-bold">✓</span> Submission Proof Screenshot
-                                      </>
-                                    ) : (
-                                      <>
-                                        <span className="font-bold">✕</span> Failure Screenshot (captured at {pipeline.failedStepName || "failure"} stage)
-                                      </>
-                                    )}
-                                  </span>
-                                  <span className="text-[11px] text-slate-400 font-normal">Click image to enlarge</span>
-                                </div>
-                                <ScreenshotViewer src={item.screenshotPath} alt={item.name} />
-                              </div>
-                            ) : null}
-                          </>
-                        );
-                      })()}
+                      {item.screenshotPath && typeof item.screenshotPath === "string" ? (
+                        <div className="mt-3">
+                          <div className="mb-1.5 flex items-center justify-between text-xs font-semibold">
+                            <span className={item.isSuccess ? "text-emerald-400 flex items-center gap-1" : "text-red-400 flex items-center gap-1"}>
+                              {item.isSuccess ? (
+                                <>
+                                  <span className="font-bold">✓</span> Submission Proof Screenshot
+                                </>
+                              ) : (
+                                <>
+                                  <span className="font-bold">✕</span> Failure Screenshot (captured at {pipeline.failedStepName || "failure"} stage)
+                                </>
+                              )}
+                            </span>
+                            <span className="text-[11px] text-slate-400 font-normal">Click image to enlarge</span>
+                          </div>
+                          <ScreenshotViewer src={item.screenshotPath} alt={item.name || "Target"} />
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -2245,16 +2309,18 @@ export function AutomationRunner({ websites, fileGroups }: { websites: SavedWebs
         </div>
       </div>
 
-      <AutomationAnalysisModal
-        isOpen={isAnalysisOpen}
-        onClose={() => setIsAnalysisOpen(false)}
-        items={analysisItems}
-        totalTrialsExecuted={totalTrialsExecuted}
-        totalTrialsSuccessful={totalTrialsSuccessful}
-        batchStatus={isPaused ? "paused" : batchStatus}
-        runtime={formatDuration(elapsedMs)}
-        jobId={currentJobId}
-      />
+      <ModalErrorBoundary onClose={() => setIsAnalysisOpen(false)}>
+        <AutomationAnalysisModal
+          isOpen={isAnalysisOpen}
+          onClose={() => setIsAnalysisOpen(false)}
+          items={analysisItems}
+          totalTrialsExecuted={totalTrialsExecuted}
+          totalTrialsSuccessful={totalTrialsSuccessful}
+          batchStatus={isPaused ? "paused" : batchStatus}
+          runtime={formatDuration(elapsedMs)}
+          jobId={currentJobId}
+        />
+      </ModalErrorBoundary>
     </section>
   );
 }

@@ -132,6 +132,8 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
   ],
   email: [
     /\b(e-?mail|emailaddress|email[ _-]?address|work[ _-]?email|business[ _-]?email|corporate[ _-]?email|your[ _-]?email|youremail|contact[ _-]?email|footer[-_]?email)\b/i,
+    /(?<!(address|street|addr|box)[ _-])\b(mail|email|e-mail)\b(?![ _-]?(address|addr|box|ing))/i,
+    /mail/i,
     /\b(courriel|correo|correo[ _-]?electronico|indirizzo[ _-]?email|e-post|e-mailadresse)\b/i,
     /(^|[ _-])(email|work-email|business-email|user-email|contact-email|lead-email|form_fields\[email.*\]|fields\[email.*\]|footer-email|newsletter_email)([ _-]|$)/i
   ],
@@ -147,7 +149,7 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /(^|[ _-])(company|company-name|business-name|organization|firm|agency|0-1\/company|employer|org)([ _-]|$)/i
   ],
   job_title: [
-    /\b(job[ _-]?title|title|role|position|occupation|designation)\b/i,
+    /\b(job[ _-]?title|title|role|position|occupation|designation|jobtitle)\b/i,
     /\b(poste|fonction|beruf|position|cargo|funzione|functie)\b/i
   ],
   website: [
@@ -160,7 +162,7 @@ const MULTILINGUAL_SYNONYMS: Record<Exclude<SemanticFieldType, "unknown">, RegEx
     /(^|[ _-])(address|street|street-address|address-line-1|address1|street_address|mailing-address|business-address)([ _-]|$)/i
   ],
   city: [
-    /\b(city|town|municipality|suburb)\b/i,
+    /\b(city|town|municipality|suburb|location|any[ _-]?location)\b/i,
     /\b(ville|stadt|ciudad|citta|cidade|stad)\b/i
   ],
   state: [
@@ -681,6 +683,26 @@ export function classifyField(signals: FieldSignals, allFormSignals: FieldSignal
       evidence.push("autocomplete=postal-code");
       return { fieldType: "postal_code", confidence: 0.98, evidence, isNegative: false };
     }
+  }
+
+  // Universal Mail & Location classifier (User rule: if field name contains 'mail' in string -> enter email; location -> city/New York)
+  const nameOrIdOrLabel = `${signals.name || ""} ${signals.id || ""} ${signals.placeholder || ""} ${signals.explicitLabel || ""} ${signals.ariaLabel || ""}`.toLowerCase();
+  const isMailSignal = nameOrIdOrLabel.includes("mail") && !/mailing[ _-]?address|mail[ _-]?address|mail[ _-]?stop/i.test(nameOrIdOrLabel);
+  if (isMailSignal && signals.tagName === "input" && (signals.type === "text" || signals.type === "email" || !signals.type)) {
+    evidence.push("field identifier or label contains 'mail' -> email");
+    return { fieldType: "email", confidence: 0.98, evidence, isNegative: false };
+  }
+
+  const isLocationSignal = /\b(location|any[ _-]?location)\b/i.test(nameOrIdOrLabel) && !/user_location/i.test(signals.id || signals.name || "");
+  if (isLocationSignal && signals.tagName === "input" && (signals.type === "text" || !signals.type)) {
+    evidence.push("field identifier or label contains 'location' -> city");
+    return { fieldType: "city", confidence: 0.95, evidence, isNegative: false };
+  }
+
+  const isJobTitleSignal = /\b(job[ _-]?title|title|role|position|occupation|designation|jobtitle)\b/i.test(nameOrIdOrLabel);
+  if (isJobTitleSignal && signals.tagName === "input" && (signals.type === "text" || !signals.type)) {
+    evidence.push("field identifier or label matches job title -> job_title");
+    return { fieldType: "job_title", confidence: 0.95, evidence, isNegative: false };
   }
 
   // HTML5 Input Types

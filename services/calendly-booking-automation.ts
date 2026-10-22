@@ -345,6 +345,44 @@ async function chooseDate(
     await new Promise((r) => setTimeout(r, 500));
   }
 
+  // User requested: "some calandly form not have selected time or date free so please select the closest date and time for submission"
+  // If no available slots in the current month view, navigate forward up to 3 months to find closest available date
+  if (candidates.length === 0) {
+    for (let monthStep = 0; monthStep < 3; monthStep++) {
+      const nextMonthBtn = frame.locator('button[aria-label*="next month" i], button[aria-label*="siguiente" i], button[aria-label*="next" i], button[data-testid*="next" i], button[class*="next" i], button:has(svg[data-testid*="chevron-right"])').first();
+      if ((await nextMonthBtn.count().catch(() => 0)) > 0 && (await nextMonthBtn.isVisible().catch(() => false))) {
+        console.log(`[CALENDLY] Current month full. Advancing to next month (attempt ${monthStep + 1}/3) to find closest available date...`);
+        await nextMonthBtn.click({ force: true }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 1200));
+        const dateButtons = frame.locator('button[data-testid*="day" i], button[class*="calendar" i], button[class*="day" i], button[class*="bookable" i], [role="gridcell"] button, [role="grid"] button');
+        const nextCandidates = await dateButtons.evaluateAll((elements) =>
+          elements.map((element, index) => {
+            const button = element as HTMLButtonElement;
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            const text = element.textContent ?? "";
+            const ariaLabel = element.getAttribute("aria-label") ?? "";
+            const className = element.getAttribute("class") ?? "";
+            const dataTestId = element.getAttribute("data-testid") ?? "";
+            const disabled = button.disabled || element.getAttribute("aria-disabled") === "true" || element.getAttribute("disabled") !== null;
+            const hasDateSignal = /\b(available|select|choose|disponible|seleccione|elija|verfügbar)\b.*\b\d{1,2}\b/i.test(ariaLabel) || /\b\d{1,2}\b.*\b(available|select|choose|disponible|seleccione|elija|verfügbar)\b/i.test(ariaLabel) || element.hasAttribute("data-date") || /calendar-day/i.test(className) || /day/i.test(dataTestId);
+            const availabilityText = `${ariaLabel} ${className} ${dataTestId}`;
+            const explicitlyUnavailable = /\b(no\s+times?\s+available|no\s+hay\s+horas|unavailable|no\s+disponible|sin\s+horas\s+disponibles|nicht\s+verfügbar|pas\s+disponible)\b/i.test(availabilityText);
+            const likelyAvailable = !explicitlyUnavailable && (/\b(times?\s+available|horas\s+disponibles|disponible|verfügbar|disponível|available)\b/i.test(availabilityText) || /bookable/i.test(className) || !/\bdisabled\b/i.test(className));
+            return { index, text, ariaLabel, disabled, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", hasDateSignal, likelyAvailable };
+          }).filter((candidate) => candidate.visible && !candidate.disabled && candidate.hasDateSignal && candidate.likelyAvailable)
+        );
+        if (nextCandidates.length > 0) {
+          console.log(`[CALENDLY] Found ${nextCandidates.length} closest available dates in next month!`);
+          candidates = nextCandidates;
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+  }
+
   if (candidates.length === 0) {
     return null;
   }
@@ -798,10 +836,38 @@ async function fillCalendlyForm(frame: CalendlyScope, leadData: LeadData) {
         }
       }
       if (!anyChecked && group.length > 0) {
-        // Select second radio if available (or first)
-        const targetRadio = group.length > 1 ? group[1] : group[0];
+        // If group represents meeting location, prefer Zoom or Google Meet if available
+        let targetRadio = group.length > 1 ? group[1] : group[0];
+        for (const r of group) {
+          const rText = await r.evaluate((el: HTMLElement) => {
+            const lbl = el.id ? document.querySelector(`label[for="${el.id}"]`) : el.closest("label");
+            const parent = el.parentElement;
+            return `${lbl?.textContent || ""} ${parent?.textContent || ""}`.toLowerCase();
+          }).catch(() => "");
+          if (rText.includes("zoom") || rText.includes("google meet") || rText.includes("phone")) {
+            targetRadio = r;
+            break;
+          }
+        }
         await targetRadio.click({ force: true }).catch(() => targetRadio.check({ force: true })).catch(() => {});
         filledFields.push("custom_radio");
+      }
+    }
+  } catch {}
+
+  // 7b. Explicit Location Handling (User rule: enter "New York" as default location)
+  try {
+    const locationInputs = await frame.locator(
+      'input[placeholder*="location" i], input[placeholder*="Any location" i], input[name*="location" i], input[id*="location" i], input[aria-label*="location" i]'
+    ).all().catch(() => []);
+    for (const locInput of locationInputs) {
+      if (await locInput.isVisible().catch(() => false)) {
+        const val = await locInput.inputValue().catch(() => "");
+        if (!val || !val.trim()) {
+          const defaultLoc = leadData.city || "New York";
+          await locInput.fill(defaultLoc).catch(() => {});
+          filledFields.push("location");
+        }
       }
     }
   } catch {}
@@ -834,6 +900,10 @@ async function fillCalendlyForm(frame: CalendlyScope, leadData: LeadData) {
           const web = leadData.websiteUrl || leadData.website || "https://google.com";
           await input.fill(web).catch(() => {});
           filledFields.push("custom_website_url");
+        } else if (meta.includes("location") || meta.includes("city") || meta.includes("address")) {
+          const defaultLoc = leadData.city || "New York";
+          await input.fill(defaultLoc).catch(() => {});
+          filledFields.push("custom_location");
         } else if (isReq) {
           const fallbackText = leadData.message || leadData.fullName || "Business Consultation";
           await input.fill(fallbackText).catch(() => {});

@@ -26,6 +26,42 @@ export const IN_PAGE_COOKIE_SWEEP_CODE = `(() => {
 
     // 1. Target known vendor containers and generic dialogs
     const dialogSelectors = [
+      // Chat attention grabbers, floating bubbles & widgets (Image 4 & Image 2)
+      "[class*='attention_grabber' i]",
+      "[class*='attention-grabber' i]",
+      "[class*='chat-popup' i]",
+      "[class*='widget-bubble' i]",
+      "[class*='chat-bubble' i]",
+      "[class*='chat_bubble' i]",
+      "[class*='chat-notification' i]",
+      "[class*='chat-widget-message' i]",
+      "[class*='livechat' i] [class*='bubble' i]",
+      "[id*='hubspot-messages-iframe-container' i] [class*='overlay' i]",
+      ".intercom-lightweight-app-launcher",
+      ".drift-frame-chat",
+      ".crisp-client",
+      ".tidio-chat-iframe",
+      // Generic promotional popups, newsletters, lead magnets & modals
+      "[role='dialog']",
+      "[role='alertdialog']",
+      "[aria-modal='true']",
+      ".modal.show",
+      ".modal.is-active",
+      ".modal.open",
+      ".popup.open",
+      ".popup.show",
+      "[class*='pum-container' i]",
+      "[class*='sp-layer' i]",
+      "[class*='sg-popup-builder' i]",
+      "[class*='wps-popup' i]",
+      "[class*='elementor-popup-modal' i]",
+      "[class*='newsletter-popup' i]",
+      "[class*='lead-popup' i]",
+      "[class*='promo-popup' i]",
+      "[class*='lightbox' i]",
+      "[class*='floating-banner' i]",
+      "[class*='announcement-bar' i]",
+      "[class*='sticky-banner' i]",
       "#hs-eu-cookie-confirmation",
       "#hs-banner-parent",
       "#onetrust-banner-sdk",
@@ -99,7 +135,7 @@ export const IN_PAGE_COOKIE_SWEEP_CODE = `(() => {
       // PRIORITY 1: Close button if present (User requested: "close that if possible")
       const closeButtons = Array.from(
         el.querySelectorAll(
-          "button[aria-label*='close' i], button[aria-label*='dismiss' i], [title*='close' i], [data-dismiss], [data-bs-dismiss], .close, .modal-close, .popup-close, .hs-eu-cookie-close-button, #hs-eu-close-button, .osano-cm-close, .onetrust-close-btn-handler, [class*='close-btn' i], [class*='btn-close' i]"
+          "button[aria-label*='close' i], button[aria-label*='cancel' i], button[aria-label*='dismiss' i], [title*='close' i], [data-dismiss], [data-bs-dismiss], .close, .modal-close, .popup-close, .chat-close, .attention-grabber-close, [class*='close-btn' i], [class*='btn-close' i], [class*='close-icon' i], [class*='icon-close' i], svg[data-icon='close'], [data-testid*='close' i]"
         )
       );
 
@@ -124,7 +160,7 @@ export const IN_PAGE_COOKIE_SWEEP_CODE = `(() => {
       for (const btn of allActionButtons) {
         if (!isVisible(btn)) continue;
         const text = (btn.textContent || "").trim();
-        if (/^(x|✕|✖|close|dismiss|skip|no thanks|not now)$/i.test(text)) {
+        if (/^(x|✕|✖|×|close|cancel|dismiss|skip|no thanks|not now|no, thanks|never|close window)$/i.test(text)) {
           try {
             btn.click();
             closed = true;
@@ -362,6 +398,12 @@ export async function registerPlaywrightLocatorHandlers(page: Page): Promise<voi
  * - Returns a controller with a `stop()` function to cleanly exit when automation finishes.
  */
 export function startParallelCookieGuardian(page: Page): CookieGuardianController {
+  // Auto-accept native browser alerts, confirms, prompts so they never block execution
+  try {
+    page.on("dialog", async (dialog) => {
+      try { await dialog.accept(); } catch {}
+    });
+  } catch {}
   let active = true;
 
   // Immediately inject in-browser guardian if page is already open

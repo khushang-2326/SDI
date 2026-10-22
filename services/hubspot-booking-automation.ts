@@ -442,9 +442,37 @@ async function fillHubSpotForm(page: Page, leadData: LeadData) {
         }
       }
       if (!anyChecked && group.length > 0) {
-        const targetRadio = group.length > 1 ? group[1] : group[0];
+        let targetRadio = group.length > 1 ? group[1] : group[0];
+        for (const r of group) {
+          const rText = await r.evaluate((el: HTMLElement) => {
+            const lbl = el.id ? document.querySelector(`label[for="${el.id}"]`) : el.closest("label");
+            const parent = el.parentElement;
+            return `${lbl?.textContent || ""} ${parent?.textContent || ""}`.toLowerCase();
+          }).catch(() => "");
+          if (rText.includes("zoom") || rText.includes("google meet") || rText.includes("phone")) {
+            targetRadio = r;
+            break;
+          }
+        }
         await targetRadio.click({ force: true }).catch(() => targetRadio.check({ force: true })).catch(() => {});
         filledFields.push("custom_radio");
+      }
+    }
+  } catch {}
+
+  // 7b. Explicit Location Handling (User rule: enter "New York" as default location)
+  try {
+    const locationInputs = await page.locator(
+      'input[placeholder*="location" i], input[placeholder*="Any location" i], input[name*="location" i], input[id*="location" i], input[aria-label*="location" i]'
+    ).all().catch(() => []);
+    for (const locInput of locationInputs) {
+      if (await locInput.isVisible().catch(() => false)) {
+        const val = await locInput.inputValue().catch(() => "");
+        if (!val || !val.trim()) {
+          const defaultLoc = leadData.city || "New York";
+          await locInput.fill(defaultLoc).catch(() => {});
+          filledFields.push("location");
+        }
       }
     }
   } catch {}

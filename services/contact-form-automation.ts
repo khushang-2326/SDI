@@ -389,10 +389,46 @@ async function safelyFillField(
 
   let fillValue = value;
 
+  // Guard against [object HTMLInputElement] or non-string values being typed
+  if (typeof fillValue !== "string" || fillValue.includes("[object")) {
+    if (fillValue && typeof fillValue === "object") {
+      fillValue = (fillValue as any).value || (fillValue as any).textContent || "";
+    } else {
+      fillValue = String(fillValue ?? "");
+    }
+    if (fillValue.includes("[object") || !fillValue.trim()) {
+      fillValue = "";
+    }
+  }
+
   // Obey maxlength constraints to avoid browser truncation validation failures
   const maxLen = await locator.evaluate((el: HTMLInputElement) => el.maxLength > 0 ? el.maxLength : 0).catch(() => 0);
   if (maxLen > 0 && fillValue.length > maxLen) {
     fillValue = fillValue.slice(0, maxLen);
+  }
+
+  // Universal Recovery: Ensure valid email, location ("New York"), and jobTitle values
+  if (tagName === "input" || tagName === "textarea") {
+    const nameAttr = await locator.getAttribute("name").catch(() => "") || "";
+    const idAttr = await locator.getAttribute("id").catch(() => "") || "";
+    const placeholderAttr = await locator.getAttribute("placeholder").catch(() => "") || "";
+    const ariaAttr = await locator.getAttribute("aria-label").catch(() => "") || "";
+    const fullId = `${nameAttr} ${idAttr} ${placeholderAttr} ${ariaAttr}`.toLowerCase();
+
+    const isEmailLike = inputType === "email" || (fullId.includes("mail") && !/mailing[ _-]?address|mail[ _-]?address/i.test(fullId));
+    if (isEmailLike && (!fillValue || fillValue.includes("[object") || !fillValue.includes("@"))) {
+      fillValue = "aadityavarma490@gmail.com";
+    }
+
+    const isLocationLike = fullId.includes("location") && !fullId.includes("user_location");
+    if (isLocationLike && (!fillValue || fillValue.trim() === "")) {
+      fillValue = "New York";
+    }
+
+    const isJobLike = /\b(job[ _-]?title|title|role|position|occupation|designation|jobtitle)\b/i.test(fullId);
+    if (isJobLike && (!fillValue || fillValue.trim() === "")) {
+      fillValue = "Business Consultant";
+    }
   }
 
   // Obey phone input patterns/masks based on website requirements (all mobile formats supported)
@@ -896,10 +932,7 @@ export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise
 
             if (validOptions.length < 2 || validOptions.length > 15) continue;
 
-            const firstParent = validOptions[0].parentElement;
-            const sameParent = validOptions.every((v) => v.parentElement === firstParent || v.closest("fieldset") === container);
-            if (!sameParent) continue;
-
+            // Allow buttons wrapped in individual column/div wrappers (e.g. Brights in Image 1)
             const anySelected = validOptions.some((itemEl) => {
               const className = typeof itemEl.className === "string" ? itemEl.className.toLowerCase() : "";
               const isAriaSelected =
@@ -915,14 +948,21 @@ export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise
             });
 
             if (!anySelected && validOptions.length > 0) {
-              const firstOpt = validOptions[0];
-              const firstText = (firstOpt.textContent || "").trim();
+              // Per user rule: select 2nd option by default (or 1st if only 1 exists)
+              const targetOpt = validOptions.length > 1 ? validOptions[1] : validOptions[0];
+              const targetText = (targetOpt.textContent || "").trim();
 
-              firstOpt.click();
-              firstOpt.dispatchEvent(new Event("click", { bubbles: true }));
-              firstOpt.dispatchEvent(new Event("change", { bubbles: true }));
+              ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                try { targetOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch {}
+              });
+              targetOpt.click();
+              targetOpt.dispatchEvent(new Event("change", { bubbles: true }));
+              targetOpt.setAttribute("aria-pressed", "true");
+              targetOpt.setAttribute("aria-selected", "true");
+              targetOpt.setAttribute("aria-checked", "true");
+              targetOpt.classList.add("active", "selected", "is-selected", "checked");
 
-              const innerInput = firstOpt.querySelector("input[type='radio'], input[type='checkbox']") as HTMLInputElement | null;
+              const innerInput = targetOpt.querySelector("input[type='radio'], input[type='checkbox']") as HTMLInputElement | null;
               if (innerInput) {
                 innerInput.checked = true;
                 innerInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -931,7 +971,7 @@ export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise
 
               results.push({
                 groupName: container.getAttribute("aria-label") || container.className.slice(0, 30) || "button_group",
-                clickedText: firstText
+                clickedText: targetText
               });
             }
           }
@@ -981,10 +1021,7 @@ export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise
 
             if (validOptions.length < 2 || validOptions.length > 15) continue;
 
-            const firstParent = validOptions[0].parentElement;
-            const sameParent = validOptions.every((v) => v.parentElement === firstParent || v.closest("fieldset") === container);
-            if (!sameParent) continue;
-
+            // Allow buttons wrapped in individual column/div wrappers (e.g. Brights in Image 1)
             const anySelected = validOptions.some((itemEl) => {
               const className = typeof itemEl.className === "string" ? itemEl.className.toLowerCase() : "";
               const isAriaSelected =
@@ -1000,14 +1037,21 @@ export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise
             });
 
             if (!anySelected && validOptions.length > 0) {
-              const firstOpt = validOptions[0];
-              const firstText = (firstOpt.textContent || "").trim();
+              // Per user rule: select 2nd option by default (or 1st if only 1 exists)
+              const targetOpt = validOptions.length > 1 ? validOptions[1] : validOptions[0];
+              const targetText = (targetOpt.textContent || "").trim();
 
-              firstOpt.click();
-              firstOpt.dispatchEvent(new Event("click", { bubbles: true }));
-              firstOpt.dispatchEvent(new Event("change", { bubbles: true }));
+              ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                try { targetOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch {}
+              });
+              targetOpt.click();
+              targetOpt.dispatchEvent(new Event("change", { bubbles: true }));
+              targetOpt.setAttribute("aria-pressed", "true");
+              targetOpt.setAttribute("aria-selected", "true");
+              targetOpt.setAttribute("aria-checked", "true");
+              targetOpt.classList.add("active", "selected", "is-selected", "checked");
 
-              const innerInput = firstOpt.querySelector("input[type='radio'], input[type='checkbox']") as HTMLInputElement | null;
+              const innerInput = targetOpt.querySelector("input[type='radio'], input[type='checkbox']") as HTMLInputElement | null;
               if (innerInput) {
                 innerInput.checked = true;
                 innerInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1016,7 +1060,7 @@ export async function selectFirstOptionInButtonGroups(scope: FormScope): Promise
 
               results.push({
                 groupName: container.getAttribute("aria-label") || container.className.slice(0, 30) || "button_group",
-                clickedText: firstText
+                clickedText: targetText
               });
             }
           }
@@ -1451,10 +1495,9 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
       await selectFirstRealOption(loc).catch(() => undefined);
       usedIndexes.add(best.signal.index);
       filledFields.push("job_title");
-    } else if (userJob) {
-      await fillSignal(best.signal, "job_title", "jobTitle", userJob, best.cls.confidence, best.cls.evidence, "USER_DATA");
     } else {
-      skippedFields.push("job_title");
+      const effectiveJob = userJob || "Business Consultant";
+      await fillSignal(best.signal, "job_title", "jobTitle", effectiveJob, best.cls.confidence, best.cls.evidence, userJob ? "USER_DATA" : "FALLBACK_DATA");
     }
   }
 
@@ -3266,8 +3309,8 @@ export async function validateFormBeforeSubmission(
         const derivedFirstName = leadDataArg.firstName || (nameParts.length > 0 ? nameParts[0] : "");
         const derivedLastName = leadDataArg.lastName || (nameParts.length > 1 ? nameParts.slice(1).join(" ") : "");
 
-        if (type === "email" || nameOrId.includes("email")) {
-          fillVal = leadDataArg.email || "";
+        if (type === "email" || nameOrId.includes("email") || (nameOrId.includes("mail") && !nameOrId.includes("address"))) {
+          fillVal = (leadDataArg.email || "").trim() || "aadityavarma490@gmail.com";
         } else if (type === "tel" || nameOrId.includes("phone") || nameOrId.includes("tel") || nameOrId.includes("mobile") || nameOrId.includes("whatsapp") || nameOrId.includes("contact_number") || nameOrId.includes("pn")) {
           const rawMobile = leadDataArg.mobile || leadDataArg.mobileNumber || leadDataArg.phone || "";
           if (rawMobile) {
@@ -3311,7 +3354,7 @@ export async function validateFormBeforeSubmission(
           fillVal = leadDataArg.website || "";
         } else if (nameOrId.includes("address") || nameOrId.includes("street") || nameOrId.includes("addr")) {
           fillVal = leadDataArg.address || "";
-        } else if (nameOrId.includes("city") || nameOrId.includes("town")) {
+        } else if (nameOrId.includes("city") || nameOrId.includes("town") || nameOrId.includes("location")) {
           fillVal = leadDataArg.city || "New York";
         } else if (nameOrId.includes("state") || nameOrId.includes("province") || nameOrId.includes("region")) {
           fillVal = leadDataArg.state || "New York";
@@ -3319,7 +3362,9 @@ export async function validateFormBeforeSubmission(
           fillVal = leadDataArg.country || "United States";
         } else if (nameOrId.includes("zip") || nameOrId.includes("postal")) {
           fillVal = leadDataArg.zip || leadDataArg.postalCode || "";
-        } else if (nameOrId.includes("subject") || nameOrId.includes("topic") || nameOrId.includes("title") || nameOrId.includes("contacttype")) {
+        } else if (nameOrId.includes("job") || nameOrId.includes("title") || nameOrId.includes("position") || nameOrId.includes("role") || nameOrId.includes("occupation") || nameOrId.includes("designation")) {
+          fillVal = leadDataArg.jobTitle || "Business Consultant";
+        } else if (nameOrId.includes("subject") || nameOrId.includes("topic") || nameOrId.includes("contacttype")) {
           fillVal = leadDataArg.subject || "";
         } else if (el.tagName.toLowerCase() === "textarea" || nameOrId.includes("message") || nameOrId.includes("comment") || nameOrId.includes("inquiry") || nameOrId.includes("question") || nameOrId.includes("detail")) {
           fillVal = leadDataArg.message || "";

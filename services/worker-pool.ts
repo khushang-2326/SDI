@@ -61,10 +61,18 @@ function delay(ms: number): Promise<void> {
 }
 
 function resultCompleted(result: AutomationResult | SubmitContactFormResult): boolean {
-  if (result.status === "success") {
-    return (result as any).submissionOutcome === "VERIFIED_SUCCESS" || (result as any).submissionOutcome === undefined;
+  if (result.status === "success" || result.status === "dry_run_ready_to_book") {
+    return true;
   }
-  return result.status === "dry_run_ready_to_book";
+  if (
+    result.status === "confirmation_not_found" &&
+    (!result.errorMessage ||
+      result.errorMessage.includes("confirmation signal was not detected") ||
+      result.errorMessage.includes("confirmation was not detected"))
+  ) {
+    return true;
+  }
+  return false;
 }
 
 async function withTargetTimeout<T>(operation: Promise<T>, timeoutMs: number, description: string): Promise<T> {

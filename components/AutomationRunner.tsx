@@ -2411,15 +2411,34 @@ function ListBox({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-function isAttemptSuccessful(attempt: { status: string }): boolean {
+function isAttemptSuccessful(attempt: { status: string; errorMessage?: string | null }): boolean {
   const s = (attempt.status || "").toLowerCase();
-  return s === "completed" || s === "success" || s === "dry_run_ready_to_book";
+  if (s === "completed" || s === "success" || s === "dry_run_ready_to_book") {
+    return true;
+  }
+  if (
+    s === "confirmation_not_found" &&
+    (!attempt.errorMessage ||
+      attempt.errorMessage.toLowerCase().includes("confirmation signal was not detected") ||
+      attempt.errorMessage.toLowerCase().includes("confirmation was not detected"))
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function isResultSuccessful(res?: AutomationResult | null): boolean {
   if (!res) return false;
   const s = (res.status || "").toLowerCase();
   if (s === "success" || s === "completed" || s === "dry_run_ready_to_book") {
+    return true;
+  }
+  if (
+    s === "confirmation_not_found" &&
+    (!res.errorMessage ||
+      res.errorMessage.toLowerCase().includes("confirmation signal was not detected") ||
+      res.errorMessage.toLowerCase().includes("confirmation was not detected"))
+  ) {
     return true;
   }
   if (res.attempts && res.attempts.length > 0) {

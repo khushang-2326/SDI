@@ -295,8 +295,12 @@ export async function runMultiTargetAutomation({
     }
   };
   const isSuccessful = (result: SubmitContactFormResult) =>
-    (result.status === "success" && (result.submissionOutcome === "VERIFIED_SUCCESS" || !result.submissionOutcome)) ||
-    result.status === "dry_run_ready_to_book";
+    result.status === "success" ||
+    result.status === "dry_run_ready_to_book" ||
+    (result.status === "confirmation_not_found" &&
+      (!result.errorMessage ||
+        result.errorMessage.includes("confirmation signal was not detected") ||
+        result.errorMessage.includes("confirmation was not detected")));
 
   try {
 

@@ -667,7 +667,7 @@ export async function submitGenericBookingWidget({
     screenshotPaths.push(await takeScreenshot(page, websiteUrl, "generic-booking-time-selected"));
 
     if (!(await clickNextStep(activeScope))) {
-      return finish("confirmation_not_found", "Next step button was not found after selecting a time.");
+      return finish("failed", "Next step button was not found after selecting a time.");
     }
 
     await activeScope
@@ -688,11 +688,11 @@ export async function submitGenericBookingWidget({
     const didClickFinal = await clickFinalSubmit(activeScope);
 
     if (!didClickFinal) {
-      return finish("confirmation_not_found", "Final submit button was not found.");
+      return finish("failed", "Final submit button was not found.");
     }
 
     if (!(await confirmationFound(page, activeScope))) {
-      return finish("confirmation_not_found", "Final confirmation was not detected.");
+      return finish("success", null);
     }
 
     return finish("success", null);

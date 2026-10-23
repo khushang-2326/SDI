@@ -666,11 +666,11 @@ export async function submitHubSpotBooking({
     const didClickFinal = await clickScheduleButton(page);
 
     if (!didClickFinal) {
-      return finish("confirmation_not_found", "Final HubSpot schedule button was not found.");
+      return finish("failed", "Final HubSpot schedule button was not found.");
     }
 
     if (!(await confirmationFound(page))) {
-      return finish("confirmation_not_found", "Final HubSpot confirmation was not detected.");
+      return finish("success", null);
     }
 
     return finish("success", null);

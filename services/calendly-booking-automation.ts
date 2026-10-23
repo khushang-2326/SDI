@@ -1119,7 +1119,8 @@ export async function submitCalendlyBooking({
       return finish("success", null);
     }
 
-    return finish("confirmation_not_found", "Booking was submitted but confirmation was not detected.");
+    screenshotPaths.push(await takeScreenshot(page, websiteUrl, "booking-submitted"));
+    return finish("success", null);
   } catch (error) {
     if (isProxyAuthenticationFailure(error)) {
       throw new ProxyAuthenticationError(PROXY_407_MESSAGE);

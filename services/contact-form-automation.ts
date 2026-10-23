@@ -2394,6 +2394,62 @@ export async function sweepAndCheckPreSubmitCheckboxes(
         }
       }
     }
+
+    // Option/Service Checkbox Group Fallback:
+    // If the form has option checkboxes (e.g. services, categories, check_list[]) and ZERO checkboxes
+    // are currently checked anywhere in the form, check at least the first non-marketing option to satisfy JS validation.
+    const anyChecked = await (root as any).evaluate((el: HTMLElement) => {
+      const allCb = Array.from(el.querySelectorAll("input[type='checkbox'], [role='checkbox']"));
+      return allCb.some((cb: any) => cb.checked || cb.getAttribute("aria-checked") === "true");
+    }).catch(() => false);
+
+    if (!anyChecked) {
+      for (const locatorGroup of targets) {
+        const count = await locatorGroup.count().catch(() => 0);
+        for (let i = 0; i < count; i++) {
+          const item = locatorGroup.nth(i);
+          const candidate = await item.evaluate((el: HTMLElement) => {
+            const isNative = el.tagName.toLowerCase() === "input";
+            const name = el.getAttribute("name") || "";
+            const id = el.id || "";
+            const parent = el.closest("label") || el.parentElement;
+            const text = (parent?.textContent || "").toLowerCase();
+            const isMarketing = /\b(newsletter|marketing|promo|promotions|discount|offers|subscribe)\b/i.test(name + " " + id + " " + text);
+            return {
+              isNative,
+              id: id || name || `checkbox_opt_${i}`,
+              validOption: !isMarketing
+            };
+          }).catch(() => null);
+
+          if (candidate && candidate.validOption) {
+            await item.check({ force: true }).catch(async () => {
+              await item.click({ force: true }).catch(() => undefined);
+            });
+            await item.evaluate((el: any) => {
+              if (el.tagName && el.tagName.toLowerCase() === "input") {
+                el.checked = true;
+                const tracker = (el as any)._valueTracker;
+                if (tracker) tracker.setValue(false);
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                el.dispatchEvent(new Event("change", { bubbles: true }));
+                if ((window as any).jQuery) {
+                  try { (window as any).jQuery(el).trigger("change"); } catch {}
+                }
+              } else {
+                el.setAttribute("aria-checked", "true");
+                el.dispatchEvent(new Event("click", { bubbles: true }));
+              }
+            }).catch(() => undefined);
+
+            checkedFields.push(`optionCheckbox:${candidate.id}`);
+            console.log(`[contact-form-automation] [PRE-SUBMIT-CHECKBOX] Auto-checked first service/option checkbox: "${candidate.id}" to satisfy form validation`);
+            break;
+          }
+        }
+        if (checkedFields.length > 0) break;
+      }
+    }
   } catch (err) {
     console.warn(`[contact-form-automation] [PRE-SUBMIT-CHECKBOX] Sweep warning:`, err);
   }
@@ -4177,7 +4233,7 @@ export async function submitContactForm({
       }
 
       // 3. Check for visible on-page validation errors, spam flags, or submission failure banners
-      const onPageError = await activePage.evaluate((formId) => {
+      const onPageError = await activePage.evaluate((args: { formId: string | null; explicitSuccess: boolean }) => {
         const errorSelectors = [
           ".wpcf7-response-output.wpcf7-spam-blocked",
           ".wpcf7-response-output.wpcf7-mail-sent-ng",
@@ -4230,7 +4286,12 @@ export async function submitContactForm({
         }
 
         // Check HTML5 constraint validation strictly on the submitted form if available, or non-search inputs
-        const targetScope = formId ? document.getElementById(formId) : null;
+        // If explicit success has ALREADY been confirmed by the server/network response, SKIP HTML5 :invalid checks!
+        // Successful AJAX submissions frequently call form.reset() or document.getElementById(formId).reset(),
+        // which clears inputs and causes HTML5 'required' constraints to report :invalid even though the submission succeeded.
+        if (args.explicitSuccess) return null;
+
+        const targetScope = args.formId ? document.getElementById(args.formId) : null;
         const invalidInputs = targetScope
           ? Array.from(targetScope.querySelectorAll("input:invalid:not([type='hidden']), textarea:invalid, select:invalid"))
           : Array.from(document.querySelectorAll("input:invalid:not([type='hidden']), textarea:invalid, select:invalid")).filter((el) => {
@@ -4256,7 +4317,7 @@ export async function submitContactForm({
         }
 
         return null;
-      }, submittedFormId).catch(() => null);
+      }, { formId: submittedFormId, explicitSuccess }).catch(() => null);
 
       if (onPageError) {
         throw new Error(`Website rejected submission: "${onPageError.slice(0, 150)}"`);

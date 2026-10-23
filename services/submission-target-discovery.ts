@@ -1647,11 +1647,11 @@ async function detectTargetWithLazyScroll(
     return null;
   }
 
-  // STEP 2: Wait a short bounded period for dynamic client-side form rendering (HubSpot, Marketo, React, Vue, CF7, Webflow, Acuity, LeadConnector)
+  // STEP 2: Wait a short bounded period for dynamic client-side form rendering (Squarespace, HubSpot, Marketo, React, Vue, CF7, Webflow, Acuity, LeadConnector)
   const dynamicFormAttached = await page
-    .locator("form, [class*='wpcf7'], [class*='wpforms'], [class*='hs-form'], [class*='gform'], [class*='ninja-form'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form'], iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='pardot'], iframe[src*='acuity'], iframe[src*='leadconnector']")
+    .locator("form, [class*='react-form-contents'], [class*='sqs-block-form'], [class*='sqs-site-style-form'], [class*='wpcf7'], [class*='wpforms'], [class*='hs-form'], [class*='gform'], [class*='ninja-form'], [class*='w-form'], [class*='_form'], iframe[src*='hsforms'], iframe[src*='marketo'], iframe[src*='pardot'], iframe[src*='acuity'], iframe[src*='leadconnector']")
     .first()
-    .waitFor({ state: "attached", timeout: 1200 })
+    .waitFor({ state: "attached", timeout: 3500 })
     .then(() => true)
     .catch(() => false);
 

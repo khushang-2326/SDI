@@ -1340,12 +1340,16 @@ export async function fillDetectedFields(scope: FormScope, leadData: LeadData): 
   }
 
   // 7. Subject
-  const subjectVal = (leadData.subject || "").trim();
+  let subjectVal = (leadData.subject || "").trim();
   const subjectCandidates = signals
     .filter((s) => !usedIndexes.has(s.index) && !s.isDisabled && !s.isReadOnly)
     .map((s) => ({ signal: s, cls: classifications.get(s.index)! }))
     .filter((item) => !item.cls.isNegative && item.cls.fieldType === "subject")
     .sort((a, b) => b.cls.confidence - a.cls.confidence);
+
+  if (!subjectVal && subjectCandidates.some((c) => c.signal.isRequired)) {
+    subjectVal = "Inquiry regarding your services";
+  }
 
   if (subjectVal && subjectCandidates.length > 0) {
     await tryFillFieldCandidates(subjectCandidates, "subject", "subject", subjectVal, "USER_DATA");
@@ -3518,6 +3522,7 @@ export async function submitContactForm({
   let page: Page | null = null;
   const submittedAt = new Date();
   let screenshotPath: string | null = null;
+  let submittedFormId: string | null = null;
   let filledFields: string[] = [];
   let skippedFields: string[] = [];
   let fillMetrics: FormFillMetrics | null = null;
@@ -3556,7 +3561,7 @@ export async function submitContactForm({
       throw new Error("Failed to initialize browser page.");
     }
     page.setDefaultTimeout(15000);
-    page.setDefaultNavigationTimeout(25000);
+    page.setDefaultNavigationTimeout(45000);
 
     // A contact form can be usable even when a legacy script, tracker, or other
     // resource prevents DOMContentLoaded/networkidle from completing. Continue
@@ -3579,8 +3584,8 @@ export async function submitContactForm({
     };
     activePage.on("response", responseHandler);
 
-    // Exact 25-second navigation-to-usable-page rule
-    const NAVIGATION_TIMEOUT_MS = 25000;
+    // Configurable navigation-to-usable-page rule (default 45s)
+    const NAVIGATION_TIMEOUT_MS = Math.min(45000, timeoutMs);
     const tNavStart = Date.now();
     let navResponse: any = null;
     let pageUsable = false;
@@ -3640,7 +3645,7 @@ export async function submitContactForm({
           if (navResponse) {
             await activePage.evaluate(() => window.stop()).catch(() => undefined);
           }
-          throw new Error(`NAVIGATION_TIMEOUT: Navigation to usable page timed out after 25 seconds for ${websiteUrl}`);
+          throw new Error(`NAVIGATION_TIMEOUT: Navigation to usable page timed out after ${Math.round(NAVIGATION_TIMEOUT_MS / 1000)} seconds for ${websiteUrl}`);
         }
       } finally {
         activePage.off("response", responseHandler);
@@ -4054,6 +4059,16 @@ export async function submitContactForm({
         filledFields.push(...preSubmitCheckboxes);
       }
 
+      // Capture submitted form ID to strictly scope post-submission constraint checks
+      submittedFormId = await submitButton.evaluate((btn) => {
+        const form = btn.closest("form");
+        if (!form) return null;
+        if (!form.id) {
+          form.id = "sdi_form_" + Math.random().toString(36).slice(2, 9);
+        }
+        return form.id;
+      }).catch(() => null);
+
       // Primary click execution
       let clickSucceeded = false;
       try {
@@ -4162,7 +4177,7 @@ export async function submitContactForm({
       }
 
       // 3. Check for visible on-page validation errors, spam flags, or submission failure banners
-      const onPageError = await activePage.evaluate(() => {
+      const onPageError = await activePage.evaluate((formId) => {
         const errorSelectors = [
           ".wpcf7-response-output.wpcf7-spam-blocked",
           ".wpcf7-response-output.wpcf7-mail-sent-ng",
@@ -4214,8 +4229,23 @@ export async function submitContactForm({
           }
         }
 
-        // Also check if any form inputs are currently marked invalid by HTML5 constraint validation
-        const invalidInputs = Array.from(document.querySelectorAll("input:invalid:not([type='hidden']), textarea:invalid, select:invalid"));
+        // Check HTML5 constraint validation strictly on the submitted form if available, or non-search inputs
+        const targetScope = formId ? document.getElementById(formId) : null;
+        const invalidInputs = targetScope
+          ? Array.from(targetScope.querySelectorAll("input:invalid:not([type='hidden']), textarea:invalid, select:invalid"))
+          : Array.from(document.querySelectorAll("input:invalid:not([type='hidden']), textarea:invalid, select:invalid")).filter((el) => {
+              const name = (el.getAttribute("name") || "").toLowerCase();
+              const type = (el.getAttribute("type") || "").toLowerCase();
+              const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
+              // Ignore search inputs (e.g. name="s", name="q", type="search") and inputs in header/nav
+              if (name === "s" || name === "q" || type === "search" || placeholder.includes("search") || el.closest("header, nav, [role='search']")) {
+                return false;
+              }
+              // If there are multiple forms and this input belongs to another separate form, don't flag global document
+              if (el.closest("form")) return false;
+              return true;
+            });
+
         for (const inp of invalidInputs) {
           const inputEl = inp as HTMLInputElement;
           if (inputEl.offsetParent !== null || window.getComputedStyle(inputEl).display !== "none") {
@@ -4226,7 +4256,7 @@ export async function submitContactForm({
         }
 
         return null;
-      }).catch(() => null);
+      }, submittedFormId).catch(() => null);
 
       if (onPageError) {
         throw new Error(`Website rejected submission: "${onPageError.slice(0, 150)}"`);

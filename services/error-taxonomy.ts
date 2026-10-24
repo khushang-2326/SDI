@@ -225,6 +225,8 @@ export function classifyErrorTaxonomy(
   if (
     combined.includes("err_name_not_resolved") ||
     combined.includes("enotfound") ||
+    combined.includes("eai_again") ||
+    combined.includes("dns_probe_finished") ||
     combined.includes("dns_unresolvable") ||
     (combined.includes("dns") && combined.includes("unresolv"))
   ) {

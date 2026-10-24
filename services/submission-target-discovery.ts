@@ -25,6 +25,7 @@ import { extractFeatureVector, extractUniversalFeatureVector } from "./discovery
 import { scoreAndRankCandidates } from "./discovery/hybrid-ranker";
 import { recordDiscoveryFeedback } from "./discovery/feedback-store";
 import { unhideHiddenFormContainers } from "./contact-form-automation";
+import { getAlternateDnsUrl, isDnsResolutionError } from "@/services/dns-fallback";
 import { waitForUniversalPageReadiness } from "./page-readiness";
 import type { CandidateFeatureVector, CandidateLocation, CandidateType } from "./discovery/types";
 export type { CandidateLocation, CandidateType };
@@ -688,7 +689,8 @@ export async function navigateForDiscovery(
   url: string,
   budgetMs: number,
   purpose: "discovery" | "form" | "booking" | "any" = "discovery",
-  stage: DiscoveryTimeoutStage = "INITIAL_NAVIGATION"
+  stage: DiscoveryTimeoutStage = "INITIAL_NAVIGATION",
+  isAltAttempt: boolean = false
 ): Promise<DiscoveryNavigationResult> {
   const tStart = Date.now();
   const maxNavTimeout = Math.min(25000, Math.max(3000, budgetMs));
@@ -753,6 +755,26 @@ export async function navigateForDiscovery(
     }
     const errStr = navError?.message || String(navError || "");
     if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
+      if (isDnsResolutionError(errStr) && !isAltAttempt) {
+        const altUrl = getAlternateDnsUrl(url);
+        if (altUrl && altUrl !== url) {
+          console.log(`[DNS-RECOVERY] ${url} failed with DNS error (${errStr}). Attempting fallback to ${altUrl}...`);
+          await page.evaluate(() => window.stop()).catch(() => {});
+          await page.waitForTimeout(200);
+          const altResult = await navigateForDiscovery(
+            page,
+            altUrl,
+            budgetMs - (Date.now() - tStart),
+            purpose,
+            stage,
+            true
+          );
+          if (altResult.success || altResult.committed) {
+            console.log(`[DNS-RECOVERY] Succeeded with alternate DNS target: ${altUrl}`);
+            return altResult;
+          }
+        }
+      }
       return {
         success: false,
         committed: false,

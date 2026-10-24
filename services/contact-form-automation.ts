@@ -22,6 +22,7 @@ import { dismissCookieBanners, startParallelCookieGuardian, installCookieGuardia
 import { buildAllPhoneFormats, resolveOptimalPhoneValue } from "./phone-format-helper";
 import { waitForUniversalPageReadiness } from "./page-readiness";
 import { evaluateFinalAutomationSuccess } from "./success-invariants";
+import { getAlternateDnsUrl, isDnsResolutionError } from "@/services/dns-fallback";
 import {
   type FieldSignals,
   type SemanticFieldType,
@@ -3705,11 +3706,29 @@ export async function submitContactForm({
         const gotoPromise = activePage.goto(websiteUrl, {
           waitUntil: "commit",
           timeout: NAVIGATION_TIMEOUT_MS
-        }).catch((err: any) => {
+        }).catch(async (err: any) => {
           if (isProxyAuthenticationFailure(err) || proxy407Hit) {
             throw new ProxyAuthenticationError(PROXY_407_MESSAGE);
           }
           const errStr = err?.message || String(err);
+          if (isDnsResolutionError(errStr)) {
+            const altUrl = getAlternateDnsUrl(websiteUrl);
+            if (altUrl && altUrl !== websiteUrl) {
+              console.log(`[DNS-FALLBACK] Primary URL ${websiteUrl} threw DNS error (${errStr}). Retrying with alternate DNS target ${altUrl}...`);
+              await activePage.evaluate(() => window.stop()).catch(() => {});
+              await activePage.waitForTimeout(200);
+              try {
+                const altRes = await activePage.goto(altUrl, {
+                  waitUntil: "commit",
+                  timeout: NAVIGATION_TIMEOUT_MS
+                });
+                websiteUrl = altUrl;
+                return altRes;
+              } catch {
+                throw err;
+              }
+            }
+          }
           if (/ERR_NAME_NOT_RESOLVED|ERR_CONNECTION_REFUSED|ERR_ADDRESS_UNREACHABLE|ERR_CERT_COMMON_NAME_INVALID/i.test(errStr)) {
             throw err;
           }

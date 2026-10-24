@@ -4,31 +4,34 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
   let score = 0;
 
   // 1. Semantic Intent Signals (Multi-Lingual Stems)
+  // Direct Contact intent: 85 - 95
   if (features.contactKeywordSignals > 0) {
-    score = Math.max(score, features.contactKeywordSignals * 100);
+    score = Math.max(score, 85 + features.contactKeywordSignals * 10);
   }
+  // Direct Booking intent: 75 - 85
   if (features.bookingKeywordSignals > 0) {
-    score = Math.max(score, features.bookingKeywordSignals * 95);
+    score = Math.max(score, 75 + features.bookingKeywordSignals * 10);
   }
+  // Consultation / Lead intent: 65 - 75
   if (features.consultationSignals > 0) {
-    score = Math.max(score, features.consultationSignals * 88);
+    score = Math.max(score, 65 + features.consultationSignals * 10);
   }
   if (features.leadSignals > 0) {
-    score = Math.max(score, features.leadSignals * 85);
+    score = Math.max(score, 60 + features.leadSignals * 10);
   }
 
-  // Broad Contextual Intent Categories
+  // Broad Contextual Intent Categories (lower base so they never outrank direct contact/booking)
   if (features.conversationIntent > 0) {
-    score = Math.max(score, features.conversationIntent * 80);
+    score = Math.max(score, 50 + features.conversationIntent * 10);
   }
   if (features.projectIntent > 0) {
-    score = Math.max(score, features.projectIntent * 80);
+    score = Math.max(score, 50 + features.projectIntent * 10);
   }
   if (features.advisoryIntent > 0) {
-    score = Math.max(score, features.advisoryIntent * 80);
+    score = Math.max(score, 35 + features.advisoryIntent * 5);
   }
   if (features.informationIntent > 0) {
-    score = Math.max(score, features.informationIntent * 70);
+    score = Math.max(score, 25 + features.informationIntent * 5);
   }
 
   // 2. Universal Multi-Lingual URL Path Matches
@@ -44,66 +47,62 @@ export function calculateRuleScore(features: CandidateFeatureVector): number {
     universalPathTokens.some((target) => token.includes(target))
   );
   if (hasPathMatch) {
-    score += 30;
+    if (score > 0) {
+      score += 5; // Path reinforces text intent
+    } else {
+      score = 45; // Path alone gives decent candidate score
+    }
   }
 
-  const hasIntentOrPath =
-    features.contactKeywordSignals > 0 ||
-    features.bookingKeywordSignals > 0 ||
-    features.consultationSignals > 0 ||
-    features.leadSignals > 0 ||
-    features.conversationIntent > 0 ||
-    features.projectIntent > 0 ||
-    features.advisoryIntent > 0 ||
-    hasPathMatch;
+  const hasIntentOrPath = score > 0;
 
-  // 3. Structural Topology Boosts: Enforce Tier 1 (Header/Nav) -> Tier 2 (Footer) -> Tier 3 (Body/Main content)
+  // 3. Structural Topology Boosts: Subtle modifiers (+2 to +6) to break ties without overriding intent
   if (hasIntentOrPath) {
     if (features.isHeader || features.isNav || features.mobileMenuSource) {
-      // Tier 1 Base: 1000+ points (Header / Navbar)
-      score += 1000;
-      // Rightmost item in nav/header is predominantly the contact/lead CTA
+      score += 6;
       if (features.isRightmostNav) {
-        score += 50;
+        score += 4;
       }
     } else if (features.isFooter) {
-      // Tier 2 Base: 500+ points (Footer)
-      score += 500;
+      score += 3;
     } else if (features.isHero || features.isCTA || features.isModalTrigger) {
-      // Tier 3 Base: 250+ points (Body / Hero / Main CTAs)
-      score += 250;
+      score += 2;
     } else {
-      // Tier 3 Base: 100+ points (Generic body)
-      score += 100;
+      score += 1;
     }
 
     if (features.isProminentButton) {
-      score += 20;
+      score += 3;
     }
 
     if (features.isModalTrigger) {
-      score += 30;
+      score += 4;
     }
   }
 
   // 4. Element Type Boosts
   if (features.isButton || features.hasOnClick) {
-    if (score >= 60) score += 10;
+    if (score >= 40) score += 3;
   }
 
   // 5. Heading Context Boost
   if (features.pageHeadingKeywords.length > 0 && score >= 40) {
-    score += 10;
+    score += 2;
   }
 
   // 6. Provider Signature Boost (Direct Hubspot, Calendly, Typeform links)
-  if (features.recognizedProvider && score >= 40) {
-    score += 25;
+  if (features.recognizedProvider) {
+    score = Math.max(score, 90);
   }
 
-  // 7. Penalties
+  // 7. Penalties for negative paths & signals
   if (features.negativeSignals > 0) {
-    score -= features.negativeSignals * 65;
+    score -= features.negativeSignals * 35;
+  }
+
+  const urlLower = features.url.toLowerCase();
+  if (/portfolio|case-stud|sub-service|article|category|author|gallery|team|careers|jobs/i.test(urlLower)) {
+    score -= 40;
   }
 
   // If in body without intent signals or path match, heavily penalize

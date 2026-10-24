@@ -47,16 +47,72 @@ export function isSupportedExternalTarget(url: URL): boolean {
 export async function extractRawCandidates(page: Page, baseUrl: string): Promise<RawCandidate[]> {
   const base = new URL(baseUrl);
 
-  // 1. Controlled Hover / Click on Dropdown Menus (reveal hidden submenu links)
+  // 1. Comprehensive Submenu & Dropdown Expansion (Hover, Click, and Unhide)
   try {
-    const dropdownParents = page.locator("nav li:has(ul), .dropdown, [aria-haspopup='true'], .nav-item.dropdown");
+    // 1a. Unhide all submenu, dropdown, mega-menu, offcanvas, and drawer containers in DOM
+    await page.evaluate(() => {
+      const submenuSelectors = [
+        "ul.sub-menu", "ul.dropdown-menu", ".dropdown-content", ".sub-nav", ".submenu",
+        ".elementor-nav-menu--dropdown", ".elementor-sub-item", ".w-dropdown-list",
+        ".mega-menu", "[class*='mega-menu']", "[class*='megamenu']",
+        "[class*='sub-menu']", "[class*='submenu']", "[class*='dropdown-menu']",
+        "nav ul ul", "header ul ul", "[role='menu']", "[role='menubar'] [role='menu']",
+        ".offcanvas", "[class*='offcanvas']", "[class*='drawer']", "[class*='slideout']",
+        ".nav-dropdown", ".has-dropdown > ul", ".menu-item-has-children > ul",
+        "[aria-hidden='true'][class*='menu']", "[aria-hidden='true'][class*='nav']"
+      ];
+
+      document.querySelectorAll(submenuSelectors.join(", ")).forEach((el) => {
+        const htmlEl = el as HTMLElement;
+        if (!htmlEl) return;
+        const style = window.getComputedStyle(htmlEl);
+        if (style.display === "none") htmlEl.style.display = "block";
+        if (style.visibility === "hidden") htmlEl.style.visibility = "visible";
+        if (style.opacity === "0") htmlEl.style.opacity = "1";
+        if (htmlEl.getAttribute("aria-hidden") === "true") htmlEl.setAttribute("aria-hidden", "false");
+      });
+
+      // Mark parent menu items as expanded
+      const parentSelectors = [
+        ".menu-item-has-children", ".has-submenu", ".has-dropdown", ".dropdown",
+        ".nav-item.dropdown", "[aria-haspopup='true']", "[aria-haspopup='menu']",
+        ".w-dropdown", ".elementor-item-has-children", ".dropdown-toggle"
+      ];
+      document.querySelectorAll(parentSelectors.join(", ")).forEach((parent) => {
+        if (parent.getAttribute("aria-expanded") === "false") {
+          parent.setAttribute("aria-expanded", "true");
+        }
+        parent.classList.add("open", "show", "is-active", "active");
+      });
+    }).catch(() => undefined);
+
+    // 1b. Controlled Hover / Click on Dropdown Parent Elements
+    const dropdownParents = page.locator(
+      "nav li:has(ul), header li:has(ul), .menu-item-has-children, .dropdown, [aria-haspopup='true'], [aria-haspopup='menu'], .nav-item.dropdown, .has-submenu, .has-dropdown, .w-dropdown-toggle, .elementor-item-has-children, a.dropdown-toggle, button.dropdown-toggle, [data-toggle='dropdown'], [data-bs-toggle='dropdown']"
+    );
     const count = await dropdownParents.count().catch(() => 0);
-    const inspectCount = Math.min(count, 4);
+    const inspectCount = Math.min(count, 8);
     for (let i = 0; i < inspectCount; i++) {
       const parent = dropdownParents.nth(i);
       const text = (await parent.innerText().catch(() => "")).toLowerCase();
-      if (/company|about|contact|connect|service|more|kontakt|contacto|sales|expert/i.test(text)) {
-        await parent.hover({ timeout: 500 }).catch(() => undefined);
+      if (/company|about|contact|connect|service|more|kontakt|contacto|sales|expert|quote|talk|help|inquir/i.test(text)) {
+        await parent.hover({ timeout: 400 }).catch(() => undefined);
+        const isExpanded = await parent.getAttribute("aria-expanded").catch(() => null);
+        if (isExpanded === "false" || isExpanded === null) {
+          await parent.click({ timeout: 400 }).catch(() => undefined);
+        }
+      }
+    }
+
+    // 1c. If desktop nav is collapsed into a hamburger/menu-toggle, trigger it to expose menu links
+    const hamburger = page.locator(
+      "button.navbar-toggler, .hamburger, .menu-toggle, .mobile-menu-btn, button[aria-label*='menu' i], button[aria-label*='navigation' i]"
+    ).first();
+    if (await hamburger.isVisible().catch(() => false)) {
+      const ariaExp = await hamburger.getAttribute("aria-expanded").catch(() => null);
+      if (ariaExp !== "true") {
+        await hamburger.click({ timeout: 800 }).catch(() => undefined);
+        await page.waitForTimeout(300);
       }
     }
   } catch {
@@ -140,7 +196,7 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
           let location: CandidateLocation = "body";
           if (isMobile) {
             location = "mobile menu";
-          } else if (anchor.closest("nav, [role='navigation'], .navbar, .menu, .nav, [class*='nav-menu']")) {
+          } else if (anchor.closest("nav, [role='navigation'], .navbar, .menu, .nav, [class*='nav-menu'], .sub-menu, .dropdown-menu, [class*='sub-menu'], [class*='dropdown'], ul ul, .elementor-sub-item, .w-dropdown-list")) {
             location = "nav";
           } else if (anchor.closest("header, .site-header, .header, #header, [role='banner']")) {
             location = "header";
@@ -330,8 +386,13 @@ export async function extractRawCandidates(page: Page, baseUrl: string): Promise
               return baseRoot && resolvedRoot && baseRoot === resolvedRoot;
             };
 
+            const currentLoadedOrigin = (() => {
+              try { return new URL(page.url()).origin; } catch { return ""; }
+            })();
+
             const isAllowedOrigin =
               resolved.origin === base.origin ||
+              (currentLoadedOrigin && resolved.origin === currentLoadedOrigin) ||
               isSameBrandCrossTld() ||
               isSupportedExternalTarget(resolved);
 

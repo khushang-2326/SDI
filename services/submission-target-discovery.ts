@@ -182,9 +182,24 @@ const INTERACTIVE_DISCOVERY_TRIGGER_SELECTOR = [
   ".menu-toggle",
   ".mobile-menu-btn",
   "button.navbar-toggler",
-  ".hamburger"
+  ".hamburger",
+  "nav li.menu-item-has-children > a",
+  "header li.menu-item-has-children > a",
+  "[aria-haspopup='true']",
+  "[aria-haspopup='menu']",
+  ".dropdown-toggle",
+  "[data-toggle='dropdown']",
+  "[data-bs-toggle='dropdown']",
+  ".w-dropdown-toggle",
+  ".elementor-item-has-children",
+  "a.menu-toggle",
+  "a[href*='#contact' i]",
+  "a[href*='#quote' i]",
+  "a[href*='#inquir' i]",
+  "[data-toggle='collapse']",
+  "[data-bs-toggle='collapse']"
 ].join(", ");
-const MAX_INTERACTIVE_DISCOVERY_CLICKS = 2;
+const MAX_INTERACTIVE_DISCOVERY_CLICKS = 4;
 
 const SKIPPED_PATH_PATTERN =
   /\/(privacy|terms|cookies?|blog|news|articles?|category|tags?|login|sign-?in|sign-?up|cart|checkout)(\/|$)/i;
@@ -999,8 +1014,9 @@ async function getVisibleFormScore(container: Page | Frame) {
           const rect = element.getBoundingClientRect();
           const hasDimensions = rect.height > 0 || rect.width > 0;
 
-          // Allow inputs in forms or containers even if zero-height / unrendered in mocks
-          if (!knownContainerMatched && (!isVisible && !hasDimensions)) continue;
+          // Allow inputs in forms or containers even if zero-height / unrendered in mocks or hidden inside submenus/drawers
+          const isInFormOrMenu = Boolean(element.closest("form, [role='form'], [class*='form'], [class*='modal'], [class*='drawer'], [class*='submenu'], [class*='sub-menu'], [class*='dropdown']"));
+          if (!knownContainerMatched && !isInFormOrMenu && (!isVisible && !hasDimensions)) continue;
 
           if (tag === "textarea") {
             const ta = element as HTMLTextAreaElement;
@@ -1222,11 +1238,13 @@ async function detectContactTarget(
   }
 
   const relevantFrames = page.frames().filter((frame) => {
-    if (frame === page.mainFrame() || !/^https?:/i.test(frame.url())) return false;
+    if (frame === page.mainFrame() || frame.isDetached()) return false;
     const fUrl = frame.url().toLowerCase();
+    const fName = frame.name().toLowerCase();
     if (/google|doubleclick|facebook|analytics|gtm|clarity|hotjar|segment|datadog|sentry|recaptcha|turnstile|hcaptcha/i.test(fUrl)) return false;
+    if (!/^https?:/i.test(fUrl) && !/hs-form|hubspot|form/i.test(fName)) return false;
     return true;
-  }).slice(0, 5);
+  }).slice(0, 8);
 
   for (const frame of relevantFrames) {
     await unhideHiddenFormContainers(frame).catch(() => {});
@@ -1390,7 +1408,23 @@ async function detectTargetOnPage(
     };
   }
 
-  // 1. Prioritize an actual visible form on the host page or relevant frames over unverified iframes/chat widgets
+  // 1. Check for inlined HubSpot forms or visible forms on page/frames
+  const hasHubSpotInlinedForm = await page.evaluate(() => {
+    return Boolean(document.querySelector("div.hbspt-form, iframe[id*='hs-form'], iframe[class*='hs-form']"));
+  }).catch(() => false);
+  if (hasHubSpotInlinedForm) {
+    return {
+      websiteUrl: url,
+      discoveredUrl: currentUrl,
+      targetType: "contact_form",
+      confidence: 95,
+      reason: `Inlined HubSpot form detected; ${candidateReason}`,
+      checkedUrls: [],
+      screenshotPath: await takeScreenshot(page, url, "hubspot-inlined-form-discovered").catch(() => null)
+    };
+  }
+
+  // 1b. Prioritize an actual visible form on the host page or relevant frames over unverified iframes/chat widgets
   const contactTarget = await detectContactTarget(page, url, candidateReason);
   if (contactTarget) return contactTarget;
 
@@ -2273,6 +2307,9 @@ async function discoverSubmissionTargetsInternal({
     const isNegativeInfoPath = (urlStr: string) => {
       try {
         const p = new URL(urlStr).pathname.toLowerCase();
+        if (/(contact|get-in-touch|reach-us|talk-to-us|contact-us|inquiry|inquiries|quote|book)/i.test(p)) {
+          return false;
+        }
         return /\/(services|locations|careers|jobs|blog|news|press|privacy|terms|login|cart|checkout|publications|case-studies)\b/i.test(p);
       } catch {
         return false;

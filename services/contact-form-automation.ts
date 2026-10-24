@@ -2141,14 +2141,51 @@ async function scorePrimaryForm(form: Locator) {
 
 export async function unhideHiddenFormContainers(page: Page | Frame) {
   await page.evaluate(() => {
-    const selector = "form, [class*='gform_wrapper'], [class*='forminator'], [id*='gform_wrapper'], [class*='wpcf7'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form'], iframe[src*='form'], iframe[src*='prospector'], iframe[src*='hubspot'], iframe[src*='lead']";
+    // 1. Unhide forms, framework wrappers, and embedded iframes (and their parent submenus/drawers up to 5 levels)
+    const selector = "form, [class*='gform_wrapper'], [class*='forminator'], [id*='gform_wrapper'], [class*='wpcf7'], [class*='w-form'], [class*='sqs-block-form'], [class*='_form'], iframe[src*='form'], iframe[src*='prospector'], iframe[src*='hubspot'], iframe[src*='lead'], iframe[id*='hs-form'], iframe[class*='hs-form'], div.hbspt-form";
     document.querySelectorAll(selector).forEach((el) => {
-      const htmlEl = el as HTMLElement;
-      if (htmlEl && (htmlEl.style?.display === "none" || window.getComputedStyle(htmlEl).display === "none")) {
-        htmlEl.style.display = "block";
+      let curr: HTMLElement | null = el as HTMLElement;
+      let depth = 0;
+      while (curr && curr !== document.body && depth < 5) {
+        if (curr.style?.display === "none" || window.getComputedStyle(curr).display === "none") {
+          curr.style.display = "block";
+        }
+        if (curr.style?.visibility === "hidden" || window.getComputedStyle(curr).visibility === "hidden") {
+          curr.style.visibility = "visible";
+        }
+        if (curr.style?.opacity === "0" || window.getComputedStyle(curr).opacity === "0") {
+          curr.style.opacity = "1";
+        }
+        if (curr.getAttribute("aria-hidden") === "true") {
+          curr.setAttribute("aria-hidden", "false");
+        }
+        curr = curr.parentElement;
+        depth++;
       }
-      if (htmlEl && (htmlEl.style?.visibility === "hidden" || window.getComputedStyle(htmlEl).visibility === "hidden")) {
-        htmlEl.style.visibility = "visible";
+    });
+
+    // 2. Unhide submenus, dropdowns, and drawers that contain forms or input fields
+    const submenuContainers = [
+      "ul.sub-menu", "ul.dropdown-menu", ".dropdown-content", ".sub-nav", ".submenu",
+      ".elementor-nav-menu--dropdown", ".elementor-sub-item", ".w-dropdown-list",
+      ".mega-menu", "[class*='mega-menu']", "[class*='megamenu']",
+      "[class*='sub-menu']", "[class*='submenu']", "[class*='dropdown-menu']",
+      ".offcanvas", "[class*='offcanvas']", "[class*='drawer']", "[class*='slideout']",
+      ".nav-dropdown"
+    ];
+    document.querySelectorAll(submenuContainers.join(", ")).forEach((container) => {
+      const hasInputs = container.querySelectorAll("input:not([type=hidden]):not([type=search]), textarea, select").length > 0;
+      if (hasInputs) {
+        const html = container as HTMLElement;
+        if (html.style?.display === "none" || window.getComputedStyle(html).display === "none") {
+          html.style.display = "block";
+        }
+        if (html.style?.visibility === "hidden" || window.getComputedStyle(html).visibility === "hidden") {
+          html.style.visibility = "visible";
+        }
+        if (html.style?.opacity === "0" || window.getComputedStyle(html).opacity === "0") {
+          html.style.opacity = "1";
+        }
       }
     });
   }).catch(() => undefined);
@@ -2196,8 +2233,25 @@ async function findPrimaryForm(page: Page) {
 
   await addVisibleForms(page.locator("form"));
   for (const frame of page.frames()) {
-    if (frame === page.mainFrame() || frame.isDetached() || !frame.url() || frame.url() === "about:blank") continue;
+    if (frame === page.mainFrame() || frame.isDetached()) continue;
+    const fUrl = frame.url() || "";
+    const fName = frame.name() || "";
+    const isLikelyFormFrame = /^https?:/i.test(fUrl) || /hs-form|hubspot|form/i.test(fName);
+    if (!isLikelyFormFrame) continue;
     await addVisibleForms(frame.locator("form"));
+  }
+
+  // If no visible form found in top DOM, check forms inside submenus/drawers/modals
+  if (candidates.length === 0) {
+    const hiddenForms = page.locator("form");
+    const count = await hiddenForms.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const f = hiddenForms.nth(i);
+      const inputCount = await f.locator("input:not([type=hidden]):not([type=search]), textarea").count().catch(() => 0);
+      if (inputCount >= 2) {
+        candidates.push(f);
+      }
+    }
   }
 
   let best: { form: Locator; score: number } | null = null;
